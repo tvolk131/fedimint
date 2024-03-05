@@ -22,6 +22,10 @@ path = "src/bin/gatewayd.rs"
 name = "gateway-cln-extension"
 path = "src/bin/cln_extension.rs"
 
+[[bin]]
+name = "gateway-ldk-extension"
+path = "src/bin/ldk_extension.rs"
+
 [[test]]
 name = "gatewayd-integration-tests"
 path = "tests/integration_tests.rs"

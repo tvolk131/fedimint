@@ -65,8 +65,6 @@ use fedimint_wallet_client::{
 use futures::stream::StreamExt;
 use gateway_lnrpc::intercept_htlc_response::Action;
 use gateway_lnrpc::{GetNodeInfoResponse, InterceptHtlcRequest, InterceptHtlcResponse};
-use ldk_node::bitcoin::hashes::Hash;
-use ldk_node::lightning::ln::PaymentHash;
 use ldk_node::lightning_invoice::Bolt11Invoice as LdkBolt11Invoice;
 use lightning::{ILnRpcClient, LightningBuilder, LightningMode, LightningRpcError};
 use lightning_invoice::{Bolt11Invoice, RoutingFees};

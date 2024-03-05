@@ -28,6 +28,23 @@ service GatewayLightning {
   rpc RouteHtlcs(EmptyRequest) returns (stream InterceptHtlcRequest) {}
 
   rpc CompleteHtlc(InterceptHtlcResponse) returns (EmptyResponse) {}
+
+  rpc SyncToChain(EmptyRequest) returns (EmptyResponse) {}
+
+  rpc GetNewAddress(GetNewAddressRequest) returns (GetNewAddressResponse) {}
+
+  // TODO: Do we want this to wait until the peer has connected before returning? If not, we probably need another RPC
+  rpc ConnectToPeer(ConnectToPeerRequest) returns (ConnectToPeerResponse) {}
+
+  rpc OpenChannel(OpenChannelRequest) returns (EmptyResponse) {}
+}
+
+message OpenChannelRequest {
+  string id = 1;
+
+  int32 amount_msats = 2;
+
+  int32 push_msats = 3;
 }
 
 message EmptyRequest {}
