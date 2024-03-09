@@ -67,8 +67,8 @@ use lightning::{ILnRpcClient, LightningBuilder, LightningMode, LightningRpcError
 use lightning_invoice::RoutingFees;
 use rand::rngs::OsRng;
 use rpc::{
-    FederationInfo, GatewayFedConfig, GatewayInfo, LeaveFedPayload, SetConfigurationPayload,
-    V1_API_ENDPOINT,
+    ConnectToPeerPayload, FederationInfo, GatewayFedConfig, GatewayInfo, LeaveFedPayload,
+    OpenChannelPayload, SetConfigurationPayload, WaitForChainSyncPayload, V1_API_ENDPOINT,
 };
 use secp256k1::PublicKey;
 use state_machine::pay::OutgoingPaymentError;
@@ -1127,6 +1127,46 @@ impl Gateway {
         Ok(())
     }
 
+    pub async fn handle_connect_to_peer_msg(
+        &self,
+        ConnectToPeerPayload { pubkey, host }: ConnectToPeerPayload,
+    ) -> Result<()> {
+        let context = self.get_lightning_context().await?;
+        context.lnrpc.connect_to_peer(pubkey, host).await?;
+        Ok(())
+    }
+
+    pub async fn handle_get_funding_address_msg(&self) -> Result<Address> {
+        let context = self.get_lightning_context().await?;
+        let response = context.lnrpc.get_funding_address().await?;
+        Address::from_str(&response.address).map_err(|e| GatewayError::ResponseParseError(e.into()))
+    }
+
+    pub async fn handle_open_channel_msg(
+        &self,
+        OpenChannelPayload {
+            pubkey,
+            channel_size_sats,
+            push_amount_sats,
+        }: OpenChannelPayload,
+    ) -> Result<()> {
+        let context = self.get_lightning_context().await?;
+        context
+            .lnrpc
+            .open_channel(pubkey, channel_size_sats, push_amount_sats)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn handle_wait_for_chain_sync_msg(
+        &self,
+        WaitForChainSyncPayload { block_height }: WaitForChainSyncPayload,
+    ) -> Result<()> {
+        let context = self.get_lightning_context().await?;
+        context.lnrpc.wait_for_chain_sync(block_height).await?;
+        Ok(())
+    }
+
     /// Updates the routing fees for every federation configuration. Also
     /// triggers a re-register of the gateway with all federations.
     ///
@@ -1593,6 +1633,8 @@ pub enum GatewayError {
     InsufficientFunds,
     #[error("Federation already connected")]
     FederationAlreadyConnected,
+    #[error("Error parsing response: {}", OptStacktrace(.0))]
+    ResponseParseError(anyhow::Error),
 }
 
 impl IntoResponse for GatewayError {

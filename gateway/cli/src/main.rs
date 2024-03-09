@@ -6,8 +6,9 @@ use fedimint_core::{fedimint_build_code_version_env, BitcoinAmountOrAll};
 use fedimint_logging::TracingSetup;
 use ln_gateway::rpc::rpc_client::GatewayRpcClient;
 use ln_gateway::rpc::{
-    BackupPayload, BalancePayload, ConfigPayload, ConnectFedPayload, DepositAddressPayload,
-    LeaveFedPayload, RestorePayload, SetConfigurationPayload, WithdrawPayload, V1_API_ENDPOINT,
+    BackupPayload, BalancePayload, ConfigPayload, ConnectFedPayload, ConnectToPeerPayload,
+    DepositAddressPayload, LeaveFedPayload, OpenChannelPayload, RestorePayload,
+    SetConfigurationPayload, WaitForChainSyncPayload, WithdrawPayload, V1_API_ENDPOINT,
 };
 use serde::Serialize;
 
@@ -91,6 +92,40 @@ pub enum Commands {
 
         #[clap(long)]
         network: Option<bitcoin::Network>,
+    },
+    #[command(subcommand)]
+    Lightning(LightningCommands),
+}
+
+#[derive(Subcommand)]
+pub enum LightningCommands {
+    /// Connect to another lightning node
+    ConnectToPeer {
+        #[clap(long)]
+        pubkey: String,
+
+        #[clap(long)]
+        host: String,
+    },
+    /// Get a Bitcoin address to fund the gateway
+    GetFundingAddress,
+    /// Open a channel with another lightning node
+    OpenChannel {
+        /// The public key of the node to open a channel with
+        #[clap(long)]
+        pubkey: String,
+        /// The amount to fund the channel with
+        #[clap(long)]
+        channel_size_sats: u64,
+        /// The amount to push to the other side of the channel
+        #[clap(long)]
+        push_amount_sats: u64,
+    },
+    /// Wait for the lightning node to be synced with the blockchain
+    WaitForChainSync {
+        /// The block height to wait for
+        #[clap(long)]
+        block_height: u32,
     },
 }
 
@@ -194,6 +229,36 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .await?;
         }
+
+        Commands::Lightning(lightning_command) => match lightning_command {
+            LightningCommands::ConnectToPeer { pubkey, host } => {
+                client()
+                    .connect_to_peer(ConnectToPeerPayload { pubkey, host })
+                    .await?;
+            }
+            LightningCommands::GetFundingAddress => {
+                let response = client().get_funding_address().await?;
+                print_response(response).await;
+            }
+            LightningCommands::OpenChannel {
+                pubkey,
+                channel_size_sats,
+                push_amount_sats,
+            } => {
+                client()
+                    .open_channel(OpenChannelPayload {
+                        pubkey,
+                        channel_size_sats,
+                        push_amount_sats,
+                    })
+                    .await?;
+            }
+            LightningCommands::WaitForChainSync { block_height } => {
+                client()
+                    .wait_for_chain_sync(WaitForChainSyncPayload { block_height })
+                    .await?;
+            }
+        },
     }
 
     Ok(())

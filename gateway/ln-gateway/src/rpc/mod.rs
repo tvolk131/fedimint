@@ -93,3 +93,21 @@ pub struct SetConfigurationPayload {
     pub routing_fees: Option<String>,
     pub network: Option<Network>,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ConnectToPeerPayload {
+    pub pubkey: String,
+    pub host: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OpenChannelPayload {
+    pub pubkey: String,
+    pub channel_size_sats: u64,
+    pub push_amount_sats: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WaitForChainSyncPayload {
+    pub block_height: u32,
+}

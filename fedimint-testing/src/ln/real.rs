@@ -16,8 +16,8 @@ use ldk_node::io::SqliteStore;
 use ldk_node::{Builder, Event, LogLevel, NetAddress, Node};
 use lightning_invoice::Bolt11Invoice;
 use ln_gateway::gateway_lnrpc::{
-    EmptyResponse, GetNodeInfoResponse, GetRouteHintsResponse, InterceptHtlcResponse,
-    PayInvoiceRequest, PayInvoiceResponse,
+    EmptyResponse, GetFundingAddressResponse, GetNodeInfoResponse, GetRouteHintsResponse,
+    InterceptHtlcResponse, PayInvoiceRequest, PayInvoiceResponse,
 };
 use ln_gateway::lightning::cln::{NetworkLnRpcClient, RouteHtlcStream};
 use ln_gateway::lightning::lnd::GatewayLndClient;
@@ -140,6 +140,36 @@ impl ILnRpcClient for ClnLightningTest {
         htlc: InterceptHtlcResponse,
     ) -> Result<EmptyResponse, LightningRpcError> {
         self.lnrpc.complete_htlc(htlc).await
+    }
+
+    async fn connect_to_peer(
+        &self,
+        pubkey: String,
+        host: String,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        self.lnrpc.connect_to_peer(pubkey, host).await
+    }
+
+    async fn get_funding_address(&self) -> Result<GetFundingAddressResponse, LightningRpcError> {
+        self.lnrpc.get_funding_address().await
+    }
+
+    async fn open_channel(
+        &self,
+        pubkey: String,
+        channel_size_sats: u64,
+        push_amount_sats: u64,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        self.lnrpc
+            .open_channel(pubkey, channel_size_sats, push_amount_sats)
+            .await
+    }
+
+    async fn wait_for_chain_sync(
+        &self,
+        block_height: u32,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        self.lnrpc.wait_for_chain_sync(block_height).await
     }
 }
 
@@ -298,6 +328,36 @@ impl ILnRpcClient for LndLightningTest {
         htlc: InterceptHtlcResponse,
     ) -> Result<EmptyResponse, LightningRpcError> {
         self.lnrpc.complete_htlc(htlc).await
+    }
+
+    async fn connect_to_peer(
+        &self,
+        pubkey: String,
+        host: String,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        self.lnrpc.connect_to_peer(pubkey, host).await
+    }
+
+    async fn get_funding_address(&self) -> Result<GetFundingAddressResponse, LightningRpcError> {
+        self.lnrpc.get_funding_address().await
+    }
+
+    async fn open_channel(
+        &self,
+        pubkey: String,
+        channel_size_sats: u64,
+        push_amount_sats: u64,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        self.lnrpc
+            .open_channel(pubkey, channel_size_sats, push_amount_sats)
+            .await
+    }
+
+    async fn wait_for_chain_sync(
+        &self,
+        block_height: u32,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        self.lnrpc.wait_for_chain_sync(block_height).await
     }
 }
 
@@ -599,7 +659,7 @@ impl LdkLightningTest {
     pub async fn open_channel(
         &self,
         amount: Amount,
-        node_pubkey: PublicKey,
+        pubkey: PublicKey,
         address: String,
         bitcoin: Box<dyn BitcoinTest + Send + Sync>,
     ) -> anyhow::Result<()> {
@@ -613,7 +673,7 @@ impl LdkLightningTest {
             .lock()
             .await
             .send(LdkMessage::OpenChannelRequest {
-                node_id: node_pubkey,
+                node_id: pubkey,
                 amount: amount.msats / 1000,
                 connect_address,
                 response_sender: sender,
@@ -635,7 +695,7 @@ impl LdkLightningTest {
                     bitcoin.mine_blocks(6).await;
                 }
                 LdkMessage::OpenChannelResponse => {
-                    info!("Successfully opened channel to {node_pubkey}");
+                    info!("Successfully opened channel to {pubkey}");
                     return Ok(());
                 }
                 _ => {
@@ -727,6 +787,38 @@ impl ILnRpcClient for LdkLightningTest {
         _htlc: InterceptHtlcResponse,
     ) -> Result<EmptyResponse, LightningRpcError> {
         unimplemented!("Unsupported: we dont currently support HTLC interception for LDK Node");
+    }
+
+    async fn connect_to_peer(
+        &self,
+        pubkey: String,
+        host: String,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        unimplemented!("Unsupported: we dont currently support connecting to peers for LDK Node");
+    }
+
+    async fn get_funding_address(&self) -> Result<GetFundingAddressResponse, LightningRpcError> {
+        unimplemented!(
+            "Unsupported: we dont currently support getting funding address for LDK Node"
+        );
+    }
+
+    async fn open_channel(
+        &self,
+        pubkey: String,
+        channel_size_sats: u64,
+        push_amount_sats: u64,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        unimplemented!("Unsupported: we dont currently support opening channels for LDK Node");
+    }
+
+    async fn wait_for_chain_sync(
+        &self,
+        block_height: u32,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        unimplemented!(
+            "Unsupported: we dont currently support waiting for chain sync for LDK Node"
+        );
     }
 }
 

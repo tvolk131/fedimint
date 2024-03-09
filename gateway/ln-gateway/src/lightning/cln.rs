@@ -3,8 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bitcoin::Address;
 use fedimint_core::task::{sleep, TaskGroup};
 use fedimint_core::util::SafeUrl;
+use fedimint_core::Amount;
 use futures::stream::BoxStream;
 use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
@@ -13,8 +15,10 @@ use tracing::info;
 use super::{ILnRpcClient, LightningRpcError};
 use crate::gateway_lnrpc::gateway_lightning_client::GatewayLightningClient;
 use crate::gateway_lnrpc::{
-    EmptyRequest, EmptyResponse, GetNodeInfoResponse, GetRouteHintsRequest, GetRouteHintsResponse,
-    InterceptHtlcRequest, InterceptHtlcResponse, PayInvoiceRequest, PayInvoiceResponse,
+    ConnectToPeerRequest, EmptyRequest, EmptyResponse, GetFundingAddressResponse,
+    GetNodeInfoResponse, GetRouteHintsRequest, GetRouteHintsResponse, InterceptHtlcRequest,
+    InterceptHtlcResponse, OpenChannelRequest, PayInvoiceRequest, PayInvoiceResponse,
+    WaitForChainSyncRequest,
 };
 use crate::lightning::MAX_LIGHTNING_RETRIES;
 pub type HtlcResult = std::result::Result<InterceptHtlcRequest, tonic::Status>;
@@ -137,6 +141,66 @@ impl ILnRpcClient for NetworkLnRpcClient {
                 failure_reason: status.message().to_string(),
             }
         })?;
+        Ok(res.into_inner())
+    }
+
+    async fn connect_to_peer(
+        &self,
+        pubkey: String,
+        host: String,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        let mut client = Self::connect(self.connection_url.clone()).await?;
+        let res = client
+            .connect_to_peer(ConnectToPeerRequest { pubkey, host })
+            .await
+            .map_err(|status| LightningRpcError::FailedToConnectToPeer {
+                failure_reason: status.message().to_string(),
+            })?;
+        Ok(res.into_inner())
+    }
+
+    async fn get_funding_address(&self) -> Result<GetFundingAddressResponse, LightningRpcError> {
+        let mut client = Self::connect(self.connection_url.clone()).await?;
+        let res = client
+            .get_funding_address(EmptyRequest {})
+            .await
+            .map_err(|status| LightningRpcError::FailedToGetFundingAddress {
+                failure_reason: status.message().to_string(),
+            })?;
+        Ok(res.into_inner())
+    }
+
+    async fn open_channel(
+        &self,
+        pubkey: String,
+        channel_size_sats: u64,
+        push_amount_sats: u64,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        let mut client = Self::connect(self.connection_url.clone()).await?;
+        let res = client
+            .open_channel(OpenChannelRequest {
+                pubkey,
+                channel_size_sats,
+                push_amount_sats,
+            })
+            .await
+            .map_err(|status| LightningRpcError::FailedToOpenChannel {
+                failure_reason: status.message().to_string(),
+            })?;
+        Ok(res.into_inner())
+    }
+
+    async fn wait_for_chain_sync(
+        &self,
+        block_height: u32,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        let mut client = Self::connect(self.connection_url.clone()).await?;
+        let res = client
+            .wait_for_chain_sync(WaitForChainSyncRequest { block_height })
+            .await
+            .map_err(|status| LightningRpcError::FailedToWaitForChainSync {
+                failure_reason: status.message().to_string(),
+            })?;
         Ok(res.into_inner())
     }
 }

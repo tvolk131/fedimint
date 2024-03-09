@@ -12,7 +12,7 @@ use clap::Parser;
 use cln_plugin::{options, Builder, Plugin};
 use cln_rpc::model;
 use cln_rpc::primitives::ShortChannelId;
-use fedimint_core::task::TaskGroup;
+use fedimint_core::task::{sleep, TaskGroup};
 use fedimint_core::util::handle_version_hash_command;
 use fedimint_core::{fedimint_build_code_version_env, Amount};
 use ln_gateway::envs::FM_CLN_EXTENSION_LISTEN_ADDRESS_ENV;
@@ -22,8 +22,10 @@ use ln_gateway::gateway_lnrpc::gateway_lightning_server::{
 use ln_gateway::gateway_lnrpc::get_route_hints_response::{RouteHint, RouteHintHop};
 use ln_gateway::gateway_lnrpc::intercept_htlc_response::{Action, Cancel, Forward, Settle};
 use ln_gateway::gateway_lnrpc::{
-    EmptyRequest, EmptyResponse, GetNodeInfoResponse, GetRouteHintsRequest, GetRouteHintsResponse,
-    InterceptHtlcRequest, InterceptHtlcResponse, PayInvoiceRequest, PayInvoiceResponse,
+    ConnectToPeerRequest, EmptyRequest, EmptyResponse, GetFundingAddressResponse,
+    GetNodeInfoResponse, GetRouteHintsRequest, GetRouteHintsResponse, InterceptHtlcRequest,
+    InterceptHtlcResponse, OpenChannelRequest, PayInvoiceRequest, PayInvoiceResponse,
+    WaitForChainSyncRequest,
 };
 use secp256k1::PublicKey;
 use serde::{Deserialize, Serialize};
@@ -36,6 +38,8 @@ use tonic::Status;
 use tracing::{debug, error, info, warn};
 
 const MAX_HTLC_PROCESSING_DURATION: Duration = Duration::MAX;
+
+const MAX_INFO_RETRIES: i32 = 10;
 
 #[derive(Parser)]
 struct ClnExtensionOpts {
@@ -494,6 +498,139 @@ impl GatewayLightning for ClnRpcService {
             return Err(Status::internal("No interceptor reference found for htlc"));
         }
         Ok(tonic::Response::new(EmptyResponse {}))
+    }
+
+    async fn connect_to_peer(
+        &self,
+        request: tonic::Request<ConnectToPeerRequest>,
+    ) -> Result<tonic::Response<EmptyResponse>, Status> {
+        let request_inner = request.into_inner();
+
+        self.rpc_client()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .call(cln_rpc::Request::Connect(model::requests::ConnectRequest {
+                id: format!("{}@{}", request_inner.pubkey, request_inner.host),
+                host: None,
+                port: None,
+            }))
+            .await
+            .map_err(|e| {
+                error!("cln connect rpc returned error {:?}", e);
+                tonic::Status::internal(e.to_string())
+            })?;
+
+        Ok(tonic::Response::new(EmptyResponse {}))
+    }
+
+    async fn get_funding_address(
+        &self,
+        _request: tonic::Request<EmptyRequest>,
+    ) -> Result<tonic::Response<GetFundingAddressResponse>, Status> {
+        let outcome = self
+            .rpc_client()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .call(cln_rpc::Request::NewAddr(model::requests::NewaddrRequest {
+                addresstype: Some(cln_rpc::model::requests::NewaddrAddresstype::BECH32),
+            }))
+            .await
+            .map(|response| match response {
+                cln_rpc::Response::NewAddr(model::responses::NewaddrResponse {
+                    bech32, ..
+                }) => Ok(GetFundingAddressResponse {
+                    address: bech32.expect("cln newaddr rpc returned no address"),
+                }),
+                _ => Err(ClnExtensionError::RpcWrongResponse),
+            })
+            .map_err(|e| {
+                error!("cln newaddr rpc returned error {:?}", e);
+                tonic::Status::internal(e.to_string())
+            })?
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(outcome))
+    }
+
+    async fn open_channel(
+        &self,
+        request: tonic::Request<OpenChannelRequest>,
+    ) -> Result<tonic::Response<EmptyResponse>, Status> {
+        let request_inner = request.into_inner();
+
+        self.rpc_client()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .call(cln_rpc::Request::FundChannel(
+                model::requests::FundchannelRequest {
+                    id: cln_rpc::primitives::PublicKey::from_str(&request_inner.pubkey).map_err(
+                        |e| {
+                            error!("cln fundchannel pubkey parse error {:?}", e);
+                            tonic::Status::invalid_argument(e.to_string())
+                        },
+                    )?,
+                    amount: cln_rpc::primitives::AmountOrAll::Amount(
+                        cln_rpc::primitives::Amount::from_sat(request_inner.channel_size_sats),
+                    ),
+                    feerate: None,
+                    announce: None,
+                    minconf: None,
+                    push_msat: Some(cln_rpc::primitives::Amount::from_sat(
+                        request_inner.push_amount_sats,
+                    )),
+                    close_to: None,
+                    request_amt: None,
+                    compact_lease: None,
+                    utxos: None,
+                    mindepth: None,
+                    reserve: None,
+                },
+            ))
+            .await
+            .map_err(|e| {
+                error!("cln fundchannel rpc returned error {:?}", e);
+                tonic::Status::internal(e.to_string())
+            })?;
+
+        Ok(tonic::Response::new(EmptyResponse {}))
+    }
+
+    async fn wait_for_chain_sync(
+        &self,
+        request: tonic::Request<WaitForChainSyncRequest>,
+    ) -> Result<tonic::Response<EmptyResponse>, Status> {
+        let target_block_height = request.into_inner().block_height;
+
+        for _ in 0..MAX_INFO_RETRIES {
+            let blockheight = self
+                .rpc_client()
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .call(cln_rpc::Request::Getinfo(
+                    model::requests::GetinfoRequest {},
+                ))
+                .await
+                .map(|response| match response {
+                    cln_rpc::Response::Getinfo(model::responses::GetinfoResponse {
+                        blockheight,
+                        ..
+                    }) => Ok(blockheight),
+                    _ => Err(ClnExtensionError::RpcWrongResponse),
+                })
+                .map_err(|e| {
+                    error!("cln getinfo rpc returned error {:?}", e);
+                    tonic::Status::internal(e.to_string())
+                })?
+                .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+            if blockheight >= target_block_height {
+                return Ok(tonic::Response::new(EmptyResponse {}));
+            }
+
+            sleep(Duration::from_secs(5)).await;
+        }
+
+        Err(Status::deadline_exceeded("Failed to wait for chain sync"))
     }
 }
 

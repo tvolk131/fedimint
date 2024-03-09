@@ -5,6 +5,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bitcoin::Address;
 use clap::Subcommand;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::task::TaskGroup;
@@ -17,8 +18,8 @@ use thiserror::Error;
 use self::cln::{NetworkLnRpcClient, RouteHtlcStream};
 use self::lnd::GatewayLndClient;
 use crate::gateway_lnrpc::{
-    EmptyResponse, GetNodeInfoResponse, GetRouteHintsResponse, InterceptHtlcResponse,
-    PayInvoiceRequest, PayInvoiceResponse,
+    EmptyResponse, GetFundingAddressResponse, GetNodeInfoResponse, GetRouteHintsResponse,
+    InterceptHtlcResponse, PayInvoiceRequest, PayInvoiceResponse,
 };
 
 pub const MAX_LIGHTNING_RETRIES: u32 = 10;
@@ -43,6 +44,12 @@ pub enum LightningRpcError {
     FailedToOpenChannel { failure_reason: String },
     #[error("Failed to get Invoice: {failure_reason}")]
     FailedToGetInvoice { failure_reason: String },
+    #[error("Failed to get funding address: {failure_reason}")]
+    FailedToGetFundingAddress { failure_reason: String },
+    #[error("Failed to connect to peer: {failure_reason}")]
+    FailedToConnectToPeer { failure_reason: String },
+    #[error("Failed to wait for chain sync: {failure_reason}")]
+    FailedToWaitForChainSync { failure_reason: String },
 }
 
 /// A trait that the gateway uses to interact with a lightning node. This allows
@@ -107,6 +114,26 @@ pub trait ILnRpcClient: Debug + Send + Sync {
     async fn complete_htlc(
         &self,
         htlc: InterceptHtlcResponse,
+    ) -> Result<EmptyResponse, LightningRpcError>;
+
+    async fn connect_to_peer(
+        &self,
+        pubkey: String,
+        host: String,
+    ) -> Result<EmptyResponse, LightningRpcError>;
+
+    async fn get_funding_address(&self) -> Result<GetFundingAddressResponse, LightningRpcError>;
+
+    async fn open_channel(
+        &self,
+        pubkey: String,
+        channel_size_sats: u64,
+        push_amount_sats: u64,
+    ) -> Result<EmptyResponse, LightningRpcError>;
+
+    async fn wait_for_chain_sync(
+        &self,
+        block_height: u32,
     ) -> Result<EmptyResponse, LightningRpcError>;
 }
 

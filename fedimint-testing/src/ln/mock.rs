@@ -15,8 +15,8 @@ use lightning_invoice::{
     SignedRawBolt11Invoice, DEFAULT_EXPIRY_TIME,
 };
 use ln_gateway::gateway_lnrpc::{
-    self, EmptyResponse, GetNodeInfoResponse, GetRouteHintsResponse, InterceptHtlcResponse,
-    PayInvoiceRequest, PayInvoiceResponse,
+    self, EmptyResponse, GetFundingAddressResponse, GetNodeInfoResponse, GetRouteHintsResponse,
+    InterceptHtlcResponse, PayInvoiceRequest, PayInvoiceResponse,
 };
 use ln_gateway::lightning::cln::{HtlcResult, RouteHtlcStream};
 use ln_gateway::lightning::{ILnRpcClient, LightningRpcError};
@@ -160,6 +160,36 @@ impl ILnRpcClient for FakeLightningTest {
     async fn complete_htlc(
         &self,
         _htlc: InterceptHtlcResponse,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        Ok(EmptyResponse {})
+    }
+
+    async fn connect_to_peer(
+        &self,
+        pubkey: String,
+        host: String,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        Ok(EmptyResponse {})
+    }
+
+    async fn get_funding_address(&self) -> Result<GetFundingAddressResponse, LightningRpcError> {
+        Ok(GetFundingAddressResponse {
+            address: "".to_string(),
+        })
+    }
+
+    async fn open_channel(
+        &self,
+        pubkey: String,
+        channel_size_sats: u64,
+        push_amount_sats: u64,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        Ok(EmptyResponse {})
+    }
+
+    async fn wait_for_chain_sync(
+        &self,
+        block_height: u32,
     ) -> Result<EmptyResponse, LightningRpcError> {
         Ok(EmptyResponse {})
     }

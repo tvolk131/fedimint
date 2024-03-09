@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::ensure;
 use async_trait::async_trait;
+use bitcoin::Address;
 use bitcoin_hashes::hex::ToHex;
 use fedimint_core::task::{sleep, TaskGroup};
 use fedimint_core::Amount;
@@ -15,12 +16,16 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
 use tonic_lnd::lnrpc::failure::FailureCode;
 use tonic_lnd::lnrpc::payment::PaymentStatus;
-use tonic_lnd::lnrpc::{ChanInfoRequest, GetInfoRequest, ListChannelsRequest};
+use tonic_lnd::lnrpc::{
+    ChanInfoRequest, ConnectPeerRequest, GetInfoRequest, LightningAddress, ListChannelsRequest,
+    OpenChannelRequest,
+};
 use tonic_lnd::routerrpc::{
     CircuitKey, ForwardHtlcInterceptResponse, ResolveHoldForwardAction, SendPaymentRequest,
     TrackPaymentRequest,
 };
 use tonic_lnd::tonic::Code;
+use tonic_lnd::walletrpc::AddrRequest;
 use tonic_lnd::{connect, Client as LndClient};
 use tracing::{debug, error, info, trace, warn};
 
@@ -29,13 +34,15 @@ use super::{ILnRpcClient, LightningRpcError, MAX_LIGHTNING_RETRIES};
 use crate::gateway_lnrpc::get_route_hints_response::{RouteHint, RouteHintHop};
 use crate::gateway_lnrpc::intercept_htlc_response::{Action, Cancel, Forward, Settle};
 use crate::gateway_lnrpc::{
-    EmptyResponse, GetNodeInfoResponse, GetRouteHintsResponse, InterceptHtlcRequest,
-    InterceptHtlcResponse, PayInvoiceRequest, PayInvoiceResponse,
+    EmptyResponse, GetFundingAddressResponse, GetNodeInfoResponse, GetRouteHintsResponse,
+    InterceptHtlcRequest, InterceptHtlcResponse, PayInvoiceRequest, PayInvoiceResponse,
 };
 
 type HtlcSubscriptionSender = mpsc::Sender<Result<InterceptHtlcRequest, Status>>;
 
 const LND_PAYMENT_TIMEOUT_SECONDS: i32 = 180;
+
+const MAX_INFO_RETRIES: i32 = 10;
 
 pub struct GatewayLndClient {
     /// LND client
@@ -731,6 +738,143 @@ impl ILnRpcClient for GatewayLndClient {
 
         Err(LightningRpcError::FailedToCompleteHtlc {
             failure_reason: "Gatewayd has not started to route HTLCs".to_string(),
+        })
+    }
+
+    async fn connect_to_peer(
+        &self,
+        pubkey: String,
+        host: String,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        let mut client = Self::connect(
+            self.address.clone(),
+            self.tls_cert.clone(),
+            self.macaroon.clone(),
+        )
+        .await?;
+
+        match client
+            .lightning()
+            .connect_peer(ConnectPeerRequest {
+                addr: Some(LightningAddress { pubkey, host }),
+                perm: false,
+                timeout: 10,
+            })
+            .await
+        {
+            Ok(_) => Ok(EmptyResponse {}),
+            Err(e) => Err(LightningRpcError::FailedToConnectToPeer {
+                failure_reason: format!("Failed to connect to peer {e:?}"),
+            }),
+        }
+    }
+
+    async fn get_funding_address(&self) -> Result<GetFundingAddressResponse, LightningRpcError> {
+        let mut client = Self::connect(
+            self.address.clone(),
+            self.tls_cert.clone(),
+            self.macaroon.clone(),
+        )
+        .await?;
+
+        match client
+            .wallet()
+            .next_addr(AddrRequest {
+                account: "".to_string(), // Default wallet account.
+                r#type: 4,               // Taproot address.
+                change: false,
+            })
+            .await
+        {
+            Ok(response) => Ok(GetFundingAddressResponse {
+                address: response.into_inner().addr,
+            }),
+            Err(e) => Err(LightningRpcError::FailedToGetFundingAddress {
+                failure_reason: format!("Failed to get funding address {e:?}"),
+            }),
+        }
+    }
+
+    async fn open_channel(
+        &self,
+        pubkey: String,
+        channel_size_sats: u64,
+        push_amount_sats: u64,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        let mut client = Self::connect(
+            self.address.clone(),
+            self.tls_cert.clone(),
+            self.macaroon.clone(),
+        )
+        .await?;
+
+        match client
+            .lightning()
+            .open_channel(OpenChannelRequest {
+                sat_per_vbyte: 0,
+                node_pubkey: hex::decode(pubkey).map_err(|e| {
+                    LightningRpcError::FailedToOpenChannel {
+                        failure_reason: format!("Failed to decode pubkey {e:?}"),
+                    }
+                })?,
+                node_pubkey_string: String::new(),
+                local_funding_amount: channel_size_sats.try_into().expect("u64 -> i64"),
+                push_sat: push_amount_sats.try_into().expect("u64 -> i64"),
+                target_conf: 0,
+                sat_per_byte: 0,
+                private: false,
+                min_htlc_msat: 0,
+                remote_csv_delay: 0,
+                min_confs: 0,
+                spend_unconfirmed: false,
+                close_address: String::new(),
+                funding_shim: None,
+                remote_max_value_in_flight_msat: 0,
+                remote_max_htlcs: 0,
+                max_local_csv: 0,
+                commitment_type: 0,
+                zero_conf: false,
+                scid_alias: false,
+            })
+            .await
+        {
+            Ok(_) => Ok(EmptyResponse {}),
+            Err(e) => Err(LightningRpcError::FailedToOpenChannel {
+                failure_reason: format!("Failed to open channel {e:?}"),
+            }),
+        }
+    }
+
+    async fn wait_for_chain_sync(
+        &self,
+        block_height: u32,
+    ) -> Result<EmptyResponse, LightningRpcError> {
+        let mut client = Self::connect(
+            self.address.clone(),
+            self.tls_cert.clone(),
+            self.macaroon.clone(),
+        )
+        .await?;
+
+        for _ in 0..MAX_INFO_RETRIES {
+            let response = client
+                .lightning()
+                .get_info(GetInfoRequest {})
+                .await
+                .map_err(|e| LightningRpcError::FailedToWaitForChainSync {
+                    failure_reason: format!("Failed to get node info {e:?}"),
+                })?
+                .into_inner();
+
+            if response.block_height >= block_height && response.synced_to_chain {
+                return Ok(EmptyResponse {});
+            }
+
+            sleep(Duration::from_secs(5)).await;
+        }
+
+        Err(LightningRpcError::FailedToWaitForChainSync {
+            failure_reason: "Failed to wait for chain sync".to_string(),
         })
     }
 }
