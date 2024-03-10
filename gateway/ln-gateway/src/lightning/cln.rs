@@ -3,10 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bitcoin::Address;
 use fedimint_core::task::{sleep, TaskGroup};
 use fedimint_core::util::SafeUrl;
-use fedimint_core::Amount;
 use futures::stream::BoxStream;
 use tonic::transport::{Channel, Endpoint};
 use tonic::Request;

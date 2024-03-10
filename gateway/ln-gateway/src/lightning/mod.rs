@@ -5,7 +5,6 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bitcoin::Address;
 use clap::Subcommand;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::task::TaskGroup;
