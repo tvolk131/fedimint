@@ -164,6 +164,16 @@ impl ILnRpcClient for FakeLightningTest {
         Ok(EmptyResponse {})
     }
 
+    async fn create_invoice_for_hash(
+        &self,
+        _amount_msat: u64,
+        _description: String,
+        _expiry_secs: u64,
+        _payment_hash: bitcoin::hashes::sha256::Hash,
+    ) -> Result<Bolt11Invoice, LightningRpcError> {
+        Err(LightningRpcError::FailedDoesNotSupportInvoiceCreation)
+    }
+
     async fn connect_to_peer(
         &self,
         pubkey: String,

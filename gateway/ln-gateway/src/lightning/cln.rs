@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use fedimint_core::task::{sleep, TaskGroup};
 use fedimint_core::util::SafeUrl;
 use futures::stream::BoxStream;
+use lightning_invoice::Bolt11Invoice;
 use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
 use tracing::info;
@@ -140,6 +141,16 @@ impl ILnRpcClient for NetworkLnRpcClient {
             }
         })?;
         Ok(res.into_inner())
+    }
+
+    async fn create_invoice_for_hash(
+        &self,
+        _amount_msat: u64,
+        _description: String,
+        _expiry_secs: u64,
+        _payment_hash: bitcoin_hashes::sha256::Hash,
+    ) -> Result<Bolt11Invoice, LightningRpcError> {
+        Err(LightningRpcError::FailedDoesNotSupportInvoiceCreation)
     }
 
     async fn connect_to_peer(

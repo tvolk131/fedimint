@@ -9,6 +9,7 @@ use bitcoin_hashes::hex::ToHex;
 use fedimint_core::task::{sleep, TaskGroup};
 use fedimint_core::Amount;
 use fedimint_ln_common::PrunedInvoice;
+use lightning_invoice::Bolt11Invoice;
 use secp256k1::PublicKey;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -738,6 +739,16 @@ impl ILnRpcClient for GatewayLndClient {
         Err(LightningRpcError::FailedToCompleteHtlc {
             failure_reason: "Gatewayd has not started to route HTLCs".to_string(),
         })
+    }
+
+    async fn create_invoice_for_hash(
+        &self,
+        _amount_msat: u64,
+        _description: String,
+        _expiry_secs: u64,
+        _payment_hash: bitcoin_hashes::sha256::Hash,
+    ) -> Result<Bolt11Invoice, LightningRpcError> {
+        Err(LightningRpcError::FailedDoesNotSupportInvoiceCreation)
     }
 
     async fn connect_to_peer(

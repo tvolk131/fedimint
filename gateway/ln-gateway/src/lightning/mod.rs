@@ -11,6 +11,7 @@ use fedimint_core::task::TaskGroup;
 use fedimint_core::util::SafeUrl;
 use fedimint_core::Amount;
 use fedimint_ln_common::PrunedInvoice;
+use lightning_invoice::Bolt11Invoice;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -49,6 +50,8 @@ pub enum LightningRpcError {
     FailedToConnectToPeer { failure_reason: String },
     #[error("Failed to wait for chain sync: {failure_reason}")]
     FailedToWaitForChainSync { failure_reason: String },
+    #[error("Gateway does not support invoice creation with this lightning backend. Please use HTLC interception instead.")]
+    FailedDoesNotSupportInvoiceCreation,
 }
 
 /// A trait that the gateway uses to interact with a lightning node. This allows
@@ -92,9 +95,12 @@ pub trait ILnRpcClient: Debug + Send + Sync {
         false
     }
 
-    /// Consumes the current client and returns a stream of intercepted HTLCs
-    /// and a new client. `complete_htlc` must be called for all successfully
-    /// intercepted HTLCs sent to the returned stream.
+    /// Consumes the current client and returns a stream of:
+    ///   * Intercepted HTLCs
+    ///   * Payments belonging to invoices created from calling
+    ///     [`ILnRpcClient::create_invoice_for_hash`]
+    /// and a new client. `complete_htlc` must be called for all items
+    /// successfully sent to the returned stream.
     ///
     /// `route_htlcs` can only be called once for a given client, since the
     /// returned stream grants exclusive routing decisions to the caller.
@@ -114,6 +120,19 @@ pub trait ILnRpcClient: Debug + Send + Sync {
         &self,
         htlc: InterceptHtlcResponse,
     ) -> Result<EmptyResponse, LightningRpcError>;
+
+    /// Create an invoice for a given payment hash. The invoice will be
+    /// created with the given amount, description, and expiry time.
+    /// This currently is not supported for all lightning backends, so clients
+    /// should handle an error by falling back to HTLC interception (i.e.
+    /// creating their own invoice without registering it with the gateway).
+    async fn create_invoice_for_hash(
+        &self,
+        amount_msat: u64,
+        description: String,
+        expiry_secs: u64,
+        payment_hash: bitcoin_hashes::sha256::Hash,
+    ) -> Result<Bolt11Invoice, LightningRpcError>;
 
     async fn connect_to_peer(
         &self,

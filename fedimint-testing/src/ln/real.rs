@@ -142,6 +142,16 @@ impl ILnRpcClient for ClnLightningTest {
         self.lnrpc.complete_htlc(htlc).await
     }
 
+    async fn create_invoice_for_hash(
+        &self,
+        _amount_msat: u64,
+        _description: String,
+        _expiry_secs: u64,
+        _payment_hash: bitcoin::hashes::sha256::Hash,
+    ) -> Result<Bolt11Invoice, LightningRpcError> {
+        Err(LightningRpcError::FailedDoesNotSupportInvoiceCreation)
+    }
+
     async fn connect_to_peer(
         &self,
         pubkey: String,
@@ -328,6 +338,16 @@ impl ILnRpcClient for LndLightningTest {
         htlc: InterceptHtlcResponse,
     ) -> Result<EmptyResponse, LightningRpcError> {
         self.lnrpc.complete_htlc(htlc).await
+    }
+
+    async fn create_invoice_for_hash(
+        &self,
+        _amount_msat: u64,
+        _description: String,
+        _expiry_secs: u64,
+        _payment_hash: bitcoin::hashes::sha256::Hash,
+    ) -> Result<Bolt11Invoice, LightningRpcError> {
+        Err(LightningRpcError::FailedDoesNotSupportInvoiceCreation)
     }
 
     async fn connect_to_peer(
@@ -787,6 +807,16 @@ impl ILnRpcClient for LdkLightningTest {
         _htlc: InterceptHtlcResponse,
     ) -> Result<EmptyResponse, LightningRpcError> {
         unimplemented!("Unsupported: we dont currently support HTLC interception for LDK Node");
+    }
+
+    async fn create_invoice_for_hash(
+        &self,
+        _amount_msat: u64,
+        _description: String,
+        _expiry_secs: u64,
+        _payment_hash: bitcoin::hashes::sha256::Hash,
+    ) -> Result<Bolt11Invoice, LightningRpcError> {
+        Err(LightningRpcError::FailedDoesNotSupportInvoiceCreation)
     }
 
     async fn connect_to_peer(
