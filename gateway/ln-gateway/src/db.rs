@@ -21,6 +21,7 @@ pub enum DbKeyPrefix {
     GatewayPublicKey = 0x06,
     GatewayConfiguration = 0x07,
     PreimageAuthentication = 0x08,
+    RegisteredPayment = 0x09,
 }
 
 impl std::fmt::Display for DbKeyPrefix {
@@ -99,6 +100,25 @@ pub struct PreimageAuthenticationPrefix;
 impl_db_lookup!(
     key = PreimageAuthentication,
     query_prefix = PreimageAuthenticationPrefix
+);
+
+#[derive(Debug, Clone, Eq, PartialEq, Encodable, Decodable)]
+pub struct RegisteredPaymentKey {
+    pub payment_hash: sha256::Hash,
+}
+
+impl_db_record!(
+    key = RegisteredPaymentKey,
+    value = FederationId,
+    db_prefix = DbKeyPrefix::RegisteredPayment
+);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct RegisteredPaymentKeyPrefix;
+
+impl_db_lookup!(
+    key = RegisteredPaymentKey,
+    query_prefix = RegisteredPaymentKeyPrefix
 );
 
 pub fn get_gatewayd_database_migrations() -> BTreeMap<DatabaseVersion, ServerMigrationFn> {
@@ -230,6 +250,10 @@ mod fedimint_migration_tests {
                             let gateway_configuration = dbtx.get_value(&GatewayConfigurationKey).await;
                             ensure!(gateway_configuration.is_some(), "validate_migrations was not able to read GatewayConfiguration");
                             info!("Validated GatewayConfiguration");
+                        }
+                        DbKeyPrefix::RegisteredPayment => {
+                            // TODO: Add a test for RegisteredPayment.
+                            info!("Validated RegisteredPayment");
                         }
                     }
                 }

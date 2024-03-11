@@ -64,7 +64,7 @@ use futures::stream::StreamExt;
 use gateway_lnrpc::intercept_htlc_response::Action;
 use gateway_lnrpc::{GetNodeInfoResponse, InterceptHtlcResponse};
 use lightning::{ILnRpcClient, LightningBuilder, LightningMode, LightningRpcError};
-use lightning_invoice::RoutingFees;
+use lightning_invoice::{Bolt11Invoice, RoutingFees};
 use rand::rngs::OsRng;
 use rpc::{
     ConnectToPeerPayload, FederationInfo, GatewayFedConfig, GatewayInfo, LeaveFedPayload,
@@ -78,14 +78,16 @@ use thiserror::Error;
 use tokio::sync::{Mutex, MutexGuard};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
-use crate::db::{get_gatewayd_database_migrations, FederationConfig, FederationIdKeyPrefix};
+use crate::db::{
+    get_gatewayd_database_migrations, FederationConfig, FederationIdKeyPrefix, RegisteredPaymentKey,
+};
 use crate::gateway_lnrpc::intercept_htlc_response::Forward;
 use crate::lightning::cln::RouteHtlcStream;
 use crate::lightning::GatewayLightningBuilder;
 use crate::rpc::rpc_server::run_webserver;
 use crate::rpc::{
-    BackupPayload, BalancePayload, ConnectFedPayload, DepositAddressPayload, RestorePayload,
-    WithdrawPayload,
+    BackupPayload, BalancePayload, ConnectFedPayload, DepositAddressPayload,
+    RegisterPaymentHashPayload, RestorePayload, WithdrawPayload,
 };
 use crate::state_machine::GatewayExtPayStates;
 
@@ -990,6 +992,42 @@ impl Gateway {
             return Ok(federation_info);
         }
 
+        Err(GatewayError::Disconnected)
+    }
+
+    async fn handle_register_payment_hash_msg(
+        &self,
+        payload: RegisterPaymentHashPayload,
+    ) -> Result<Bolt11Invoice> {
+        if let GatewayState::Running { lightning_context } = self.state.read().await.clone() {
+            let invoice: Bolt11Invoice = lightning_context
+                .lnrpc
+                .create_invoice_for_hash(
+                    payload.amount.msats,
+                    payload.description,
+                    payload.expiry_time.as_secs(),
+                    payload.payment_hash,
+                )
+                .await
+                .map_err(|err| GatewayError::LightningRpcError(err))?;
+
+            // Save which federation this payment hash is associated with so we
+            // can route the payment to the correct federation when it comes in.
+            let mut dbtx = self.gateway_db.begin_transaction().await;
+            dbtx.insert_entry(
+                &RegisteredPaymentKey {
+                    payment_hash: payload.payment_hash,
+                },
+                &payload.federation_id,
+            )
+            .await;
+            dbtx.commit_tx().await;
+
+            return Bolt11Invoice::from_str(&invoice.to_string())
+                .map_err(|err| GatewayError::UnexpectedState(err.to_string()));
+        }
+
+        warn!("Gateway is not connected, cannot handle {payload:?}");
         Err(GatewayError::Disconnected)
     }
 

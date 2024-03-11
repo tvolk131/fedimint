@@ -2,6 +2,7 @@ pub mod rpc_client;
 pub mod rpc_server;
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use bitcoin::{Address, Network};
 use fedimint_core::config::{ClientConfig, FederationId, JsonClientConfig};
@@ -55,6 +56,15 @@ pub struct WithdrawPayload {
     pub federation_id: FederationId,
     pub amount: BitcoinAmountOrAll,
     pub address: Address,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RegisterPaymentHashPayload {
+    pub amount: Amount,
+    pub description: String,
+    pub expiry_time: Duration,
+    pub payment_hash: bitcoin_hashes::sha256::Hash,
+    pub federation_id: FederationId,
 }
 
 /// Information about one of the feds we are connected to
