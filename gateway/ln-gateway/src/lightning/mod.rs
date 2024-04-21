@@ -1,4 +1,5 @@
 pub mod cln;
+pub mod ldk;
 pub mod lnd;
 
 use std::fmt::Debug;
