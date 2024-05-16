@@ -833,7 +833,7 @@ impl ILnRpcClient for GatewayLndClient {
                         };
 
                     ChannelInfo {
-                        remote_pubkey: channel.remote_pubkey,
+                        remote_pubkey: PublicKey::from_str(&channel.remote_pubkey).unwrap(),
                         channel_size_sats,
                         outbound_liquidity_sats,
                         inbound_liquidity_sats,

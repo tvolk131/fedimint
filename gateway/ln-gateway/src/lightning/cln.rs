@@ -211,7 +211,7 @@ impl ILnRpcClient for NetworkLnRpcClient {
 
         let res = client
             .open_channel(OpenChannelRequest {
-                pubkey: pubkey.to_string(),
+                pubkey: pubkey.serialize().to_vec(),
                 host,
                 channel_size_sats,
                 push_amount_sats,
@@ -251,12 +251,17 @@ impl ILnRpcClient for NetworkLnRpcClient {
             .into_inner()
             .channels
             .into_iter()
-            .map(|channel| ChannelInfo {
-                remote_pubkey: channel.remote_pubkey,
-                channel_size_sats: channel.channel_size_sats,
-                outbound_liquidity_sats: channel.outbound_liquidity_sats,
-                inbound_liquidity_sats: channel.inbound_liquidity_sats,
-                short_channel_id: channel.short_channel_id,
+            .filter_map(|channel| {
+                let remote_pubkey =
+                    secp256k1::PublicKey::from_slice(&channel.remote_pubkey).ok()?;
+
+                Some(ChannelInfo {
+                    remote_pubkey,
+                    channel_size_sats: channel.channel_size_sats,
+                    outbound_liquidity_sats: channel.outbound_liquidity_sats,
+                    inbound_liquidity_sats: channel.inbound_liquidity_sats,
+                    short_channel_id: channel.short_channel_id,
+                })
             })
             .collect())
     }
