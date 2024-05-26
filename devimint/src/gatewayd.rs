@@ -220,7 +220,7 @@ impl Gatewayd {
                     .as_u64()
                     .context("short_channel_id must be a u64")?;
                 Ok(ChannelInfo {
-                    remote_pubkey: remote_pubkey.parse()?,
+                    remote_pubkey: remote_pubkey.parse().ok(),
                     channel_size_sats,
                     outbound_liquidity_sats,
                     inbound_liquidity_sats,

@@ -154,7 +154,7 @@ pub trait ILnRpcClient: Debug + Send + Sync {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ChannelInfo {
-    pub remote_pubkey: secp256k1::PublicKey,
+    pub remote_pubkey: Option<secp256k1::PublicKey>,
     pub channel_size_sats: u64,
     pub outbound_liquidity_sats: u64,
     pub inbound_liquidity_sats: u64,

@@ -720,7 +720,7 @@ pub async fn open_channel_between_gateways(
 
         if channels
             .iter()
-            .any(|channel| channel.remote_pubkey == cln_pubkey)
+            .any(|channel| channel.remote_pubkey == Some(cln_pubkey))
         {
             return Ok(());
         }
