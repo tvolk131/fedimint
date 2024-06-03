@@ -148,7 +148,7 @@ impl CompleteStateMachine {
         };
 
         loop {
-            match context.gateway.get_lightning_context().await {
+            let error = match context.gateway.get_lightning_context().await {
                 Ok(lightning_context) => {
                     match lightning_context
                         .lnrpc
@@ -156,16 +156,13 @@ impl CompleteStateMachine {
                         .await
                     {
                         Ok(..) => return,
-                        Err(error) => {
-                            warn!("Trying to complete HTLC but got {error}, will keep retrying...");
-                        }
+                        Err(error) => error,
                     }
                 }
-                Err(error) => {
-                    warn!("Trying to complete HTLC but got {error}, will keep retrying...");
-                }
-            }
+                Err(error) => error,
+            };
 
+            warn!("Trying to complete HTLC but got {error}, will keep retrying...");
             sleep(Duration::from_secs(5)).await;
         }
     }
