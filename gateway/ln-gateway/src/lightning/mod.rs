@@ -6,6 +6,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bitcoin::Network;
 use clap::Subcommand;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::task::TaskGroup;
@@ -183,6 +184,24 @@ pub enum LightningMode {
         #[arg(long = "cln-extension-addr", env = FM_GATEWAY_LIGHTNING_ADDR_ENV)]
         cln_extension_addr: SafeUrl,
     },
+    #[clap(name = "ldk")]
+    Ldk {
+        /// LDK storage directory path
+        #[arg(long = "ldk-storage-dir", env = "FM_LDK_DIR")]
+        storage_dir_path_or: Option<String>,
+
+        /// LDK storage directory path
+        #[arg(long = "ldk-esplora-server-url", env = "FM_LDK_ESPLORA_SERVER_URL")]
+        esplora_server_url: String,
+
+        /// LDK network (defaults to regtest if not provided)
+        #[arg(long = "ldk-network", env = "FM_LDK_NETWORK")]
+        network_or: Option<Network>,
+
+        /// LDK lightning server port
+        #[arg(long = "ldk-lightning-port", env = "FM_PORT_LDK")]
+        lightning_port: u16,
+    },
 }
 
 #[async_trait]
@@ -212,6 +231,25 @@ impl LightningBuilder for GatewayLightningBuilder {
                 lnd_macaroon,
                 None,
             )),
+            LightningMode::Ldk {
+                storage_dir_path_or,
+                esplora_server_url,
+                network_or,
+                lightning_port,
+            } => {
+                // Default to regtest if network is not provided.
+                let network = network_or.unwrap_or(Network::Regtest);
+
+                Box::new(
+                    ldk::GatewayLdkClient::new(
+                        storage_dir_path_or,
+                        &esplora_server_url,
+                        network,
+                        lightning_port,
+                    )
+                    .unwrap(),
+                )
+            }
         }
     }
 }

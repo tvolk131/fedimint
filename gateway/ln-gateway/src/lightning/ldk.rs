@@ -59,12 +59,13 @@ impl GatewayLdkClient {
         storage_dir_path_or: Option<String>,
         esplora_server_url: &str,
         network: Network,
+        lightning_port: u16,
     ) -> anyhow::Result<Self> {
         let mut node_builder = ldk_node::Builder::from_config(ldk_node::Config {
             network,
             listening_addresses: Some(vec![SocketAddress::TcpIpV4 {
                 addr: [0, 0, 0, 0],
-                port: 15151,
+                port: lightning_port,
             }]),
             onchain_wallet_sync_interval_secs: 10,
             wallet_sync_interval_secs: 10,
