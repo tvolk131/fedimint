@@ -233,6 +233,7 @@ impl DevJitFed {
             let gw_lnd = gw_lnd.clone();
             let cln = cln.clone();
             let gw_cln = gw_cln.clone();
+            let gw_ldk = gw_ldk.clone();
             let bitcoind = bitcoind.clone();
             || async move {
                 let bitcoind = bitcoind.get_try().await?.deref().clone();
@@ -246,6 +247,15 @@ impl DevJitFed {
                     &bitcoind,
                     &cln,
                     &gw_cln,
+                    &lnd,
+                    &gw_lnd,
+                )
+                .await?;
+                open_channel_between_gateways(
+                    &process_mgr,
+                    &bitcoind,
+                    &cln,
+                    &gw_ldk,
                     &lnd,
                     &gw_lnd,
                 )
