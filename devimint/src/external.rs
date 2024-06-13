@@ -173,13 +173,22 @@ impl Bitcoind {
         Ok(self)
     }
 
+    /// Returns the height of the chain.
+    ///
+    /// The bitcoind rpc we're calling here is a bit of a misnomer - it returns
+    /// the chain height, not the block count. Note that the genesis block has
+    /// height 0.
+    pub fn get_block_height(&self) -> Result<u64> {
+        Ok(block_in_place(|| self.client.get_block_count())?)
+    }
+
     /// Returns the total number of blocks in the chain.
     ///
     /// Fedimint's IBitcoindRpc considers block count the total number of
     /// blocks, where bitcoind's rpc returns the height. Since the genesis
     /// block has height 0, we need to add 1 to get the total block count.
     pub fn get_block_count(&self) -> Result<u64> {
-        Ok(block_in_place(|| self.client.get_block_count())? + 1)
+        Ok(self.get_block_height()? + 1)
     }
 
     pub async fn mine_blocks_no_wait(&self, block_num: u64) -> Result<u64> {
@@ -691,9 +700,7 @@ pub async fn open_channel_between_gateways(
 
     poll("Wait for chain sync", || async {
         if !gw_cln
-            .is_synced_to_height(
-                bitcoind.get_block_count().map_err(ControlFlow::Continue)? as u32 - 1,
-            )
+            .is_synced_to_height(bitcoind.get_block_height().map_err(ControlFlow::Continue)? as u32)
             .await
             .map_err(ControlFlow::Continue)?
         {
