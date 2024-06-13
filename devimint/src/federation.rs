@@ -124,9 +124,11 @@ impl Client {
     }
 
     /// Open or create a [`Client`] that starts with a fresh state.
-    pub fn open_or_create(name: &str) -> Result<Client> {
-        block_in_place(|| {
-            let _lock = Self::client_name_lock(name);
+    pub async fn open_or_create(name: impl ToString) -> Result<Client> {
+        let name = name.to_string();
+
+        spawn_blocking(move || {
+            let _lock = Self::client_name_lock(&name);
             let client = Self {
                 name: format!("{name}-0"),
             };
@@ -135,6 +137,7 @@ impl Client {
             }
             Ok(client)
         })
+        .await?
     }
 
     /// Client to join a federation
@@ -164,7 +167,7 @@ impl Client {
 
     /// Client to join a federation
     pub async fn new_restored(&self, name: &str, invite_code: String) -> Result<Self> {
-        let restored = Self::open_or_create(name)?;
+        let restored = Self::open_or_create(name).await?;
 
         let mnemonic = cmd!(self, "print-secret").out_json().await?["secret"]
             .as_str()
@@ -388,7 +391,7 @@ impl Federation {
 
         let client = JitTryAnyhow::new_try({
             move || async move {
-                let client = Client::open_or_create(federation_name.as_str())?;
+                let client = Client::open_or_create(federation_name.as_str()).await?;
                 let invite_code = Self::invite_code_static()?;
                 if !skip_setup {
                     cmd!(client, "join-federation", invite_code).run().await?;
