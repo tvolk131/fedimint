@@ -2169,7 +2169,7 @@ impl ClientBuilder {
         Ok(client)
     }
 
-    /// Build a [`Client`] but do not start the executor
+    /// Build a [`Client`] and start the executor if `stopped` is `false`
     async fn build(
         self,
         root_secret: DerivableSecret,
