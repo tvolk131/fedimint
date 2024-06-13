@@ -64,7 +64,7 @@ impl Drop for Federation {
                 while let Some((_id, fedimintd)) = self.members.pop_first() {
                     set.spawn(async { drop(fedimintd) });
                 }
-                while (set.join_next().await).is_some() {}
+                while set.join_next().await.is_some() {}
             });
         });
     }
