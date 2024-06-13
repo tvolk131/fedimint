@@ -139,6 +139,17 @@ impl Gatewayd {
         Ok(gateway_id)
     }
 
+    pub async fn is_synced_to_height(&self, height: u32) -> Result<bool> {
+        let info = self.get_info().await?;
+        let block_height = info["block_height"]
+            .as_u64()
+            .context("block_height must be an integer")?;
+        let synced_to_chain = info["synced_to_chain"]
+            .as_bool()
+            .context("synced_to_chain must be a boolean")?;
+        Ok(synced_to_chain && block_height >= u64::from(height))
+    }
+
     pub async fn connect_fed(&self, fed: &Federation) -> Result<()> {
         let invite_code = fed.invite_code()?;
         poll("gateway connect-fed", || async {

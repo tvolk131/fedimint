@@ -689,25 +689,32 @@ pub async fn open_channel_between_gateways(
     bitcoind.send_to(cln_addr, 100_000_000).await?;
     bitcoind.mine_blocks(10).await?;
 
+    poll("Wait for chain sync", || async {
+        if !gw_cln
+            .is_synced_to_height(
+                bitcoind.get_block_count().map_err(ControlFlow::Continue)? as u32 - 1,
+            )
+            .await
+            .map_err(ControlFlow::Continue)?
+        {
+            return Err(ControlFlow::Continue(anyhow!("cln not synced")));
+        }
+
+        Ok(())
+    })
+    .await?;
+
     let lnd_pubkey = gw_lnd.lightning_pubkey().await?;
     let cln_pubkey = gw_cln.lightning_pubkey().await?;
 
-    // TODO: We're currently polling for the channel to be opened to avoid
-    // flakiness, but this shouldn't ever fail. This is likely needed because
-    // the node is not fully synced yet. In that case, we should wait for the
-    // node to be fully synced before opening the channel.
-    poll("fund channel", || async {
-        gw_cln
-            .open_channel(
-                lnd_pubkey.clone(),
-                format!("127.0.0.1:{}", process_mgr.globals.FM_PORT_LND_LISTEN),
-                10_000_000,
-                Some(5_000_000),
-            )
-            .await
-            .map_err(ControlFlow::Continue)
-    })
-    .await?;
+    gw_cln
+        .open_channel(
+            lnd_pubkey.clone(),
+            format!("127.0.0.1:{}", process_mgr.globals.FM_PORT_LND_LISTEN),
+            10_000_000,
+            Some(5_000_000),
+        )
+        .await?;
 
     bitcoind.mine_blocks(10).await?;
 
