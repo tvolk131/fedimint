@@ -354,7 +354,7 @@ pub async fn latency_tests(
 
             let start_time = Instant::now();
             if *VERSION_0_3_0_ALPHA <= fedimint_cli_version {
-                let restore_client = Client::create("restore")?;
+                let restore_client = Client::create("restore").await?;
                 cmd!(
                     restore_client,
                     "restore",
@@ -1478,7 +1478,7 @@ pub async fn cli_tests_backup_and_restore(
     // which is a larger refactor.
     {
         let post_balance = if fedimint_cli_version >= *VERSION_0_3_0_ALPHA {
-            let client = Client::create("restore-without-backup")?;
+            let client = Client::create("restore-without-backup").await?;
             let _ = cmd!(
                 client,
                 "restore",
@@ -1527,7 +1527,7 @@ pub async fn cli_tests_backup_and_restore(
     {
         let post_balance = if fedimint_cli_version >= *VERSION_0_3_0_ALPHA {
             let _ = cmd!(reference_client, "backup",).out_json().await?;
-            let client = Client::create("restore-with-backup")?;
+            let client = Client::create("restore-with-backup").await?;
 
             let _ = cmd!(
                 client,
