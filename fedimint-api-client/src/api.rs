@@ -40,7 +40,7 @@ use fedimint_core::task::jit::JitTryAnyhow;
 use fedimint_core::task::{MaybeSend, MaybeSync};
 use fedimint_core::time::now;
 use fedimint_core::transaction::{SerdeTransaction, Transaction, TransactionSubmissionOutcome};
-use fedimint_core::util::SafeUrl;
+use fedimint_core::util::{BackoffBuilder, FibonacciBackoff, SafeUrl};
 use fedimint_core::{
     apply, async_trait_maybe_send, dyn_newtype_define, runtime, NumPeersExt, OutPoint, PeerId,
     TransactionId,
@@ -64,6 +64,8 @@ use tokio::sync::{Mutex, OnceCell, RwLock};
 use tracing::{debug, error, instrument, trace, warn};
 
 use crate::query::{FilterMapThreshold, QueryStep, QueryStrategy, ThresholdConsensus};
+
+const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
 pub type PeerResult<T> = Result<T, PeerError>;
 pub type JsonRpcResult<T> = Result<T, JsonRpcClientError>;
@@ -1117,49 +1119,51 @@ pub struct WsFederationApi<C = WsClient> {
     module_id: Option<ModuleInstanceId>,
 }
 
-/// Some data shared/preserved between [`FederationPeerClient`] and
+/// Connection state shared/preserved between [`FederationPeerClient`] and the
 /// Jit tasks it spawns.
 #[derive(Debug)]
-struct FederationPeerClientShared {
+struct FederationPeerClientConnectionState {
     last_connection_attempt: SystemTime,
-    connection_attempts: u64,
+    connection_backoff: backon::FibonacciBackoff,
 }
 
-impl FederationPeerClientShared {
+impl FederationPeerClientConnectionState {
     pub fn new() -> Self {
         Self {
             last_connection_attempt: now(),
-            connection_attempts: 0,
+            connection_backoff: FibonacciBackoff::default()
+                .with_min_delay(Duration::from_millis(200))
+                .with_max_delay(MAX_BACKOFF)
+                .build(),
         }
     }
 
     /// Wait (if needed) before reconnection attempt based on number of previous
-    /// attempts
+    /// attempts and update reconnection stats
     async fn wait(&mut self) {
-        let desired_timeout = Duration::from_millis((self.connection_attempts * 100).min(5000));
+        let desired_timeout = self.connection_backoff.next().unwrap_or(MAX_BACKOFF);
         let since_last_connect = now()
             .duration_since(self.last_connection_attempt)
             .unwrap_or_default();
 
         let sleep_duration = desired_timeout.saturating_sub(since_last_connect);
-        if Duration::ZERO < sleep_duration {
+        if !sleep_duration.is_zero() {
             debug!(
-                target: LOG_CLIENT_NET_API,
-                duration_ms=sleep_duration.as_millis(),
-                "Waiting before reconnecting");
-        }
-        fedimint_core::runtime::sleep(sleep_duration).await;
-    }
+                    target: LOG_CLIENT_NET_API,
+                    duration_ms=sleep_duration.as_millis(),
+                    "Waiting before reconnecting");
 
-    /// Wait (if needed) + update reconnection stats
-    async fn wait_and_inc_reconnect(&mut self) {
-        self.wait().await;
-        self.connection_attempts = self.connection_attempts.saturating_add(1);
+            fedimint_core::runtime::sleep(sleep_duration).await;
+        }
+
         self.last_connection_attempt = now();
     }
 
-    fn reset(&mut self) {
-        self.connection_attempts = 0;
+    fn reset_backoff(&mut self) {
+        self.connection_backoff = FibonacciBackoff::default()
+            .with_min_delay(Duration::from_millis(200))
+            .with_max_delay(Duration::from_secs(5))
+            .build();
     }
 }
 
@@ -1168,7 +1172,7 @@ impl FederationPeerClientShared {
 #[derive(Debug)]
 struct FederationPeerClient<C> {
     client: JitTryAnyhow<C>,
-    shared: Arc<tokio::sync::Mutex<FederationPeerClientShared>>,
+    connection_state: Arc<tokio::sync::Mutex<FederationPeerClientConnectionState>>,
 }
 
 impl<C> FederationPeerClient<C>
@@ -1176,11 +1180,12 @@ where
     C: JsonRpcClient + 'static,
 {
     pub fn new(peer_id: PeerId, url: SafeUrl, api_secret: Option<String>) -> Self {
-        let shared: Arc<_> = tokio::sync::Mutex::new(FederationPeerClientShared::new()).into();
+        let connection_state: Arc<_> =
+            tokio::sync::Mutex::new(FederationPeerClientConnectionState::new()).into();
 
         Self {
-            client: Self::new_jit_client(peer_id, url, api_secret, shared.clone()),
-            shared,
+            client: Self::new_jit_client(peer_id, url, api_secret, connection_state.clone()),
+            connection_state,
         }
     }
 
@@ -1188,10 +1193,10 @@ where
         peer_id: PeerId,
         url: SafeUrl,
         api_secret: Option<String>,
-        shared: Arc<Mutex<FederationPeerClientShared>>,
+        connection_state: Arc<Mutex<FederationPeerClientConnectionState>>,
     ) -> JitTryAnyhow<C> {
         JitTryAnyhow::new_try(move || async move {
-            shared.lock().await.wait_and_inc_reconnect().await;
+            connection_state.lock().await.wait().await;
 
             debug!(
                 target: LOG_CLIENT_NET_API,
@@ -1202,7 +1207,7 @@ where
 
             match &res {
                 Ok(_) => {
-                    shared.lock().await.reset();
+                    connection_state.lock().await.reset_backoff();
                     debug!(
                             target: LOG_CLIENT_NET_API,
                             peer_id = %peer_id,
@@ -1222,7 +1227,7 @@ where
     }
 
     pub fn reconnect(&mut self, peer_id: PeerId, url: SafeUrl, api_secret: Option<String>) {
-        self.client = Self::new_jit_client(peer_id, url, api_secret, self.shared.clone());
+        self.client = Self::new_jit_client(peer_id, url, api_secret, self.connection_state.clone());
     }
 }
 
@@ -1427,18 +1432,19 @@ where
             let rclient = self.client.read().await;
             match rclient.client.get_try().await {
                 Ok(client) if client.is_connected() => {
+                    debug!(target: LOG_CLIENT_NET_API, "Sending request to peer");
                     return client.request::<_, _>(method, params).await;
                 }
                 Err(e) => {
                     // Strategies using timeouts often depend on failing requests returning quickly,
                     // so every request gets only one reconnection attempt.
-                    if 0 < attempts {
+                    if attempts > 0 {
                         return Err(JsonRpcClientError::Transport(e.into()));
                     }
                     debug!(target: LOG_CLIENT_NET_API, err=%e, "Triggering reconnection after connection error");
                 }
                 Ok(_client) => {
-                    if 0 < attempts {
+                    if attempts > 0 {
                         return Err(JsonRpcClientError::Transport(anyhow::format_err!(
                             "Disconnected"
                         )));
