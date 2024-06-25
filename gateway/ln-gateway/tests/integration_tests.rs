@@ -863,10 +863,8 @@ async fn test_gateway_configuration() -> anyhow::Result<()> {
     // and salt match the password)
     let gateway_config = gateway
         .gateway
-        .gateway_config
-        .read()
+        .clone_gateway_config()
         .await
-        .clone()
         .expect("Gateway config should be set");
     assert_eq!(
         gateway_config.hashed_password,
