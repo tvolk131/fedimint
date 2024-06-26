@@ -70,14 +70,14 @@ pub enum GatewayPayStates {
 impl fmt::Display for GatewayPayStates {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GatewayPayStates::PayInvoice(_) => write!(f, "PayInvoice"),
-            GatewayPayStates::CancelContract(_) => write!(f, "CancelContract"),
-            GatewayPayStates::Preimage(..) => write!(f, "Preimage"),
-            GatewayPayStates::OfferDoesNotExist(_) => write!(f, "OfferDoesNotExist"),
-            GatewayPayStates::Canceled { .. } => write!(f, "Canceled"),
-            GatewayPayStates::WaitForSwapPreimage(_) => write!(f, "WaitForSwapPreimage"),
-            GatewayPayStates::ClaimOutgoingContract(_) => write!(f, "ClaimOutgoingContract"),
-            GatewayPayStates::Failed { .. } => write!(f, "Failed"),
+            Self::PayInvoice(_) => write!(f, "PayInvoice"),
+            Self::CancelContract(_) => write!(f, "CancelContract"),
+            Self::Preimage(..) => write!(f, "Preimage"),
+            Self::OfferDoesNotExist(_) => write!(f, "OfferDoesNotExist"),
+            Self::Canceled { .. } => write!(f, "Canceled"),
+            Self::WaitForSwapPreimage(_) => write!(f, "WaitForSwapPreimage"),
+            Self::ClaimOutgoingContract(_) => write!(f, "ClaimOutgoingContract"),
+            Self::Failed { .. } => write!(f, "Failed"),
         }
     }
 }

@@ -1,14 +1,21 @@
-#![deny(clippy::pedantic)]
+#![deny(clippy::pedantic, clippy::nursery)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::default_trait_access)]
 #![allow(clippy::doc_markdown)]
+#![allow(clippy::future_not_send)]
+#![allow(clippy::missing_const_for_fn)]
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::must_use_candidate)]
+#![allow(clippy::needless_pass_by_ref_mut)]
+#![allow(clippy::option_if_let_else)]
+#![allow(clippy::or_fun_call)]
 #![allow(clippy::return_self_not_must_use)]
+#![allow(clippy::significant_drop_in_scrutinee)]
+#![allow(clippy::significant_drop_tightening)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::wildcard_imports)]
@@ -178,12 +185,12 @@ pub enum GatewayState {
 impl Display for GatewayState {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            GatewayState::Initializing => write!(f, "Initializing"),
-            GatewayState::Configuring => write!(f, "Configuring"),
-            GatewayState::Connected => write!(f, "Connected"),
-            GatewayState::Running { .. } => write!(f, "Running"),
-            GatewayState::Disconnected => write!(f, "Disconnected"),
-            GatewayState::ShuttingDown { .. } => write!(f, "ShuttingDown"),
+            Self::Initializing => write!(f, "Initializing"),
+            Self::Configuring => write!(f, "Configuring"),
+            Self::Connected => write!(f, "Connected"),
+            Self::Running { .. } => write!(f, "Running"),
+            Self::Disconnected => write!(f, "Disconnected"),
+            Self::ShuttingDown { .. } => write!(f, "ShuttingDown"),
         }
     }
 }
@@ -261,11 +268,11 @@ impl Gateway {
         gateway_db: Database,
         gateway_state: GatewayState,
         lightning_module_mode: LightningModuleMode,
-    ) -> anyhow::Result<Gateway> {
+    ) -> anyhow::Result<Self> {
         let versioned_api = api_addr
             .join(V1_API_ENDPOINT)
             .expect("Failed to version gateway API address");
-        Gateway::new(
+        Self::new(
             lightning_builder,
             GatewayParameters {
                 listen,
@@ -285,7 +292,7 @@ impl Gateway {
 
     /// Default function for creating a gateway with the `Mint`, `Wallet`, and
     /// `Gateway` modules.
-    pub async fn new_with_default_modules() -> anyhow::Result<Gateway> {
+    pub async fn new_with_default_modules() -> anyhow::Result<Self> {
         let opts = GatewayOpts::parse();
 
         // Gateway module will be attached when the federation clients are created
@@ -322,7 +329,7 @@ impl Gateway {
         }
 
         let mnemonic = Self::load_or_generate_mnemonic(&gateway_db).await?;
-        Gateway::new(
+        Self::new(
             Arc::new(GatewayLightningBuilder {
                 lightning_mode: opts.mode,
                 gateway_db: gateway_db.clone(),
@@ -345,7 +352,7 @@ impl Gateway {
         gateway_db: Database,
         client_builder: GatewayClientBuilder,
         gateway_state: GatewayState,
-    ) -> anyhow::Result<Gateway> {
+    ) -> anyhow::Result<Self> {
         // Apply database migrations before using the database to ensure old database
         // structures are readable.
         apply_migrations_server(

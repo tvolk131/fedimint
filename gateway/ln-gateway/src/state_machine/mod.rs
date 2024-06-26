@@ -171,7 +171,7 @@ impl Context for GatewayClientContext {
 
 impl From<&GatewayClientContext> for LightningClientContext {
     fn from(ctx: &GatewayClientContext) -> Self {
-        LightningClientContext {
+        Self {
             ln_decoder: ctx.ln_decoder.clone(),
             redeem_key: ctx.redeem_key,
             gateway_conn: Arc::new(RealGatewayConnection::default()),
@@ -702,13 +702,13 @@ pub enum GatewayClientStateMachines {
 impl fmt::Display for GatewayClientStateMachines {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GatewayClientStateMachines::Pay(pay) => {
+            Self::Pay(pay) => {
                 write!(f, "{pay}")
             }
-            GatewayClientStateMachines::Receive(receive) => {
+            Self::Receive(receive) => {
                 write!(f, "{receive}")
             }
-            GatewayClientStateMachines::Complete(complete) => {
+            Self::Complete(complete) => {
                 write!(f, "{complete}")
             }
         }
@@ -732,19 +732,19 @@ impl State for GatewayClientStateMachines {
         global_context: &DynGlobalClientContext,
     ) -> Vec<fedimint_client::sm::StateTransition<Self>> {
         match self {
-            GatewayClientStateMachines::Pay(pay_state) => {
+            Self::Pay(pay_state) => {
                 sm_enum_variant_translation!(
                     pay_state.transitions(context, global_context),
                     GatewayClientStateMachines::Pay
                 )
             }
-            GatewayClientStateMachines::Receive(receive_state) => {
+            Self::Receive(receive_state) => {
                 sm_enum_variant_translation!(
                     receive_state.transitions(&context.into(), global_context),
                     GatewayClientStateMachines::Receive
                 )
             }
-            GatewayClientStateMachines::Complete(complete_state) => {
+            Self::Complete(complete_state) => {
                 sm_enum_variant_translation!(
                     complete_state.transitions(context, global_context),
                     GatewayClientStateMachines::Complete
@@ -755,9 +755,9 @@ impl State for GatewayClientStateMachines {
 
     fn operation_id(&self) -> fedimint_core::core::OperationId {
         match self {
-            GatewayClientStateMachines::Pay(pay_state) => pay_state.operation_id(),
-            GatewayClientStateMachines::Receive(receive_state) => receive_state.operation_id(),
-            GatewayClientStateMachines::Complete(complete_state) => complete_state.operation_id(),
+            Self::Pay(pay_state) => pay_state.operation_id(),
+            Self::Receive(receive_state) => receive_state.operation_id(),
+            Self::Complete(complete_state) => complete_state.operation_id(),
         }
     }
 }

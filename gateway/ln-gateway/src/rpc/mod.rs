@@ -64,7 +64,7 @@ pub struct WithdrawPayload {
 }
 
 /// Information about one of the feds we are connected to
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FederationInfo {
     pub federation_id: FederationId,
     pub balance_msat: Amount,
@@ -72,7 +72,7 @@ pub struct FederationInfo {
     pub routing_fees: Option<FederationRoutingFees>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GatewayInfo {
     pub version_hash: String,
     pub federations: Vec<FederationInfo>,
@@ -97,7 +97,7 @@ pub struct GatewayInfo {
     pub lightning_mode: Option<LightningMode>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GatewayFedConfig {
     pub federations: BTreeMap<FederationId, JsonClientConfig>,
 }
@@ -110,7 +110,7 @@ pub struct FederationRoutingFees {
 
 impl From<FederationRoutingFees> for RoutingFees {
     fn from(value: FederationRoutingFees) -> Self {
-        RoutingFees {
+        Self {
             base_msat: value.base_msat,
             proportional_millionths: value.proportional_millionths,
         }
@@ -119,7 +119,7 @@ impl From<FederationRoutingFees> for RoutingFees {
 
 impl From<RoutingFees> for FederationRoutingFees {
     fn from(value: RoutingFees) -> Self {
-        FederationRoutingFees {
+        Self {
             base_msat: value.base_msat,
             proportional_millionths: value.proportional_millionths,
         }
@@ -131,7 +131,7 @@ impl FromStr for FederationRoutingFees {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let routing_fees = parse_routing_fees(s)?;
-        Ok(FederationRoutingFees {
+        Ok(Self {
             base_msat: routing_fees.base_msat,
             proportional_millionths: routing_fees.proportional_millionths,
         })

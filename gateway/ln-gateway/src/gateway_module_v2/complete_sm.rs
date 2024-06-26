@@ -70,9 +70,9 @@ pub enum CompleteSMState {
 impl fmt::Display for CompleteSMState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CompleteSMState::Pending => write!(f, "Pending"),
-            CompleteSMState::Completing(_) => write!(f, "Completing"),
-            CompleteSMState::Completed => write!(f, "Completed"),
+            Self::Pending => write!(f, "Pending"),
+            Self::Completing(_) => write!(f, "Completing"),
+            Self::Completed => write!(f, "Completed"),
         }
     }
 }
@@ -119,10 +119,7 @@ impl CompleteStateMachine {
         context.module.await_receive(operation_id).await
     }
 
-    fn transition_receive(
-        final_receive_state: FinalReceiveState,
-        old_state: &CompleteStateMachine,
-    ) -> CompleteStateMachine {
+    fn transition_receive(final_receive_state: FinalReceiveState, old_state: &Self) -> Self {
         old_state.update(CompleteSMState::Completing(final_receive_state))
     }
 
@@ -178,7 +175,7 @@ impl CompleteStateMachine {
         }
     }
 
-    fn transition_completion(old_state: &CompleteStateMachine) -> CompleteStateMachine {
+    fn transition_completion(old_state: &Self) -> Self {
         old_state.update(CompleteSMState::Completed)
     }
 }

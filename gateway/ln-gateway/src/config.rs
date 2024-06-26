@@ -107,9 +107,9 @@ pub enum LightningModuleMode {
 impl Display for LightningModuleMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LightningModuleMode::LNv1 => write!(f, "LNv1"),
-            LightningModuleMode::LNv2 => write!(f, "LNv2"),
-            LightningModuleMode::All => write!(f, "All"),
+            Self::LNv1 => write!(f, "LNv1"),
+            Self::LNv2 => write!(f, "LNv2"),
+            Self::All => write!(f, "All"),
         }
     }
 }
@@ -119,9 +119,9 @@ impl FromStr for LightningModuleMode {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mode = match s {
-            "LNv1" => LightningModuleMode::LNv1,
-            "LNv2" => LightningModuleMode::LNv2,
-            _ => LightningModuleMode::All,
+            "LNv1" => Self::LNv1,
+            "LNv2" => Self::LNv2,
+            _ => Self::All,
         };
 
         Ok(mode)

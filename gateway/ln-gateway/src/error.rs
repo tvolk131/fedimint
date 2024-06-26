@@ -34,22 +34,22 @@ impl IntoResponse for PublicGatewayError {
         // deducing state about the gateway/lightning node.
         error!("{self}");
         let (error_message, status_code) = match self {
-            PublicGatewayError::FederationNotConnected(e) => {
+            Self::FederationNotConnected(e) => {
                 (e.to_string(), StatusCode::BAD_REQUEST)
             }
-            PublicGatewayError::ReceiveEcashError { .. } => (
+            Self::ReceiveEcashError { .. } => (
                 "Failed to receive ecash".to_string(),
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
-            PublicGatewayError::Lightning(_) => (
+            Self::Lightning(_) => (
                 "Lightning Network operation failed".to_string(),
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
-            PublicGatewayError::LNv1(_) => (
+            Self::LNv1(_) => (
                 "LNv1 operation failed, please contact gateway operator".to_string(),
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
-            PublicGatewayError::LNv2(_) => (
+            Self::LNv2(_) => (
                 "LNv2 operation failed, please contact gateway operator".to_string(),
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),

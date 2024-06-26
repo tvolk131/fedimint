@@ -50,7 +50,7 @@ impl GatewayRpcClient {
     }
 
     pub fn with_password(&self, password: Option<String>) -> Self {
-        GatewayRpcClient::new(self.base_url.clone(), password)
+        Self::new(self.base_url.clone(), password)
     }
 
     pub async fn get_info(&self) -> GatewayRpcResult<GatewayInfo> {

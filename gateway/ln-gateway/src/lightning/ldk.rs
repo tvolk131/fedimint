@@ -103,7 +103,7 @@ impl GatewayLdkClient {
             }
         });
 
-        Ok(GatewayLdkClient {
+        Ok(Self {
             node,
             esplora_client: esplora_client::Builder::new(esplora_server_url).build_async()?,
             event_handler_task_handle,

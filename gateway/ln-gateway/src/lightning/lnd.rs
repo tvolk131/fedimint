@@ -80,7 +80,7 @@ impl GatewayLndClient {
             "Gateway configured to connect to LND LnRpcClient at \n address: {},\n tls cert path: {},\n macaroon path: {} ",
             address, tls_cert, macaroon
         );
-        GatewayLndClient {
+        Self {
             address,
             tls_cert,
             macaroon,
@@ -983,9 +983,10 @@ impl ILnRpcClient for GatewayLndClient {
         // First check if this completion request corresponds to a HOLD LNv2 invoice
         match action {
             ResolveHoldForwardAction::Settle => {
-                if let Ok(()) = self
+                if self
                     .settle_hold_invoice(payment_hash.clone(), preimage.clone())
                     .await
+                    .is_ok()
                 {
                     info!(
                         "Successfully settled HOLD invoice {}",
@@ -995,7 +996,7 @@ impl ILnRpcClient for GatewayLndClient {
                 }
             }
             _ => {
-                if let Ok(()) = self.cancel_hold_invoice(payment_hash.clone()).await {
+                if self.cancel_hold_invoice(payment_hash.clone()).await.is_ok() {
                     info!(
                         "Successfully canceled HOLD invoice {}",
                         PrettyPaymentHash(&payment_hash)

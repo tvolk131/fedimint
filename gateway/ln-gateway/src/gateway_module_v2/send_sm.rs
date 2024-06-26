@@ -61,9 +61,9 @@ pub enum SendSMState {
 impl fmt::Display for SendSMState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SendSMState::Sending => write!(f, "Sending"),
-            SendSMState::Claiming(_) => write!(f, "Claiming"),
-            SendSMState::Cancelled(_) => write!(f, "Cancelled"),
+            Self::Sending => write!(f, "Sending"),
+            Self::Claiming(_) => write!(f, "Claiming"),
+            Self::Cancelled(_) => write!(f, "Cancelled"),
         }
     }
 }
@@ -213,10 +213,10 @@ impl SendStateMachine {
 
     async fn transition_send_payment(
         dbtx: &mut ClientSMDatabaseTransaction<'_, '_>,
-        old_state: SendStateMachine,
+        old_state: Self,
         global_context: DynGlobalClientContext,
         result: Result<[u8; 32], Cancelled>,
-    ) -> SendStateMachine {
+    ) -> Self {
         match result {
             Ok(preimage) => {
                 let client_input = ClientInput::<LightningInput, LightningClientStateMachines> {

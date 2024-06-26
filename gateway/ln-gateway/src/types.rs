@@ -40,7 +40,7 @@ impl TryFrom<crate::gateway_lnrpc::GetRouteHintsResponse>
     type Error = anyhow::Error;
 
     fn try_from(res: crate::gateway_lnrpc::GetRouteHintsResponse) -> Result<Self, Self::Error> {
-        let mut route_hints = Vec::<fedimint_ln_common::route_hints::RouteHint>::new();
+        let mut route_hints = Self::new();
 
         for route_hint in res.route_hints {
             let mut hops = Vec::new();

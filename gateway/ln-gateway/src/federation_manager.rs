@@ -224,7 +224,7 @@ impl FederationManager {
             .get(&federation_id)
             .expect("`FederationManager.index_to_federation` is out of sync with `FederationManager.clients`! This is a bug.")
             .borrow()
-            .with(|client| async move {
+            .with(|client| async {
                 let balance_msat = client.get_balance().await;
 
                 let routing_fees = dbtx
