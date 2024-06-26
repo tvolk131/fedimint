@@ -140,10 +140,7 @@ impl ReceiveStateMachine {
         }
     }
 
-    fn transition_funding_rejected(
-        error: String,
-        old_state: &ReceiveStateMachine,
-    ) -> ReceiveStateMachine {
+    fn transition_funding_rejected(error: String, old_state: &Self) -> Self {
         old_state.update(ReceiveSMState::Rejected(error))
     }
 
@@ -203,10 +200,10 @@ impl ReceiveStateMachine {
     async fn transition_outcome_ready(
         dbtx: &mut ClientSMDatabaseTransaction<'_, '_>,
         decryption_shares: BTreeMap<PeerId, DecryptionKeyShare>,
-        old_state: ReceiveStateMachine,
+        old_state: Self,
         global_context: DynGlobalClientContext,
         tpe_agg_pk: AggregatePublicKey,
-    ) -> ReceiveStateMachine {
+    ) -> Self {
         let decryption_shares = decryption_shares
             .into_iter()
             .map(|(peer, share)| (peer.to_usize() as u64 + 1, share))

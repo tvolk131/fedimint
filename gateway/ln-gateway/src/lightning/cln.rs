@@ -41,7 +41,7 @@ impl NetworkLnRpcClient {
             "Gateway configured to connect to remote LnRpcClient at \n cln extension address: {} ",
             url.to_string()
         );
-        NetworkLnRpcClient {
+        Self {
             connection_url: url,
         }
     }

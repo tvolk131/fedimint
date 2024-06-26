@@ -64,7 +64,7 @@ impl GatewayLndClient {
             "Gateway configured to connect to LND LnRpcClient at \n address: {},\n tls cert path: {},\n macaroon path: {} ",
             address, tls_cert, macaroon
         );
-        GatewayLndClient {
+        Self {
             address,
             tls_cert,
             macaroon,

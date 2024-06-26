@@ -119,10 +119,7 @@ impl CompleteStateMachine {
         }
     }
 
-    fn transition_receive(
-        result: Result<[u8; 32], String>,
-        old_state: &CompleteStateMachine,
-    ) -> CompleteStateMachine {
+    fn transition_receive(result: Result<[u8; 32], String>, old_state: &Self) -> Self {
         old_state.update(CompleteSMState::Completing(result))
     }
 
@@ -170,7 +167,7 @@ impl CompleteStateMachine {
         }
     }
 
-    fn transition_completion(old_state: &CompleteStateMachine) -> CompleteStateMachine {
+    fn transition_completion(old_state: &Self) -> Self {
         old_state.update(CompleteSMState::Completed)
     }
 }
