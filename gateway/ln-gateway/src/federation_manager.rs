@@ -182,7 +182,7 @@ impl FederationManager {
                 "No federation with id {federation_id}"
             )))?
             .borrow()
-            .with(|client| async move {
+            .with(|client| async {
                 let balance_msat = client.get_balance().await;
                 let config = client.config().await;
 

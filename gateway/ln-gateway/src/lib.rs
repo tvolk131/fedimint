@@ -1,15 +1,22 @@
-#![warn(clippy::pedantic)]
+#![warn(clippy::pedantic, clippy::nursery)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::default_trait_access)]
 #![allow(clippy::doc_markdown)]
+#![allow(clippy::future_not_send)]
+#![allow(clippy::missing_const_for_fn)]
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_fields_in_debug)]
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::must_use_candidate)]
+#![allow(clippy::needless_pass_by_ref_mut)]
+#![allow(clippy::option_if_let_else)]
+#![allow(clippy::or_fun_call)]
 #![allow(clippy::return_self_not_must_use)]
+#![allow(clippy::significant_drop_in_scrutinee)]
+#![allow(clippy::significant_drop_tightening)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::struct_field_names)]
 #![allow(clippy::too_many_lines)]
@@ -261,11 +268,11 @@ pub enum GatewayState {
 impl Display for GatewayState {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            GatewayState::Initializing => write!(f, "Initializing"),
-            GatewayState::Configuring => write!(f, "Configuring"),
-            GatewayState::Connected => write!(f, "Connected"),
-            GatewayState::Running { .. } => write!(f, "Running"),
-            GatewayState::Disconnected => write!(f, "Disconnected"),
+            Self::Initializing => write!(f, "Initializing"),
+            Self::Configuring => write!(f, "Configuring"),
+            Self::Connected => write!(f, "Connected"),
+            Self::Running { .. } => write!(f, "Running"),
+            Self::Disconnected => write!(f, "Disconnected"),
         }
     }
 }
@@ -348,11 +355,11 @@ impl Gateway {
         num_route_hints: u32,
         gateway_db: Database,
         gateway_state: GatewayState,
-    ) -> anyhow::Result<Gateway> {
+    ) -> anyhow::Result<Self> {
         let versioned_api = api_addr
             .join(V1_API_ENDPOINT)
             .expect("Failed to version gateway API address");
-        Gateway::new(
+        Self::new(
             lightning_builder,
             GatewayParameters {
                 listen,
@@ -371,7 +378,7 @@ impl Gateway {
 
     /// Default function for creating a gateway with the `Mint`, `Wallet`, and
     /// `Gateway` modules.
-    pub async fn new_with_default_modules() -> anyhow::Result<Gateway> {
+    pub async fn new_with_default_modules() -> anyhow::Result<Self> {
         let opts = GatewayOpts::parse();
 
         // Gateway module will be attached when the federation clients are created
@@ -400,7 +407,7 @@ impl Gateway {
 
         let gateway_parameters = opts.to_gateway_parameters()?;
 
-        Gateway::new(
+        Self::new(
             Arc::new(GatewayLightningBuilder {
                 lightning_mode: opts.mode,
                 gateway_db: gateway_db.clone(),
@@ -421,7 +428,7 @@ impl Gateway {
         gateway_db: Database,
         client_builder: GatewayClientBuilder,
         gateway_state: GatewayState,
-    ) -> anyhow::Result<Gateway> {
+    ) -> anyhow::Result<Self> {
         // Apply database migrations before using the database to ensure old database
         // structures are readable.
         apply_migrations_server(
@@ -746,7 +753,7 @@ impl Gateway {
                             None
                         })
                         .await;
-                    if let Some(ControlFlow::Continue(())) = cf {
+                    if cf == Some(ControlFlow::Continue(())) {
                         continue;
                     }
                 }
@@ -1782,12 +1789,12 @@ impl IntoResponse for GatewayError {
         // the request back to the client to prevent malicious clients from
         // deducing state about the gateway/lightning node.
         let (error_message, status_code) = match self {
-            GatewayError::OutgoingPaymentError(_) => (
+            Self::OutgoingPaymentError(_) => (
                 "Error while paying lightning invoice. Outgoing contract will be refunded."
                     .to_string(),
                 StatusCode::BAD_REQUEST,
             ),
-            GatewayError::Disconnected => (
+            Self::Disconnected => (
                 "The gateway is disconnected from the Lightning Node".to_string(),
                 StatusCode::NOT_FOUND,
             ),

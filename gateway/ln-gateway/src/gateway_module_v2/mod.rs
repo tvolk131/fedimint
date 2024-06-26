@@ -164,19 +164,19 @@ impl State for GatewayClientStateMachinesV2 {
         global_context: &DynGlobalClientContext,
     ) -> Vec<StateTransition<Self>> {
         match self {
-            GatewayClientStateMachinesV2::Send(state) => {
+            Self::Send(state) => {
                 sm_enum_variant_translation!(
                     state.transitions(context, global_context),
                     GatewayClientStateMachinesV2::Send
                 )
             }
-            GatewayClientStateMachinesV2::Receive(state) => {
+            Self::Receive(state) => {
                 sm_enum_variant_translation!(
                     state.transitions(context, global_context),
                     GatewayClientStateMachinesV2::Receive
                 )
             }
-            GatewayClientStateMachinesV2::Complete(state) => {
+            Self::Complete(state) => {
                 sm_enum_variant_translation!(
                     state.transitions(context, global_context),
                     GatewayClientStateMachinesV2::Complete
@@ -187,9 +187,9 @@ impl State for GatewayClientStateMachinesV2 {
 
     fn operation_id(&self) -> OperationId {
         match self {
-            GatewayClientStateMachinesV2::Send(state) => state.operation_id(),
-            GatewayClientStateMachinesV2::Receive(state) => state.operation_id(),
-            GatewayClientStateMachinesV2::Complete(state) => state.operation_id(),
+            Self::Send(state) => state.operation_id(),
+            Self::Receive(state) => state.operation_id(),
+            Self::Complete(state) => state.operation_id(),
         }
     }
 }

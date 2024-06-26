@@ -98,10 +98,7 @@ impl CompleteStateMachine {
         context.module.await_receive(operation_id).await
     }
 
-    fn transition_receive(
-        final_receive_state: FinalReceiveState,
-        old_state: &CompleteStateMachine,
-    ) -> CompleteStateMachine {
+    fn transition_receive(final_receive_state: FinalReceiveState, old_state: &Self) -> Self {
         old_state.update(CompleteSMState::Completing(final_receive_state))
     }
 
@@ -157,7 +154,7 @@ impl CompleteStateMachine {
         }
     }
 
-    fn transition_completion(old_state: &CompleteStateMachine) -> CompleteStateMachine {
+    fn transition_completion(old_state: &Self) -> Self {
         old_state.update(CompleteSMState::Completed)
     }
 }

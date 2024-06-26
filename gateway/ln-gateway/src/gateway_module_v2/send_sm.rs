@@ -197,10 +197,10 @@ impl SendStateMachine {
 
     async fn transition_send_payment(
         dbtx: &mut ClientSMDatabaseTransaction<'_, '_>,
-        old_state: SendStateMachine,
+        old_state: Self,
         global_context: DynGlobalClientContext,
         result: Result<[u8; 32], Cancelled>,
-    ) -> SendStateMachine {
+    ) -> Self {
         match result {
             Ok(preimage) => {
                 let client_input = ClientInput::<LightningInput, LightningClientStateMachines> {
