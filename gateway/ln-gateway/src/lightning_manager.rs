@@ -40,6 +40,11 @@ impl LightningManager {
         }
     }
 
+    /// Creates a new connection to the lightning node and starts intercepting
+    /// HTLCs. If the gateway is already connected, the existing HTLC
+    /// interception will be stopped before creating a new connection. If this
+    /// method returns an error, the gateway will be in the `Disconnected` state
+    /// and no HTLC interception will be running.
     pub async fn connect_route_htlcs(
         &self,
         task_group: TaskGroup,
@@ -47,18 +52,27 @@ impl LightningManager {
         // If the gateway is already connected, stop the current HTLC interception.
         self.stop_route_htlcs().await;
 
-        let (stream, ln_client) = self
+        // Set the task group for HTLC interception.
+        // We want to do this before we connect to the lightning node to ensure
+        // that we can stop the task group if `route_htlcs` fails.
+        *self.htlc_task_group_or.write().await = Some(task_group.clone());
+
+        match self
             .lightning_builder
             .build()
             .await
             .route_htlcs(&task_group)
-            .await?;
-
-        self.set_state(GatewayState::Connected).await;
-
-        *self.htlc_task_group_or.write().await = Some(task_group);
-
-        Ok((stream, ln_client))
+            .await
+        {
+            Ok((stream, ln_client)) => {
+                self.set_state(GatewayState::Connected).await;
+                Ok((stream, ln_client))
+            }
+            Err(err) => {
+                self.disconnect_stop_route_htlcs().await;
+                Err(err)
+            }
+        }
     }
 
     /// Sets the gateway state to `Disconnected` and shuts down the task that is
