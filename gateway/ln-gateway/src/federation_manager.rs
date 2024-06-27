@@ -116,4 +116,20 @@ impl FederationManager {
         // lambda and pass it into `client.with_sync`.
         clients.get(federation_id).cloned()
     }
+
+    // TODO(tvolk131): Optimize this function by adding a reverse map from
+    // federation_id to scid.
+    pub async fn get_scid_for_federation(&self, federation_id: FederationId) -> Option<u64> {
+        self.scid_to_federation
+            .read()
+            .await
+            .iter()
+            .find_map(|(scid, fid)| {
+                if *fid == federation_id {
+                    Some(*scid)
+                } else {
+                    None
+                }
+            })
+    }
 }
