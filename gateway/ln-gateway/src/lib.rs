@@ -983,7 +983,7 @@ impl Gateway {
                 .await;
 
             let dbtx = self.gateway_db.begin_transaction().await;
-            self.client_builder.save_config(gw_client_cfg, dbtx).await?;
+            GatewayClientBuilder::save_config(gw_client_cfg, dbtx).await?;
             debug!("Federation with ID: {federation_id} connected and assigned channel id: {mint_channel_id}");
 
             return Ok(federation_info);
@@ -1332,7 +1332,7 @@ impl Gateway {
     /// connection federations.
     async fn load_clients(&self) {
         let dbtx = self.gateway_db.begin_transaction().await;
-        let configs = self.client_builder.load_configs(dbtx.into_nc()).await;
+        let configs = GatewayClientBuilder::load_configs(dbtx.into_nc()).await;
 
         let _join_federation = self.federation_manager.client_joining_lock.lock().await;
 
