@@ -21,20 +21,11 @@ type ScidToFederationMap = Arc<RwLock<BTreeMap<u64, FederationId>>>;
 type FederationToClientMap =
     Arc<RwLock<BTreeMap<FederationId, Spanned<fedimint_client::ClientHandleArc>>>>;
 
-/// A marker struct, to distinguish lock over `FederationManager::clients`.
-/// TODO(tvolk131): Make this struct private.
-pub struct ClientsJoinLock;
-
 // TODO(tvolk131): Make the fields in this struct private.
 pub struct FederationManager {
     /// Map of `FederationId` -> `Client`. Used for efficient retrieval of the
     /// client while handling incoming HTLCs.
     clients: FederationToClientMap,
-
-    /// Joining or leaving Federation is protected by this lock to prevent
-    /// trying to use same database at the same time from multiple threads.
-    /// Could be more granular (per id), but shouldn't matter in practice.
-    pub client_joining_lock: Arc<tokio::sync::Mutex<ClientsJoinLock>>,
 
     /// Map of short channel ids to `FederationId`. Use for efficient retrieval
     /// of the client while handling incoming HTLCs.
@@ -60,7 +51,6 @@ impl FederationManager {
     pub fn new() -> Self {
         Self {
             clients: Arc::new(RwLock::new(BTreeMap::new())),
-            client_joining_lock: Arc::new(Mutex::new(ClientsJoinLock)),
             scid_to_federation: Arc::new(RwLock::new(BTreeMap::new())),
             next_scid: Arc::new(Mutex::new(INITIAL_SCID)),
         }

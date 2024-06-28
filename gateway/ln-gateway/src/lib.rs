@@ -108,7 +108,7 @@ use state_machine::pay::OutgoingPaymentError;
 use state_machine::GatewayClientModule;
 use strum::IntoEnumIterator;
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::db::{
@@ -169,6 +169,9 @@ enum HandleStreamResult {
     NoRetry,
 }
 
+/// A marker struct, to distinguish lock over federations in the gateway DB.
+pub struct DbFederationLock;
+
 #[derive(Clone)]
 pub struct Gateway {
     /// The gateway's federation manager.
@@ -186,6 +189,11 @@ pub struct Gateway {
 
     /// Database for Gateway metadata.
     gateway_db: Database,
+
+    /// Joining or leaving Federation is protected by this lock to prevent
+    /// trying to use same database at the same time from multiple threads.
+    /// Could be more granular (per id), but shouldn't matter in practice.
+    pub db_federation_lock: Arc<tokio::sync::Mutex<DbFederationLock>>,
 
     /// A public key representing the identity of the gateway. Private key is
     /// not used.
@@ -317,6 +325,7 @@ impl Gateway {
             client_builder,
             gateway_id: Self::load_gateway_id(&gateway_db).await,
             gateway_db,
+            db_federation_lock: Arc::new(Mutex::new(DbFederationLock)),
             versioned_api: gateway_parameters.versioned_api,
             listen: gateway_parameters.listen,
         })
@@ -894,7 +903,7 @@ impl Gateway {
         })?;
         let federation_id = invite_code.federation_id();
 
-        let _join_federation = self.federation_manager.client_joining_lock.lock().await;
+        let _db_federation_lock_guard = self.db_federation_lock.lock().await;
 
         // Check if this federation has already been registered
         if self.federation_manager.has_federation(federation_id).await {
@@ -981,7 +990,7 @@ impl Gateway {
         &self,
         payload: LeaveFedPayload,
     ) -> Result<FederationInfo> {
-        let _client_joining_lock = self.federation_manager.client_joining_lock.lock().await;
+        let _db_federation_lock_guard = self.db_federation_lock.lock().await;
         let mut dbtx = self.gateway_db.begin_transaction().await;
 
         let federation_info = {
@@ -1308,7 +1317,7 @@ impl Gateway {
         let dbtx = self.gateway_db.begin_transaction().await;
         let configs = GatewayClientBuilder::load_configs(dbtx.into_nc()).await;
 
-        let _join_federation = self.federation_manager.client_joining_lock.lock().await;
+        let _db_federation_lock_guard = self.db_federation_lock.lock().await;
 
         for config in configs.clone() {
             let federation_id = config.invite_code.federation_id();
