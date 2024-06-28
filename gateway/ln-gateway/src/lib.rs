@@ -1660,11 +1660,9 @@ impl Gateway {
             bail!("The available decryption contract's amount is not equal the requested amount")
         }
 
-        let clients = self.federation_manager.clients.read().await;
-
-        let client = clients
-            .get(&registered_incoming_contract.federation_id)
-            .ok_or(anyhow!("Federation client not available"))?
+        let client = self
+            .select_client(registered_incoming_contract.federation_id)
+            .await?
             .value()
             .clone();
 
