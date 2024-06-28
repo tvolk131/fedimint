@@ -29,7 +29,7 @@ pub struct ClientsJoinLock;
 pub struct FederationManager {
     /// Map of `FederationId` -> `Client`. Used for efficient retrieval of the
     /// client while handling incoming HTLCs.
-    pub clients: FederationToClientMap,
+    clients: FederationToClientMap,
 
     /// Joining or leaving Federation is protected by this lock to prevent
     /// trying to use same database at the same time from multiple threads.
@@ -142,6 +142,17 @@ impl FederationManager {
 
     pub async fn clone_scid_map(&self) -> BTreeMap<u64, FederationId> {
         self.scid_to_federation.read().await.clone()
+    }
+
+    pub async fn clone_client_map(&self) -> BTreeMap<FederationId, Spanned<ClientHandleArc>> {
+        self.clients.read().await.clone()
+    }
+
+    pub async fn get_client(
+        &self,
+        federation_id: FederationId,
+    ) -> Option<Spanned<ClientHandleArc>> {
+        self.clients.read().await.get(&federation_id).cloned()
     }
 
     pub async fn has_federation(&self, federation_id: FederationId) -> bool {

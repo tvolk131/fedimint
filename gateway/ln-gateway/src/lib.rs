@@ -679,7 +679,7 @@ impl Gateway {
             .expect("Gateway configuration should be set");
 
         let mut federations = Vec::new();
-        for (federation_id, client) in self.federation_manager.clients.read().await.clone() {
+        for (federation_id, client) in self.federation_manager.clone_client_map().await {
             federations.push(
                 client
                     .borrow()
@@ -730,14 +730,7 @@ impl Gateway {
                 client.borrow().with_sync(|client| client.get_config_json()),
             );
         } else {
-            let federation_clients = self
-                .federation_manager
-                .clients
-                .read()
-                .await
-                .clone()
-                .into_iter();
-            for (federation_id, client) in federation_clients {
+            for (federation_id, client) in self.federation_manager.clone_client_map().await {
                 federations.insert(
                     federation_id,
                     client.borrow().with_sync(|client| client.get_config_json()),
@@ -1224,13 +1217,7 @@ impl Gateway {
         }
 
         for (federation_id, federation_config) in federations {
-            if let Some(client) = self
-                .federation_manager
-                .clients
-                .read()
-                .await
-                .get(federation_id)
-            {
+            if let Some(client) = self.federation_manager.get_client(*federation_id).await {
                 if let Err(e) = async {
                     client
                         .value()
@@ -1307,11 +1294,8 @@ impl Gateway {
         federation_id: FederationId,
     ) -> Result<Spanned<fedimint_client::ClientHandleArc>> {
         self.federation_manager
-            .clients
-            .read()
+            .get_client(federation_id)
             .await
-            .get(&federation_id)
-            .cloned()
             .ok_or(GatewayError::InvalidMetadata(format!(
                 "No federation with id {federation_id}"
             )))
@@ -1459,7 +1443,7 @@ impl Gateway {
             .get_value(&GatewayPublicKey)
             .await
             .expect("Gateway keypair does not exist");
-        for (_, client) in self.federation_manager.clients.read().await.iter() {
+        for (_, client) in self.federation_manager.clone_client_map().await {
             client
                 .value()
                 .get_first_module::<GatewayClientModule>()
@@ -1480,10 +1464,8 @@ impl Gateway {
     /// per-connected federation.
     async fn public_key_v2(&self, federation_id: &FederationId) -> Option<PublicKey> {
         self.federation_manager
-            .clients
-            .read()
+            .get_client(*federation_id)
             .await
-            .get(federation_id)
             .map(|client| {
                 client
                     .value()
@@ -1512,14 +1494,11 @@ impl Gateway {
         &self,
         payload: SendPaymentPayload,
     ) -> anyhow::Result<std::result::Result<[u8; 32], Signature>> {
-        let clients = self.federation_manager.clients.read().await;
-
-        let client = clients
-            .get(&payload.federation_id)
+        self.federation_manager
+            .get_client(payload.federation_id)
+            .await
             .ok_or(anyhow!("Federation client not available"))?
-            .value();
-
-        client
+            .value()
             .get_first_module::<GatewayClientModuleV2>()
             .send_payment(payload)
             .await

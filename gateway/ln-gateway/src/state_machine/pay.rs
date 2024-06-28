@@ -753,11 +753,8 @@ impl GatewayPayWaitForSwapPreimage {
         let client = context
             .gateway
             .federation_manager
-            .clients
-            .read()
+            .get_client(federation_id)
             .await
-            .get(&federation_id)
-            .cloned()
             .ok_or(OutgoingPaymentError {
                 contract_id: contract.contract.contract_id(),
                 contract: Some(contract.clone()),
