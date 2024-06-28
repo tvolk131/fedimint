@@ -685,32 +685,32 @@ impl ClientWeak {
 /// `Arc<Client>`s such that at least one `Executor` never gets dropped.
 impl Drop for ClientHandle {
     fn drop(&mut self) {
-        if self.inner.is_none() {
-            return;
-        }
+        if let Some(inner) = &self.inner {
+            // We can't use block_on in single-threaded mode or wasm
+            #[cfg(target_family = "wasm")]
+            let can_block = false;
+            #[cfg(not(target_family = "wasm"))]
+            // nosemgrep: ban-raw-block-on
+            let can_block =
+                RuntimeHandle::current().runtime_flavor() != RuntimeFlavor::CurrentThread;
 
-        // We can't use block_on in single-threaded mode or wasm
-        #[cfg(target_family = "wasm")]
-        let can_block = false;
-        #[cfg(not(target_family = "wasm"))]
-        // nosemgrep: ban-raw-block-on
-        let can_block = RuntimeHandle::current().runtime_flavor() != RuntimeFlavor::CurrentThread;
-        if !can_block {
-            let inner = self.inner.take().expect("Must have inner client set");
-            inner.executor.stop_executor();
-            if cfg!(target_family = "wasm") {
+            if !can_block {
+                inner.executor.stop_executor();
+
+                #[cfg(target_family = "wasm")]
                 error!(target: LOG_CLIENT, "Automatic client shutdown is not possible on wasm, call ClientHandle::shutdown manually.");
-            } else {
+                #[cfg(not(target_family = "wasm"))]
                 error!(target: LOG_CLIENT, "Automatic client shutdown is not possible on current thread runtime, call ClientHandle::shutdown manually.");
-            }
-            return;
-        }
 
-        debug!(target: LOG_CLIENT, "Shutting down the Client on last handle drop");
-        #[cfg(not(target_family = "wasm"))]
-        runtime::block_in_place(|| {
-            runtime::block_on(self.shutdown_inner());
-        });
+                return;
+            }
+
+            debug!(target: LOG_CLIENT, "Shutting down the Client on last handle drop");
+            #[cfg(not(target_family = "wasm"))]
+            runtime::block_in_place(|| {
+                runtime::block_on(self.shutdown_inner());
+            });
+        }
     }
 }
 
