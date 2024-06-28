@@ -716,34 +716,35 @@ impl Gateway {
         &self,
         federation_id: Option<FederationId>,
     ) -> Result<GatewayFedConfig> {
-        if let GatewayState::Running { .. } = self.get_state().await {
-            let mut federations = BTreeMap::new();
-            if let Some(federation_id) = federation_id {
-                let client = self.select_client(federation_id).await?;
+        if !self.is_running().await {
+            return Ok(GatewayFedConfig {
+                federations: BTreeMap::new(),
+            });
+        }
+
+        let mut federations = BTreeMap::new();
+        if let Some(federation_id) = federation_id {
+            let client = self.select_client(federation_id).await?;
+            federations.insert(
+                federation_id,
+                client.borrow().with_sync(|client| client.get_config_json()),
+            );
+        } else {
+            let federation_clients = self
+                .federation_manager
+                .clients
+                .read()
+                .await
+                .clone()
+                .into_iter();
+            for (federation_id, client) in federation_clients {
                 federations.insert(
                     federation_id,
                     client.borrow().with_sync(|client| client.get_config_json()),
                 );
-            } else {
-                let federation_clients = self
-                    .federation_manager
-                    .clients
-                    .read()
-                    .await
-                    .clone()
-                    .into_iter();
-                for (federation_id, client) in federation_clients {
-                    federations.insert(
-                        federation_id,
-                        client.borrow().with_sync(|client| client.get_config_json()),
-                    );
-                }
             }
-            return Ok(GatewayFedConfig { federations });
         }
-        Ok(GatewayFedConfig {
-            federations: BTreeMap::new(),
-        })
+        Ok(GatewayFedConfig { federations })
     }
 
     /// Returns the balance of the requested federation that the Gateway is
@@ -838,49 +839,49 @@ impl Gateway {
     /// Requests the gateway to pay an outgoing LN invoice on behalf of a
     /// Fedimint client. Returns the payment hash's preimage on success.
     async fn handle_pay_invoice_msg(&self, payload: PayInvoicePayload) -> Result<Preimage> {
-        if let GatewayState::Running { .. } = self.get_state().await {
-            debug!("Handling pay invoice message: {payload:?}");
-            let client = self.select_client(payload.federation_id).await?;
-            let contract_id = payload.contract_id;
-            let gateway_module = &client.value().get_first_module::<GatewayClientModule>();
-            let operation_id = gateway_module.gateway_pay_bolt11_invoice(payload).await?;
-            let mut updates = gateway_module
-                .gateway_subscribe_ln_pay(operation_id)
-                .await?
-                .into_stream();
-            while let Some(update) = updates.next().await {
-                match update {
-                    GatewayExtPayStates::Success { preimage, .. } => {
-                        debug!("Successfully paid invoice: {contract_id}");
-                        return Ok(preimage);
-                    }
-                    GatewayExtPayStates::Fail {
-                        error,
-                        error_message,
-                    } => {
-                        error!("{error_message} while paying invoice: {contract_id}");
-                        return Err(GatewayError::OutgoingPaymentError(Box::new(error)));
-                    }
-                    GatewayExtPayStates::Canceled { error } => {
-                        error!("Cancelled with {error} while paying invoice: {contract_id}");
-                        return Err(GatewayError::OutgoingPaymentError(Box::new(error)));
-                    }
-                    GatewayExtPayStates::Created => {
-                        debug!("Got initial state Created while paying invoice: {contract_id}");
-                    }
-                    other => {
-                        info!("Got state {other:?} while paying invoice: {contract_id}");
-                    }
-                };
-            }
-
-            return Err(GatewayError::UnexpectedState(
-                "Ran out of state updates while paying invoice".to_string(),
-            ));
+        if !self.is_running().await {
+            warn!("Gateway is not connected, cannot handle {payload:?}");
+            return Err(GatewayError::Disconnected);
         }
 
-        warn!("Gateway is not connected, cannot handle {payload:?}");
-        Err(GatewayError::Disconnected)
+        debug!("Handling pay invoice message: {payload:?}");
+        let client = self.select_client(payload.federation_id).await?;
+        let contract_id = payload.contract_id;
+        let gateway_module = &client.value().get_first_module::<GatewayClientModule>();
+        let operation_id = gateway_module.gateway_pay_bolt11_invoice(payload).await?;
+        let mut updates = gateway_module
+            .gateway_subscribe_ln_pay(operation_id)
+            .await?
+            .into_stream();
+        while let Some(update) = updates.next().await {
+            match update {
+                GatewayExtPayStates::Success { preimage, .. } => {
+                    debug!("Successfully paid invoice: {contract_id}");
+                    return Ok(preimage);
+                }
+                GatewayExtPayStates::Fail {
+                    error,
+                    error_message,
+                } => {
+                    error!("{error_message} while paying invoice: {contract_id}");
+                    return Err(GatewayError::OutgoingPaymentError(Box::new(error)));
+                }
+                GatewayExtPayStates::Canceled { error } => {
+                    error!("Cancelled with {error} while paying invoice: {contract_id}");
+                    return Err(GatewayError::OutgoingPaymentError(Box::new(error)));
+                }
+                GatewayExtPayStates::Created => {
+                    debug!("Got initial state Created while paying invoice: {contract_id}");
+                }
+                other => {
+                    info!("Got state {other:?} while paying invoice: {contract_id}");
+                }
+            };
+        }
+
+        Err(GatewayError::UnexpectedState(
+            "Ran out of state updates while paying invoice".to_string(),
+        ))
     }
 
     /// Handles a connection request to join a new federation. The gateway will
@@ -1471,6 +1472,10 @@ impl Gateway {
                 .remove_from_federation(keypair)
                 .await;
         }
+    }
+
+    async fn is_running(&self) -> bool {
+        matches!(self.get_state().await, GatewayState::Running { .. })
     }
 }
 
