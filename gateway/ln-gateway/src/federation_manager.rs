@@ -66,6 +66,10 @@ impl FederationManager {
         }
     }
 
+    pub async fn is_empty(&self) -> bool {
+        self.clients.read().await.is_empty()
+    }
+
     pub async fn add_client(
         &self,
         scid: u64,
