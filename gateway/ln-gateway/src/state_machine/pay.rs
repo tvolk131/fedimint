@@ -643,8 +643,9 @@ impl GatewayPayInvoice {
                     context
                         .gateway
                         .federation_manager
-                        .get_client_for_scid(hop.short_channel_id)
+                        .read()
                         .await
+                        .get_client_for_scid(hop.short_channel_id)
                 }
                 _ => None,
             },
@@ -753,8 +754,9 @@ impl GatewayPayWaitForSwapPreimage {
         let client = context
             .gateway
             .federation_manager
-            .get_client(federation_id)
+            .read()
             .await
+            .get_client(federation_id)
             .ok_or(OutgoingPaymentError {
                 contract_id: contract.contract.contract_id(),
                 contract: Some(contract.clone()),
