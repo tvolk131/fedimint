@@ -779,7 +779,7 @@ impl Gateway {
             .expect("Gateway configuration should be set");
 
         let mut federations = Vec::new();
-        for (federation_id, client) in self.federation_manager.clients.read().await.clone() {
+        for (federation_id, client) in self.federation_manager.borrow_clients().await.clone() {
             federations.push(
                 client
                     .borrow()
@@ -827,8 +827,7 @@ impl Gateway {
             } else {
                 let federation_clients = self
                     .federation_manager
-                    .clients
-                    .read()
+                    .borrow_clients()
                     .await
                     .clone()
                     .into_iter();
@@ -1316,8 +1315,7 @@ impl Gateway {
             for (federation_id, federation_config) in federations {
                 if let Some(client) = self
                     .federation_manager
-                    .clients
-                    .read()
+                    .borrow_clients()
                     .await
                     .get(federation_id)
                 {
@@ -1410,8 +1408,7 @@ impl Gateway {
         federation_id: FederationId,
     ) -> Result<Spanned<fedimint_client::ClientHandleArc>> {
         self.federation_manager
-            .clients
-            .read()
+            .borrow_clients()
             .await
             .get(&federation_id)
             .cloned()
@@ -1575,7 +1572,7 @@ impl Gateway {
             .get_value(&GatewayPublicKey)
             .await
             .expect("Gateway keypair does not exist");
-        for (_, client) in self.federation_manager.clients.read().await.iter() {
+        for (_, client) in self.federation_manager.borrow_clients().await.iter() {
             client
                 .value()
                 .get_first_module::<GatewayClientModule>()
@@ -1592,8 +1589,7 @@ impl Gateway {
     /// per-connected federation.
     async fn public_key_v2(&self, federation_id: &FederationId) -> Option<PublicKey> {
         self.federation_manager
-            .clients
-            .read()
+            .borrow_clients()
             .await
             .get(federation_id)
             .map(|client| {
@@ -1624,7 +1620,7 @@ impl Gateway {
         &self,
         payload: SendPaymentPayload,
     ) -> anyhow::Result<std::result::Result<[u8; 32], Signature>> {
-        let clients = self.federation_manager.clients.read().await;
+        let clients = self.federation_manager.borrow_clients().await;
 
         let client = clients
             .get(&payload.federation_id)
@@ -1765,7 +1761,7 @@ impl Gateway {
             bail!("The available decryption contract's amount is not equal the requested amount")
         }
 
-        let clients = self.federation_manager.clients.read().await;
+        let clients = self.federation_manager.borrow_clients().await;
 
         let client = clients
             .get(&registered_incoming_contract.federation_id)
