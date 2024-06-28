@@ -79,6 +79,9 @@ impl FederationManager {
             .insert(scid, federation_id);
     }
 
+    /// Removes a federation client from the Gateway's in memory structures that
+    /// keep track of available clients. Does not remove the persisted
+    /// client configuration in the database.
     pub async fn remove_client(&self, federation_id: FederationId) -> Result<()> {
         let client = self
             .clients
