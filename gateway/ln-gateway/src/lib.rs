@@ -67,27 +67,19 @@ use fedimint_core::endpoint_constants::REGISTER_GATEWAY_ENDPOINT;
 use fedimint_core::fmt_utils::OptStacktrace;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_core::module::CommonModuleInit;
-use fedimint_core::secp256k1::schnorr::Signature;
 use fedimint_core::secp256k1::{KeyPair, PublicKey, Secp256k1};
 use fedimint_core::task::{sleep, TaskGroup, TaskHandle, TaskShutdownToken};
 use fedimint_core::time::duration_since_epoch;
 use fedimint_core::util::{SafeUrl, Spanned};
-use fedimint_core::{
-    fedimint_build_code_version_env, push_db_pair_items, Amount, BitcoinAmountOrAll, BitcoinHash,
-};
+use fedimint_core::{fedimint_build_code_version_env, push_db_pair_items, Amount, BitcoinHash};
 use fedimint_ln_client::pay::PayInvoicePayload;
 use fedimint_ln_common::config::{GatewayFee, LightningClientConfig};
 use fedimint_ln_common::contracts::Preimage;
 use fedimint_ln_common::LightningCommonInit;
-use fedimint_lnv2_client::{
-    Bolt11InvoiceDescription, CreateBolt11InvoicePayload, PaymentFee, RoutingInfo,
-    SendPaymentPayload,
-};
+use fedimint_lnv2_client::{Bolt11InvoiceDescription, CreateBolt11InvoicePayload};
 use fedimint_lnv2_common::contracts::IncomingContract;
 use fedimint_mint_client::{MintClientInit, MintCommonInit};
-use fedimint_wallet_client::{
-    WalletClientInit, WalletClientModule, WalletCommonInit, WithdrawState,
-};
+use fedimint_wallet_client::{WalletClientInit, WalletClientModule, WalletCommonInit};
 use futures::stream::StreamExt;
 use gateway_lnrpc::intercept_htlc_response::Action;
 use gateway_lnrpc::{CloseChannelsWithPeerResponse, InterceptHtlcResponse};
@@ -144,7 +136,7 @@ pub const DEFAULT_FEES: RoutingFees = RoutingFees {
 };
 
 /// LNv2 CLTV Delta in blocks
-const EXPIRATION_DELTA_MINIMUM_V2: u64 = 144;
+pub const EXPIRATION_DELTA_MINIMUM_V2: u64 = 144;
 
 pub type Result<T> = std::result::Result<T, GatewayError>;
 
@@ -692,6 +684,7 @@ impl Gateway {
                     if let Some(short_channel_id) = htlc_request.short_channel_id {
                         // Just forward the HTLC if we do not have a federation that
                         // corresponds to the short channel id
+                        // TODO(tvolk131): Move this entire block into `FederationManager`.
                         if let Some(client) = self
                             .federation_manager
                             .read()
@@ -825,27 +818,24 @@ impl Gateway {
         federation_id: Option<FederationId>,
     ) -> Result<GatewayFedConfig> {
         if let GatewayState::Running { .. } = self.get_state().await {
-            let mut federations = BTreeMap::new();
-            if let Some(federation_id) = federation_id {
-                let client = self.select_client(federation_id).await?;
+            let federations = if let Some(federation_id) = federation_id {
+                let mut federations = BTreeMap::new();
                 federations.insert(
                     federation_id,
-                    client.borrow().with_sync(|client| client.get_config_json()),
+                    self.federation_manager
+                        .read()
+                        .await
+                        .get_config_for_federation(federation_id)?,
                 );
+                federations
             } else {
-                for (federation_id, client) in self
-                    .federation_manager
+                self.federation_manager
                     .read()
                     .await
-                    .borrow_clients()
-                    .clone()
-                {
-                    federations.insert(
-                        federation_id,
-                        client.borrow().with_sync(|client| client.get_config_json()),
-                    );
-                }
-            }
+                    .get_all_federation_configs()
+                    .into_iter()
+                    .collect()
+            };
             return Ok(GatewayFedConfig { federations });
         }
         Ok(GatewayFedConfig {
@@ -857,20 +847,21 @@ impl Gateway {
     /// connected to.
     pub async fn handle_balance_msg(&self, payload: BalancePayload) -> Result<Amount> {
         // no need for instrument, it is done on api layer
-        Ok(self
-            .select_client(payload.federation_id)
-            .await?
-            .value()
-            .get_balance()
-            .await)
+        self.federation_manager
+            .read()
+            .await
+            .get_balance_for_federation(payload.federation_id)
+            .await
     }
 
     /// Returns a Bitcoin deposit on-chain address for pegging in Bitcoin for a
     /// specific connected federation.
     pub async fn handle_address_msg(&self, payload: DepositAddressPayload) -> Result<Address> {
         let (_, address, _) = self
-            .select_client(payload.federation_id)
-            .await?
+            .federation_manager
+            .read()
+            .await
+            .select_client(payload.federation_id)?
             .value()
             .get_first_module::<WalletClientModule>()
             .allocate_deposit_address()
@@ -882,64 +873,15 @@ impl Gateway {
     /// connected federation.
     pub async fn handle_withdraw_msg(&self, payload: WithdrawPayload) -> Result<Txid> {
         let WithdrawPayload {
+            federation_id,
             amount,
             address,
-            federation_id,
         } = payload;
-        let client = self.select_client(federation_id).await?;
-        let wallet_module = client.value().get_first_module::<WalletClientModule>();
-
-        // TODO: Fees should probably be passed in as a parameter
-        let (amount, fees) = match amount {
-            // If the amount is "all", then we need to subtract the fees from
-            // the amount we are withdrawing
-            BitcoinAmountOrAll::All => {
-                let balance =
-                    bitcoin::Amount::from_sat(client.value().get_balance().await.msats / 1000);
-                let fees = wallet_module
-                    .get_withdraw_fees(address.clone(), balance)
-                    .await?;
-                let withdraw_amount = balance.checked_sub(fees.amount());
-                if withdraw_amount.is_none() {
-                    return Err(GatewayError::InsufficientFunds);
-                }
-                (withdraw_amount.unwrap(), fees)
-            }
-            BitcoinAmountOrAll::Amount(amount) => (
-                amount,
-                wallet_module
-                    .get_withdraw_fees(address.clone(), amount)
-                    .await?,
-            ),
-        };
-
-        let operation_id = wallet_module
-            .withdraw(address.clone(), amount, fees, ())
-            .await?;
-        let mut updates = wallet_module
-            .subscribe_withdraw_updates(operation_id)
-            .await?
-            .into_stream();
-
-        while let Some(update) = updates.next().await {
-            match update {
-                WithdrawState::Succeeded(txid) => {
-                    info!(
-                        "Sent {amount} funds to address {}",
-                        address.assume_checked()
-                    );
-                    return Ok(txid);
-                }
-                WithdrawState::Failed(e) => {
-                    return Err(GatewayError::UnexpectedState(e));
-                }
-                WithdrawState::Created => {}
-            }
-        }
-
-        Err(GatewayError::UnexpectedState(
-            "Ran out of state updates while withdrawing".to_string(),
-        ))
+        self.federation_manager
+            .read()
+            .await
+            .pegout_from_federation(federation_id, amount, address)
+            .await
     }
 
     /// Requests the gateway to pay an outgoing LN invoice on behalf of a
@@ -947,7 +889,11 @@ impl Gateway {
     async fn handle_pay_invoice_msg(&self, payload: PayInvoicePayload) -> Result<Preimage> {
         if let GatewayState::Running { .. } = self.get_state().await {
             debug!("Handling pay invoice message: {payload:?}");
-            let client = self.select_client(payload.federation_id).await?;
+            let client = self
+                .federation_manager
+                .read()
+                .await
+                .select_client(payload.federation_id)?;
             let contract_id = payload.contract_id;
             let gateway_module = &client.value().get_first_module::<GatewayClientModule>();
             let operation_id = gateway_module.gateway_pay_bolt11_invoice(payload).await?;
@@ -1095,7 +1041,11 @@ impl Gateway {
         let mut dbtx = self.gateway_db.begin_transaction().await;
 
         let federation_info = {
-            let client = self.select_client(payload.federation_id).await?;
+            let client = self
+                .federation_manager
+                .read()
+                .await
+                .select_client(payload.federation_id)?;
             let federation_info = self
                 .make_federation_info(client.value(), payload.federation_id)
                 .await;
@@ -1403,8 +1353,7 @@ impl Gateway {
         Some(gateway_config)
     }
 
-    /// Retrieves a `ClientHandleArc` from the Gateway's in memory structures
-    /// that keep track of available clients, given a `federation_id`.
+    /// Retrieves a `ClientHandleArc` for a given `federation_id`.
     pub async fn select_client(
         &self,
         federation_id: FederationId,
@@ -1412,12 +1361,7 @@ impl Gateway {
         self.federation_manager
             .read()
             .await
-            .borrow_clients()
-            .get(&federation_id)
-            .cloned()
-            .ok_or(GatewayError::InvalidMetadata(format!(
-                "No federation with id {federation_id}"
-            )))
+            .select_client(federation_id)
     }
 
     /// Reads the connected federation client configs from the Gateway's
@@ -1509,18 +1453,14 @@ impl Gateway {
     ) -> FederationInfo {
         let balance_msat = client.get_balance().await;
         let config = client.get_config().clone();
-        let channel_id = self
-            .federation_manager
-            .read()
-            .await
-            .get_scid_for_federation(federation_id);
 
         let mut dbtx = self.gateway_db.begin_transaction_nc().await;
         let federation_key = FederationIdKey { id: federation_id };
-        let routing_fees = dbtx
+        let (routing_fees, channel_id) = dbtx
             .get_value(&federation_key)
             .await
-            .map(|config| config.fees.into());
+            .map(|config| (config.fees.into(), config.mint_channel_id))
+            .unzip();
 
         FederationInfo {
             federation_id,
@@ -1596,55 +1536,6 @@ impl Gateway {
 
 // LNv2 Gateway implementation
 impl Gateway {
-    /// Retrieves the `PublicKey` of the Gateway module for a given federation
-    /// for LNv2. This is NOT the same as the `gateway_id`, it is different
-    /// per-connected federation.
-    async fn public_key_v2(&self, federation_id: &FederationId) -> Option<PublicKey> {
-        self.federation_manager
-            .read()
-            .await
-            .borrow_clients()
-            .get(federation_id)
-            .map(|client| {
-                client
-                    .value()
-                    .get_first_module::<GatewayClientModuleV2>()
-                    .keypair
-                    .public_key()
-            })
-    }
-
-    /// Returns payment information that LNv2 clients can use to instruct this
-    /// Gateway to pay an invoice or receive a payment.
-    pub async fn routing_info_v2(&self, federation_id: &FederationId) -> Option<RoutingInfo> {
-        Some(RoutingInfo {
-            public_key: self.public_key_v2(federation_id).await?,
-            send_fee_default: PaymentFee::one_percent(),
-            send_fee_minimum: PaymentFee::half_of_one_percent(),
-            receive_fee: PaymentFee::half_of_one_percent(),
-            expiration_delta_default: 500,
-            expiration_delta_minimum: EXPIRATION_DELTA_MINIMUM_V2,
-        })
-    }
-
-    /// Instructs this gateway to pay a Lightning network invoice via the LNv2
-    /// protocol.
-    async fn send_payment_v2(
-        &self,
-        payload: SendPaymentPayload,
-    ) -> anyhow::Result<std::result::Result<[u8; 32], Signature>> {
-        self.federation_manager
-            .read()
-            .await
-            .borrow_clients()
-            .get(&payload.federation_id)
-            .ok_or(anyhow!("Federation client not available"))?
-            .value()
-            .get_first_module::<GatewayClientModuleV2>()
-            .send_payment(payload)
-            .await
-    }
-
     /// For the LNv2 protocol, this will create an invoice by fetching it from
     /// the connected Lightning node, then save the payment hash so that
     /// incoming HTLCs can be matched as a receive attempt to a specific
@@ -1658,8 +1549,10 @@ impl Gateway {
         }
 
         let payment_info = self
-            .routing_info_v2(&payload.federation_id)
+            .federation_manager
+            .read()
             .await
+            .routing_info_lnv2(&payload.federation_id)
             .ok_or(anyhow!("Payment Info not available"))?;
 
         if payload.contract.commitment.refund_pk != payment_info.public_key {

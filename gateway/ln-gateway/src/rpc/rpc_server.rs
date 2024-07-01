@@ -378,7 +378,11 @@ async fn routing_info_v2(
     Extension(gateway): Extension<Arc<Gateway>>,
     Json(federation_id): Json<FederationId>,
 ) -> Json<Value> {
-    Json(json!(gateway.routing_info_v2(&federation_id).await))
+    Json(json!(gateway
+        .federation_manager
+        .read()
+        .await
+        .routing_info_lnv2(&federation_id)))
 }
 
 async fn pay_bolt11_invoice_v2(
@@ -386,7 +390,10 @@ async fn pay_bolt11_invoice_v2(
     Json(payload): Json<SendPaymentPayload>,
 ) -> Json<Value> {
     Json(json!(gateway
-        .send_payment_v2(payload)
+        .federation_manager
+        .read()
+        .await
+        .send_payment_lnv2(payload)
         .await
         .map_err(|e| e.to_string())))
 }
