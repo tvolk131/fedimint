@@ -775,42 +775,10 @@ impl Gateway {
     /// Returns `true` if the HTLC corresponds to a legacy Lightning payment,
     /// `false` otherwise.
     async fn try_handle_htlc_ln_legacy(&self, htlc_request: &InterceptHtlcRequest) -> bool {
-        // If the HTLC doesn't have a short_channel_id, it's not a legacy lightning
-        // payment.
-        let Some(short_channel_id) = htlc_request.short_channel_id else {
-            return false;
-        };
-
-        // If we don't have a federation client for the scid, we can't handle the HTLC.
-        let Some(client) = self
-            .federation_manager
+        self.federation_manager
             .read()
             .await
-            .get_client_for_scid(short_channel_id)
-        else {
-            return false;
-        };
-
-        client
-            .borrow()
-            .with(|client| async {
-                let Ok(htlc) = htlc_request.clone().try_into() else {
-                    info!("Got no HTLC result");
-                    return false;
-                };
-
-                match client
-                    .get_first_module::<GatewayClientModule>()
-                    .gateway_handle_intercepted_htlc(htlc)
-                    .await
-                {
-                    Ok(_) => true,
-                    Err(e) => {
-                        info!("Got error intercepting HTLC: {e:?}");
-                        false
-                    }
-                }
-            })
+            .try_handle_htlc_ln_legacy(htlc_request)
             .await
     }
 

@@ -7,8 +7,10 @@ use fedimint_client::ClientHandleArc;
 use fedimint_core::config::{FederationId, JsonClientConfig};
 use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped, NonCommittable};
 use fedimint_core::util::Spanned;
+use tracing::info;
 
 use crate::db::{FederationIdKey, GatewayPublicKey};
+use crate::gateway_lnrpc::InterceptHtlcRequest;
 use crate::rpc::FederationInfo;
 use crate::state_machine::GatewayClientModule;
 use crate::{GatewayError, Result};
@@ -133,6 +135,41 @@ impl FederationManager {
             .collect::<Vec<_>>();
 
         futures::future::join_all(removal_futures).await;
+    }
+
+    pub async fn try_handle_htlc_ln_legacy(&self, htlc_request: &InterceptHtlcRequest) -> bool {
+        // If the HTLC doesn't have a short_channel_id, it's not a legacy lightning
+        // payment.
+        let Some(short_channel_id) = htlc_request.short_channel_id else {
+            return false;
+        };
+
+        // If we don't have a federation client for the scid, we can't handle the HTLC.
+        let Some(client) = self.get_client_for_scid(short_channel_id) else {
+            return false;
+        };
+
+        client
+            .borrow()
+            .with(|client| async {
+                let Ok(htlc) = htlc_request.clone().try_into() else {
+                    info!("Got no HTLC result");
+                    return false;
+                };
+
+                match client
+                    .get_first_module::<GatewayClientModule>()
+                    .gateway_handle_intercepted_htlc(htlc)
+                    .await
+                {
+                    Ok(_) => true,
+                    Err(e) => {
+                        info!("Got error intercepting HTLC: {e:?}");
+                        false
+                    }
+                }
+            })
+            .await
     }
 
     pub fn get_client_for_scid(&self, short_channel_id: u64) -> Option<Spanned<ClientHandleArc>> {
