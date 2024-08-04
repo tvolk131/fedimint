@@ -11,9 +11,7 @@ use miniscript::ToPublicKey;
 use secp256k1::{Message, Verification};
 use serde::Deserialize;
 
-use crate::db::{
-    Database, DatabaseKey, DatabaseKeyPrefix, DatabaseRecord, IDatabaseTransactionOpsCoreTyped,
-};
+use crate::db::{Database, DatabaseKey, DatabaseRecord, IDatabaseTransactionOpsCoreTyped};
 use crate::task::MaybeSync;
 use crate::util::SafeUrl;
 
@@ -87,7 +85,7 @@ pub async fn override_api_urls<P>(
     key_to_peer_id: impl Fn(&P::Record) -> PeerId,
 ) -> BTreeMap<PeerId, SafeUrl>
 where
-    P: DatabaseLookup + DatabaseKeyPrefix + MaybeSend + MaybeSync,
+    P: DatabaseLookup + MaybeSend + MaybeSync,
     P::Record: DatabaseRecord<Value = SignedApiAnnouncement> + DatabaseKey + MaybeSend + MaybeSync,
 {
     let mut db_api_urls = db
