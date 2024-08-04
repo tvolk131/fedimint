@@ -286,8 +286,6 @@ pub trait IDatabase: Debug + MaybeSend + MaybeSync + 'static {
     async fn begin_transaction<'a>(&'a self) -> Box<dyn IDatabaseTransaction + 'a>;
     /// Register (and wait) for `key` updates
     async fn register(&self, key: &[u8]);
-    /// Notify about `key` update (creation, modification, deletion)
-    async fn notify(&self, key: &[u8]);
 
     /// The prefix len of this database instance
     fn prefix_len(&self) -> usize;
@@ -306,9 +304,6 @@ where
     }
     async fn register(&self, key: &[u8]) {
         (**self).register(key).await;
-    }
-    async fn notify(&self, key: &[u8]) {
-        (**self).notify(key).await;
     }
 
     fn prefix_len(&self) -> usize {
@@ -345,9 +340,6 @@ impl<RawDatabase: IRawDatabase + MaybeSend + 'static> IDatabase for BaseDatabase
     async fn register(&self, key: &[u8]) {
         self.notifications.register(key).await;
     }
-    async fn notify(&self, key: &[u8]) {
-        self.notifications.notify(key);
-    }
 
     fn prefix_len(&self) -> usize {
         0
@@ -377,9 +369,7 @@ impl Database {
     pub fn into_inner(self) -> Arc<dyn IDatabase + 'static> {
         self.inner
     }
-}
 
-impl Database {
     /// Creates a new Fedimint database from any object implementing
     /// [`IDatabase`].
     ///
@@ -672,10 +662,6 @@ where
     }
     async fn register(&self, key: &[u8]) {
         self.inner.register(&self.get_full_key(key)).await;
-    }
-
-    async fn notify(&self, key: &[u8]) {
-        self.inner.notify(&self.get_full_key(key)).await;
     }
 
     fn prefix_len(&self) -> usize {
