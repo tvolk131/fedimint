@@ -32,7 +32,7 @@ use crate::envs::{
 use crate::gateway_lnrpc::{
     CloseChannelsWithPeerResponse, CreateInvoiceRequest, CreateInvoiceResponse, EmptyResponse,
     GetFundingAddressResponse, GetNodeInfoResponse, GetRouteHintsResponse, InterceptHtlcRequest,
-    InterceptHtlcResponse, PayInvoiceResponse,
+    InterceptHtlcResponse, OpenChannelResponse, PayInvoiceResponse,
 };
 use crate::GatewayError;
 
@@ -167,7 +167,7 @@ pub trait ILnRpcClient: Debug + Send + Sync {
         host: String,
         channel_size_sats: u64,
         push_amount_sats: u64,
-    ) -> Result<EmptyResponse, LightningRpcError>;
+    ) -> Result<OpenChannelResponse, LightningRpcError>;
 
     /// Close all channels with a peer lightning node from the gateway's
     /// lightning node.

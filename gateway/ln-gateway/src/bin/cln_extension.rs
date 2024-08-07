@@ -32,8 +32,8 @@ use ln_gateway::gateway_lnrpc::{
     CloseChannelsWithPeerRequest, CloseChannelsWithPeerResponse, CreateInvoiceRequest,
     CreateInvoiceResponse, EmptyRequest, EmptyResponse, GetFundingAddressResponse,
     GetNodeInfoResponse, GetRouteHintsRequest, GetRouteHintsResponse, InterceptHtlcRequest,
-    InterceptHtlcResponse, ListActiveChannelsResponse, OpenChannelRequest, PayInvoiceRequest,
-    PayInvoiceResponse, PayPrunedInvoiceRequest, PrunedInvoice,
+    InterceptHtlcResponse, ListActiveChannelsResponse, OpenChannelRequest, OpenChannelResponse,
+    PayInvoiceRequest, PayInvoiceResponse, PayPrunedInvoiceRequest, PrunedInvoice,
 };
 use rand::rngs::OsRng;
 use rand::Rng;
@@ -912,7 +912,7 @@ impl GatewayLightning for ClnRpcService {
     async fn open_channel(
         &self,
         request: tonic::Request<OpenChannelRequest>,
-    ) -> Result<tonic::Response<EmptyResponse>, Status> {
+    ) -> Result<tonic::Response<OpenChannelResponse>, Status> {
         let request_inner = request.into_inner();
 
         let public_key = cln_rpc::primitives::PublicKey::from_slice(&request_inner.pubkey)
@@ -935,7 +935,8 @@ impl GatewayLightning for ClnRpcService {
                 tonic::Status::internal(e.to_string())
             })?;
 
-        self.rpc_client()
+        let cln_rpc::Response::FundChannel(fund_channel_response) = self
+            .rpc_client()
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .call(cln_rpc::Request::FundChannel(
@@ -963,9 +964,16 @@ impl GatewayLightning for ClnRpcService {
             .map_err(|e| {
                 error!("cln fundchannel rpc returned error {:?}", e);
                 tonic::Status::internal(e.to_string())
-            })?;
+            })?
+        else {
+            let error_msg = "cln fundchannel rpc returned a response for a different rpc (this is a bug in cln)";
+            error!(error_msg);
+            return Err(tonic::Status::internal(error_msg));
+        };
 
-        Ok(tonic::Response::new(EmptyResponse {}))
+        Ok(tonic::Response::new(OpenChannelResponse {
+            funding_txid: fund_channel_response.txid,
+        }))
     }
 
     async fn close_channels_with_peer(

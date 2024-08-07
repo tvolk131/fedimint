@@ -25,7 +25,7 @@ use crate::gateway_lnrpc::intercept_htlc_response::{Action, Settle};
 use crate::gateway_lnrpc::{
     CloseChannelsWithPeerResponse, CreateInvoiceRequest, CreateInvoiceResponse, EmptyResponse,
     GetFundingAddressResponse, GetNodeInfoResponse, GetRouteHintsResponse, InterceptHtlcRequest,
-    InterceptHtlcResponse, PayInvoiceResponse,
+    InterceptHtlcResponse, OpenChannelResponse, PayInvoiceResponse,
 };
 
 pub struct GatewayLdkClient {
@@ -414,14 +414,15 @@ impl ILnRpcClient for GatewayLdkClient {
         host: String,
         channel_size_sats: u64,
         push_amount_sats: u64,
-    ) -> Result<EmptyResponse, LightningRpcError> {
+    ) -> Result<OpenChannelResponse, LightningRpcError> {
         let push_amount_msats_or = if push_amount_sats == 0 {
             None
         } else {
             Some(push_amount_sats * 1000)
         };
 
-        self.node
+        let user_channel_id = self
+            .node
             .connect_open_channel(
                 pubkey,
                 SocketAddress::from_str(&host).map_err(|e| {
@@ -438,7 +439,21 @@ impl ILnRpcClient for GatewayLdkClient {
                 failure_reason: e.to_string(),
             })?;
 
-        Ok(EmptyResponse {})
+        // `connect_open_channel()` doesn't return the channel funding txid, so we
+        // have to look it up separately using the channel id it returns.
+        let funding_txid_or = self
+            .node
+            .list_channels()
+            .into_iter()
+            .find(|channel| channel.user_channel_id == user_channel_id)
+            .and_then(|channel| channel.funding_txo.map(|txo| txo.txid));
+
+        Ok(OpenChannelResponse {
+            funding_txid: match funding_txid_or {
+                Some(txid) => txid.to_string(),
+                None => String::new(),
+            },
+        })
     }
 
     async fn close_channels_with_peer(

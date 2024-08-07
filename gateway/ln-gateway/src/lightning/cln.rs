@@ -18,7 +18,7 @@ use crate::gateway_lnrpc::{
     self, CloseChannelsWithPeerRequest, CloseChannelsWithPeerResponse, CreateInvoiceRequest,
     CreateInvoiceResponse, EmptyRequest, EmptyResponse, GetFundingAddressResponse,
     GetNodeInfoResponse, GetRouteHintsRequest, GetRouteHintsResponse, InterceptHtlcResponse,
-    OpenChannelRequest, PayInvoiceResponse, PayPrunedInvoiceRequest,
+    OpenChannelRequest, OpenChannelResponse, PayInvoiceResponse, PayPrunedInvoiceRequest,
 };
 use crate::lightning::MAX_LIGHTNING_RETRIES;
 
@@ -186,7 +186,7 @@ impl ILnRpcClient for NetworkLnRpcClient {
         host: String,
         channel_size_sats: u64,
         push_amount_sats: u64,
-    ) -> Result<EmptyResponse, LightningRpcError> {
+    ) -> Result<OpenChannelResponse, LightningRpcError> {
         let mut client = self.connect().await?;
 
         let res = client
