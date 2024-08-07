@@ -473,27 +473,20 @@ impl ILnRpcClient for GatewayLdkClient {
                 failure_reason: e.to_string(),
             })?;
 
-        // The channel isn't always visible immediately, so we need to poll for it.
-        for _ in 0..10 {
-            let funding_txid_or = self
-                .node
-                .list_channels()
-                .iter()
-                .find(|channel| channel.user_channel_id == user_channel_id)
-                .and_then(|channel| channel.funding_txo)
-                .map(|funding_txo| funding_txo.txid);
+        // `connect_open_channel()` doesn't return the channel funding txid, so we
+        // have to look it up separately using the channel id it returns.
+        let funding_txid_or = self
+            .node
+            .list_channels()
+            .into_iter()
+            .find(|channel| channel.user_channel_id == user_channel_id)
+            .and_then(|channel| channel.funding_txo.map(|txo| txo.txid));
 
-            if let Some(funding_txid) = funding_txid_or {
-                return Ok(OpenChannelResponse {
-                    funding_txid: funding_txid.to_string(),
-                });
-            }
-
-            fedimint_core::runtime::sleep(Duration::from_millis(100)).await;
-        }
-
-        Err(LightningRpcError::FailedToOpenChannel {
-            failure_reason: "Channel could not be opened".to_string(),
+        Ok(OpenChannelResponse {
+            funding_txid: match funding_txid_or {
+                Some(txid) => txid.to_string(),
+                None => String::new(),
+            },
         })
     }
 

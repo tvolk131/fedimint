@@ -717,9 +717,9 @@ dependencies = [
 
 [[package]]
 name = "bitcoin"
-version = "0.32.2"
+version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea507acc1cd80fc084ace38544bbcf7ced7c2aa65b653b102de0ce718df668f6"
+checksum = "0032b0e8ead7074cda7fc4f034409607e3f03a6f71d66ade8a307f79b4d99e73"
 dependencies = [
  "base58ck",
  "bech32 0.11.0",
@@ -2507,6 +2507,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.7.7",
+ "base64 0.22.1",
  "bitcoin 0.30.2",
  "bitcoin_hashes 0.12.0",
  "clap",
@@ -4751,7 +4752,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bech32 0.11.0",
- "bitcoin 0.32.2",
+ "bitcoin 0.32.3",
  "cbc",
  "email_address",
  "reqwest 0.12.8",
@@ -6380,7 +6381,7 @@ version = "0.29.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9465315bc9d4566e1724f0fffcbcc446268cb522e60f9a27bcded6b19c108113"
 dependencies = [
- "bitcoin_hashes 0.14.0",
+ "bitcoin_hashes 0.12.0",
  "rand",
  "secp256k1-sys 0.10.1",
  "serde",

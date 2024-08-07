@@ -1030,7 +1030,7 @@ impl GatewayLightning for ClnRpcService {
                 tonic::Status::internal(e.to_string())
             })?;
 
-        let funding_txid = self
+        let cln_rpc::Response::FundChannel(fund_channel_response) = self
             .rpc_client()
             .await
             .map_err(|e| Status::internal(e.to_string()))?
@@ -1067,9 +1067,15 @@ impl GatewayLightning for ClnRpcService {
                 error!("cln fundchannel rpc returned error {:?}", e);
                 tonic::Status::internal(e.to_string())
             })?
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        else {
+            let error_msg = "cln fundchannel rpc returned a response for a different rpc (this is a bug in cln)";
+            error!(error_msg);
+            return Err(tonic::Status::internal(error_msg));
+        };
 
-        Ok(tonic::Response::new(OpenChannelResponse { funding_txid }))
+        Ok(tonic::Response::new(OpenChannelResponse {
+            funding_txid: fund_channel_response.txid,
+        }))
     }
 
     async fn close_channels_with_peer(

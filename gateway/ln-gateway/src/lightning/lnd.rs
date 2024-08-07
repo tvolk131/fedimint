@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::ensure;
 use async_trait::async_trait;
+use base64::Engine;
 use bitcoin::Address;
 use bitcoin_hashes::{sha256, Hash};
 use fedimint_core::db::Database;
@@ -1207,13 +1208,16 @@ impl ILnRpcClient for GatewayLndClient {
             Ok(res) => Ok(OpenChannelResponse {
                 funding_txid: match res.into_inner().funding_txid {
                     Some(txid) => match txid {
-                        FundingTxid::FundingTxidBytes(mut bytes) => {
-                            bytes.reverse();
-                            hex::encode(bytes)
+                        FundingTxid::FundingTxidBytes(bytes) => {
+                            base64::engine::general_purpose::STANDARD.encode(bytes)
                         }
                         FundingTxid::FundingTxidStr(str) => str,
                     },
-                    None => String::new(),
+                    None => {
+                        return Err(LightningRpcError::FailedToOpenChannel {
+                            failure_reason: "Failed to open channel".to_string(),
+                        })
+                    }
                 },
             }),
             Err(e) => Err(LightningRpcError::FailedToOpenChannel {
