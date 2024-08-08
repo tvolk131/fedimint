@@ -8,8 +8,8 @@ use esplora_client::Txid;
 use fedimint_core::config::FederationId;
 use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::util::{backoff_util, retry};
-use fedimint_testing::gateway::LightningNodeType;
-use ln_gateway::envs::FM_GATEWAY_LIGHTNING_MODULE_MODE_ENV;
+use fedimint_logging::LOG_DEVIMINT;
+use ln_gateway::gateway_lnrpc::OpenChannelResponse;
 use ln_gateway::lightning::ChannelInfo;
 use ln_gateway::rpc::{MnemonicResponse, V1_API_ENDPOINT};
 use tracing::info;
@@ -309,10 +309,8 @@ impl Gatewayd {
         gw: &Gatewayd,
         channel_size_sats: u64,
         push_amount_sats: Option<u64>,
-    ) -> Result<Option<Txid>> {
-        let pubkey = gw.lightning_pubkey().await?;
-
-        let mut command = cmd!(
+    ) -> Result<OpenChannelResponse> {
+        let response = cmd!(
             self,
             "lightning",
             "open-channel",
@@ -324,16 +322,11 @@ impl Gatewayd {
             channel_size_sats,
             "--push-amount-sats",
             push_amount_sats.unwrap_or(0)
-        );
-
-        let gatewayd_version = crate::util::Gatewayd::version_or_default().await;
-        if gatewayd_version < *VERSION_0_5_0_ALPHA {
-            command.run().await?;
-
-            Ok(None)
-        } else {
-            Ok(Some(Txid::from_str(&command.out_string().await?)?))
-        }
+        )
+        .out_json()
+        .await?;
+        info!(target: LOG_DEVIMINT, "open-channel response: {:?}", response);
+        serde_json::from_value(response).map_err(|err| anyhow::anyhow!(err))
     }
 
     pub async fn list_active_channels(&self) -> Result<Vec<ChannelInfo>> {

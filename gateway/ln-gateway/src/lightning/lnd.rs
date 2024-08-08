@@ -1208,9 +1208,7 @@ impl ILnRpcClient for GatewayLndClient {
             Ok(res) => Ok(OpenChannelResponse {
                 funding_txid: match res.into_inner().funding_txid {
                     Some(txid) => match txid {
-                        FundingTxid::FundingTxidBytes(bytes) => {
-                            base64::engine::general_purpose::STANDARD.encode(bytes)
-                        }
+                        FundingTxid::FundingTxidBytes(bytes) => hex::encode(bytes),
                         FundingTxid::FundingTxidStr(str) => str,
                     },
                     None => {

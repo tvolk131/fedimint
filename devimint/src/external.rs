@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use bitcoincore_rpc::bitcoin::{Address, BlockHash};
 use bitcoincore_rpc::bitcoincore_rpc_json::{GetBalancesResult, GetBlockchainInfoResult};
+use bitcoincore_rpc::json::GetTxOutResult;
 use bitcoincore_rpc::{bitcoin, RpcApi};
 use cln_rpc::primitives::{Amount as ClnRpcAmount, AmountOrAny};
 use cln_rpc::ClnRpc;
@@ -292,6 +293,32 @@ impl Bitcoind {
 
     pub(crate) fn get_jsonrpc_client(&self) -> &bitcoincore_rpc::jsonrpc::Client {
         self.client.get_jsonrpc_client()
+    }
+
+    pub(crate) async fn get_tx_out(
+        &self,
+        txid: &bitcoin::Txid,
+    ) -> anyhow::Result<bitcoin::Transaction> {
+        let client = self.wallet_client().await?;
+        Ok(block_in_place(|| {
+            client.client.get_raw_transaction(txid, None)
+        })?)
+    }
+
+    pub(crate) async fn wait_tx_in_mempool(&self, txid: &bitcoin::Txid) -> anyhow::Result<()> {
+        let client = self.wallet_client().await?;
+        for _ in 0..30 {
+            match block_in_place(|| client.client.get_mempool_entry(txid)) {
+                Ok(_) => return Ok(()),
+                Err(e) => info!(target: LOG_DEVIMINT, "Tx {txid} not in mempool yet: {:?}", e),
+            }
+            match self.get_tx_out(txid).await {
+                Ok(_) => return Ok(()),
+                Err(e) => info!(target: LOG_DEVIMINT, "Error checking for tx: {:?}", e),
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+        return Err(anyhow!("Timeout waiting for tx in mempool"));
     }
 }
 
@@ -893,119 +920,63 @@ pub async fn open_channels_between_gateways(
     )
     .await?;
 
-    // All unique pairs of gateways.
-    // For a list of gateways [A, B, C], this will produce [(A, B), (B, C), (C, A)].
-    // Since the first gateway within each pair initiates the channel open,
-    // order within each pair needs to be enforced so that each Lightning node opens
-    // 1 channel.
-    let gateway_pairs: Vec<(&NamedGateway, &NamedGateway)> = if gateways.len() == 2 {
-        gateways.iter().tuple_windows::<(_, _)>().collect()
-    } else {
-        gateways.iter().circular_tuple_windows::<(_, _)>().collect()
-    };
-
-    let open_channel_tasks = gateway_pairs.iter()
-        .map(|((gw_a, gw_a_name), (gw_b, gw_b_name))| {
-            let gw_a = (*gw_a).clone();
-            let gw_b = (*gw_b).clone();
-
-            let push_amount = 5_000_000;
-            info!(target: LOG_DEVIMINT, "Opening channel between {gw_a_name} and {gw_b_name} gateway lightning nodes with {push_amount} on each side...");
-            tokio::task::spawn(async move {
-                // Sometimes channel openings just after funding the lightning nodes don't work right away.
-                poll_with_timeout("Open channel", Duration::from_secs(30), || async {
-                    gw_a.open_channel(&gw_b, 10_000_000, Some(push_amount)).await.map_err(ControlFlow::Continue)
-                })
-                .await
-            })
-        })
-        .collect::<Vec<_>>();
-    let open_channel_task_results: Vec<Result<Result<_, _>, _>> =
-        futures::future::join_all(open_channel_tasks).await;
-
+    debug!(target: LOG_DEVIMINT, "Opening liquidity-balanced channels between all combinations of gateway lightning nodes...");
     let mut channel_funding_txids = Vec::new();
-    for open_channel_task_result in open_channel_task_results {
-        match open_channel_task_result {
-            Ok(Ok(txid)) => {
-                channel_funding_txids.push(txid);
-            }
-            Ok(Err(e)) => {
-                return Err(anyhow::anyhow!(e));
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!(e));
-            }
-        }
+    for gateways in gateways.iter().combinations(2) {
+        let (gw_a, gw_a_name) = gateways.get(0).expect("combinations always returns a pair");
+        let (gw_b, gw_b_name) = gateways.get(1).expect("combinations always returns a pair");
+
+        info!(target: LOG_DEVIMINT, "Opening channel between {gw_a_name} and {gw_b_name}...");
+        channel_funding_txids.push(
+            gw_a.open_channel(
+                gw_b.lightning_pubkey().await?,
+                gw_b.lightning_node_addr.clone(),
+                10_000_000,
+                Some(5_000_000),
+            )
+            .await
+            .map(|res| {
+                bitcoin::Txid::from_str(&res.funding_txid).map_err(|e| anyhow::anyhow!(e))
+            })??,
+        );
     }
+    info!(target: LOG_DEVIMINT, "Channel funding TXIDs: {:?}", channel_funding_txids);
 
-    // Wait for all channel funding transaction to be known by bitcoind.
-    let mut is_missing_any_txids = false;
-    for txid_or in &channel_funding_txids {
-        if let Some(txid) = txid_or {
-            loop {
-                // Bitcoind's getrawtransaction RPC call will return an error if the transaction
-                // is not known.
-                if bitcoind.get_raw_transaction(txid).is_ok() {
-                    break;
-                }
-
-                // Wait for a bit, then restart the check.
-                fedimint_core::runtime::sleep(Duration::from_millis(100)).await;
-            }
-        } else {
-            is_missing_any_txids = true;
-        }
-    }
-
-    // `open_channel` may not have sent out the channel funding transaction
-    // immediately. Since it didn't return a funding txid, we need to wait for
-    // it to get to the mempool.
-    if is_missing_any_txids {
-        fedimint_core::runtime::sleep(Duration::from_secs(2)).await;
+    // fedimint_core::runtime::sleep(std::time::Duration::from_secs(20)).await;
+    for txid in channel_funding_txids {
+        bitcoind.wait_tx_in_mempool(&txid).await?;
     }
 
     bitcoind.mine_blocks(10).await?;
 
-    debug!(target: LOG_DEVIMINT, "Syncing gateway lightning nodes to chain tip...");
-    futures::future::try_join_all(
-        gateways
-            .iter()
-            .map(|(gw, _gw_name)| gw.wait_for_chain_sync(bitcoind)),
-    )
-    .await?;
+    for gateways in gateways.iter().combinations(2) {
+        let (gw_a, gw_a_name) = gateways.get(0).expect("combinations always returns a pair");
+        let (gw_b, gw_b_name) = gateways.get(1).expect("combinations always returns a pair");
 
-    for ((gw_a, _gw_a_name), (gw_b, _gw_b_name)) in &gateway_pairs {
         let gw_a_node_pubkey = gw_a.lightning_pubkey().await?;
-        let gw_b_node_pubkey = gw_b.lightning_pubkey().await?;
 
-        wait_for_ready_channel_on_gateway_with_counterparty(gw_b, gw_a_node_pubkey).await?;
-        wait_for_ready_channel_on_gateway_with_counterparty(gw_a, gw_b_node_pubkey).await?;
+        poll("Wait for channel update", || async {
+            let channels = gw_b
+                .list_active_channels()
+                .await
+                .context("list channels")
+                .map_err(ControlFlow::Break)?;
+
+            if channels
+                .iter()
+                .any(|channel| channel.remote_pubkey == gw_a_node_pubkey)
+            {
+                return Ok(());
+            }
+
+            Err(ControlFlow::Continue(anyhow!("channel not found")))
+        })
+        .await?;
+
+        // TODO: Check that gw_a recognizes the channel as well.
     }
 
     Ok(())
-}
-
-async fn wait_for_ready_channel_on_gateway_with_counterparty(
-    gw: &Gatewayd,
-    counterparty_lightning_node_pubkey: bitcoin::secp256k1::PublicKey,
-) -> anyhow::Result<()> {
-    poll("Wait for channel update", || async {
-        let channels = gw
-            .list_active_channels()
-            .await
-            .context("list channels")
-            .map_err(ControlFlow::Break)?;
-
-        if channels
-            .iter()
-            .any(|channel| channel.remote_pubkey == counterparty_lightning_node_pubkey)
-        {
-            return Ok(());
-        }
-
-        Err(ControlFlow::Continue(anyhow!("channel not found")))
-    })
-    .await
 }
 
 #[derive(Clone)]

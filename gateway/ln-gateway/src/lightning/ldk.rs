@@ -475,18 +475,20 @@ impl ILnRpcClient for GatewayLdkClient {
 
         // `connect_open_channel()` doesn't return the channel funding txid, so we
         // have to look it up separately using the channel id it returns.
-        let funding_txid_or = self
-            .node
-            .list_channels()
-            .into_iter()
-            .find(|channel| channel.user_channel_id == user_channel_id)
-            .and_then(|channel| channel.funding_txo.map(|txo| txo.txid));
+        let funding_txid = loop {
+            if let Some(funding_txid) = self
+                .node
+                .list_channels()
+                .into_iter()
+                .find(|channel| channel.user_channel_id == user_channel_id)
+                .and_then(|channel| channel.funding_txo.map(|txo| txo.txid))
+            {
+                break funding_txid;
+            }
+        };
 
         Ok(OpenChannelResponse {
-            funding_txid: match funding_txid_or {
-                Some(txid) => txid.to_string(),
-                None => String::new(),
-            },
+            funding_txid: funding_txid.to_string(),
         })
     }
 

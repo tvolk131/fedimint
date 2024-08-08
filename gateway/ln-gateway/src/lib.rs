@@ -83,7 +83,10 @@ use fedimint_wallet_client::{
 };
 use futures::stream::StreamExt;
 use gateway_lnrpc::intercept_htlc_response::{Action, Cancel};
-use gateway_lnrpc::{CloseChannelsWithPeerResponse, InterceptHtlcRequest, InterceptHtlcResponse};
+use gateway_lnrpc::{
+    CloseChannelsWithPeerResponse, InterceptHtlcRequest, InterceptHtlcResponse, OpenChannelResponse,
+};
+use hex::ToHex;
 use lightning::{ILnRpcClient, LightningBuilder, LightningRpcError};
 use lightning_invoice::{Bolt11Invoice, RoutingFees};
 use rand::{thread_rng, Rng};
@@ -1398,17 +1401,13 @@ impl Gateway {
             channel_size_sats,
             push_amount_sats,
         }: OpenChannelPayload,
-    ) -> AdminResult<Txid> {
+    ) -> Result<OpenChannelResponse> {
         let context = self.get_lightning_context().await?;
-        let res = context
+        let response = context
             .lnrpc
             .open_channel(pubkey, host, channel_size_sats, push_amount_sats)
             .await?;
-        Txid::from_str(&res.funding_txid).map_err(|e| {
-            AdminGatewayError::Lightning(LightningRpcError::InvalidMetadata {
-                failure_reason: format!("Received invalid channel funding txid string {e}"),
-            })
-        })
+        Ok(response)
     }
 
     /// Instructs the Gateway's Lightning node to close all channels with a peer

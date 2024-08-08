@@ -27,6 +27,7 @@ use super::{
     SetConfigurationPayload, SpendEcashPayload, SpendEcashResponse, SyncToChainPayload,
     WithdrawOnchainPayload, WithdrawPayload,
 };
+use crate::gateway_lnrpc::OpenChannelResponse;
 use crate::lightning::ChannelInfo;
 use crate::CloseChannelsWithPeerResponse;
 
@@ -157,26 +158,10 @@ impl GatewayRpcClient {
         self.call_post(url, payload).await
     }
 
-    pub async fn pay_invoice(&self, payload: PayInvoicePayload) -> GatewayRpcResult<String> {
-        let url = self
-            .base_url
-            .join(PAY_INVOICE_SELF_ENDPOINT)
-            .expect("invalid base url");
-        self.call_post(url, payload).await
-    }
-
-    pub async fn get_ln_onchain_address(
+    pub async fn open_channel(
         &self,
-        payload: GetLnOnchainAddressPayload,
-    ) -> GatewayRpcResult<Address<NetworkUnchecked>> {
-        let url = self
-            .base_url
-            .join(GET_LN_ONCHAIN_ADDRESS_ENDPOINT)
-            .expect("invalid base url");
-        self.call_post(url, payload).await
-    }
-
-    pub async fn open_channel(&self, payload: OpenChannelPayload) -> GatewayRpcResult<Txid> {
+        payload: OpenChannelPayload,
+    ) -> GatewayRpcResult<OpenChannelResponse> {
         let url = self
             .base_url
             .join(OPEN_CHANNEL_ENDPOINT)

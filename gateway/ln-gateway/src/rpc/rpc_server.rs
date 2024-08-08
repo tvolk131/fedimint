@@ -387,8 +387,8 @@ async fn open_channel(
     Extension(gateway): Extension<Arc<Gateway>>,
     Json(payload): Json<OpenChannelPayload>,
 ) -> Result<impl IntoResponse, AdminGatewayError> {
-    let funding_txid = gateway.handle_open_channel_msg(payload).await?;
-    Ok(Json(json!(funding_txid)))
+    let response = gateway.handle_open_channel_msg(payload).await?;
+    Ok(Json(json!(response)))
 }
 
 #[instrument(skip_all, err, fields(?payload))]
