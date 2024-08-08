@@ -18,6 +18,7 @@ use super::{
     DepositAddressPayload, FederationInfo, GatewayFedConfig, GatewayInfo, GetFundingAddressPayload,
     LeaveFedPayload, OpenChannelPayload, RestorePayload, SetConfigurationPayload, WithdrawPayload,
 };
+use crate::gateway_lnrpc::OpenChannelResponse;
 use crate::lightning::ChannelInfo;
 use crate::CloseChannelsWithPeerResponse;
 
@@ -153,7 +154,10 @@ impl GatewayRpcClient {
         self.call_post(url, payload).await
     }
 
-    pub async fn open_channel(&self, payload: OpenChannelPayload) -> GatewayRpcResult<()> {
+    pub async fn open_channel(
+        &self,
+        payload: OpenChannelPayload,
+    ) -> GatewayRpcResult<OpenChannelResponse> {
         let url = self
             .base_url
             .join(OPEN_CHANNEL_ENDPOINT)

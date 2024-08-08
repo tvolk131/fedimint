@@ -86,7 +86,7 @@ use fedimint_wallet_client::{
 };
 use futures::stream::StreamExt;
 use gateway_lnrpc::intercept_htlc_response::{Action, Cancel};
-use gateway_lnrpc::{CloseChannelsWithPeerResponse, InterceptHtlcResponse};
+use gateway_lnrpc::{CloseChannelsWithPeerResponse, InterceptHtlcResponse, OpenChannelResponse};
 use hex::ToHex;
 use lightning::{ILnRpcClient, LightningBuilder, LightningRpcError};
 use lightning_invoice::{Bolt11Invoice, RoutingFees};
@@ -1136,13 +1136,13 @@ impl Gateway {
             channel_size_sats,
             push_amount_sats,
         }: OpenChannelPayload,
-    ) -> Result<()> {
+    ) -> Result<OpenChannelResponse> {
         let context = self.get_lightning_context().await?;
-        context
+        let response = context
             .lnrpc
             .open_channel(pubkey, host, channel_size_sats, push_amount_sats)
             .await?;
-        Ok(())
+        Ok(response)
     }
 
     /// Instructs the Gateway's Lightning node to close all channels with a peer

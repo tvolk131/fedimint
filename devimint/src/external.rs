@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use bitcoincore_rpc::bitcoin::{Address, BlockHash};
 use bitcoincore_rpc::bitcoincore_rpc_json::{GetBalancesResult, GetBlockchainInfoResult};
+use bitcoincore_rpc::json::GetTxOutResult;
 use bitcoincore_rpc::{bitcoin, RpcApi};
 use cln_rpc::primitives::{Amount as ClnRpcAmount, AmountOrAny};
 use cln_rpc::ClnRpc;
@@ -18,6 +19,7 @@ use fedimint_core::BitcoinHash;
 use fedimint_logging::LOG_DEVIMINT;
 use fedimint_testing::gateway::LightningNodeType;
 use hex::ToHex;
+use itertools::Itertools;
 use tokio::fs;
 use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard};
 use tokio::time::Instant;
@@ -289,6 +291,32 @@ impl Bitcoind {
 
     pub(crate) fn get_jsonrpc_client(&self) -> &bitcoincore_rpc::jsonrpc::Client {
         self.client.get_jsonrpc_client()
+    }
+
+    pub(crate) async fn get_tx_out(
+        &self,
+        txid: &bitcoin::Txid,
+    ) -> anyhow::Result<bitcoin::Transaction> {
+        let client = self.wallet_client().await?;
+        Ok(block_in_place(|| {
+            client.client.get_raw_transaction(txid, None)
+        })?)
+    }
+
+    pub(crate) async fn wait_tx_in_mempool(&self, txid: &bitcoin::Txid) -> anyhow::Result<()> {
+        let client = self.wallet_client().await?;
+        for _ in 0..30 {
+            match block_in_place(|| client.client.get_mempool_entry(txid)) {
+                Ok(_) => return Ok(()),
+                Err(e) => info!(target: LOG_DEVIMINT, "Tx {txid} not in mempool yet: {:?}", e),
+            }
+            match self.get_tx_out(txid).await {
+                Ok(_) => return Ok(()),
+                Err(e) => info!(target: LOG_DEVIMINT, "Error checking for tx: {:?}", e),
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+        return Err(anyhow!("Timeout waiting for tx in mempool"));
     }
 }
 
@@ -862,65 +890,90 @@ pub async fn open_channel(
     Ok(())
 }
 
-pub async fn open_channel_between_gateways(
+pub async fn open_channels_between_gateways(
     bitcoind: &Bitcoind,
-    gw_a: &Gatewayd,
-    gw_b: &Gatewayd,
+    gateways: &[(&Gatewayd, &str)],
 ) -> Result<()> {
-    // TODO: Find out why we need to wait for LDK here.
-    let funding_addr = loop {
-        if let Ok(address) = gw_a.get_funding_address().await {
-            break address;
-        }
-
-        fedimint_core::runtime::sleep(std::time::Duration::from_secs(1)).await;
-    };
-
-    bitcoind.send_to(funding_addr, 100_000_000).await?;
-    bitcoind.mine_blocks(10).await?;
-
-    debug!(target: LOG_DEVIMINT, "Await block ln nodes block processing");
-    tokio::try_join!(
-        gw_a.wait_for_chain_sync(bitcoind),
-        gw_b.wait_for_chain_sync(bitcoind)
-    )?;
-
-    debug!(target: LOG_DEVIMINT, "Opening LN channel between the nodes...");
-    gw_a.open_channel(
-        gw_b.lightning_pubkey().await?,
-        gw_b.lightning_node_addr.clone(),
-        10_000_000,
-        Some(5_000_000),
+    debug!(target: LOG_DEVIMINT, "Waiting for gateway lightning nodes to process existing blocks...");
+    futures::future::try_join_all(
+        gateways
+            .iter()
+            .map(|(gw, _gw_name)| gw.wait_for_chain_sync(bitcoind)),
     )
     .await?;
 
-    // `open_channel` may not send out the channel funding transaction immediately
-    // so we need to wait for it to get to the mempool.
-    // TODO: LDK is the culprit here. Find a way to ensure that
-    // `GatewayLdkClient::open_channel` is fully done before it returns.
-    fedimint_core::runtime::sleep(Duration::from_secs(10)).await;
+    debug!(target: LOG_DEVIMINT, "Funding gateway lightning nodes...");
+    futures::future::try_join_all(gateways.iter().map(|(gw, _gw_name)| async {
+        let funding_address = gw.get_funding_address().await?;
+        bitcoind.send_to(funding_address, 100_000_000).await?;
+        Ok::<(), anyhow::Error>(())
+    }))
+    .await?;
+
+    debug!(target: LOG_DEVIMINT, "Mining gateway lightning node funding transactions...");
+    bitcoind.mine_blocks(10).await?;
+    futures::future::try_join_all(
+        gateways
+            .iter()
+            .map(|(gw, _gw_name)| gw.wait_for_chain_sync(bitcoind)),
+    )
+    .await?;
+
+    debug!(target: LOG_DEVIMINT, "Opening liquidity-balanced channels between all combinations of gateway lightning nodes...");
+    let mut channel_funding_txids = Vec::new();
+    for gateways in gateways.iter().combinations(2) {
+        let (gw_a, gw_a_name) = gateways.get(0).expect("combinations always returns a pair");
+        let (gw_b, gw_b_name) = gateways.get(1).expect("combinations always returns a pair");
+
+        info!(target: LOG_DEVIMINT, "Opening channel between {gw_a_name} and {gw_b_name}...");
+        channel_funding_txids.push(
+            gw_a.open_channel(
+                gw_b.lightning_pubkey().await?,
+                gw_b.lightning_node_addr.clone(),
+                10_000_000,
+                Some(5_000_000),
+            )
+            .await
+            .map(|res| {
+                bitcoin::Txid::from_str(&res.funding_txid).map_err(|e| anyhow::anyhow!(e))
+            })??,
+        );
+    }
+    info!(target: LOG_DEVIMINT, "Channel funding TXIDs: {:?}", channel_funding_txids);
+
+    // fedimint_core::runtime::sleep(std::time::Duration::from_secs(20)).await;
+    for txid in channel_funding_txids {
+        bitcoind.wait_tx_in_mempool(&txid).await?;
+    }
 
     bitcoind.mine_blocks(20).await?;
 
-    let gw_a_node_pubkey = gw_a.lightning_pubkey().await?;
+    for gateways in gateways.iter().combinations(2) {
+        let (gw_a, gw_a_name) = gateways.get(0).expect("combinations always returns a pair");
+        let (gw_b, gw_b_name) = gateways.get(1).expect("combinations always returns a pair");
 
-    poll("Wait for channel update", || async {
-        let channels = gw_b
-            .list_active_channels()
-            .await
-            .context("list channels")
-            .map_err(ControlFlow::Break)?;
+        let gw_a_node_pubkey = gw_a.lightning_pubkey().await?;
 
-        if channels
-            .iter()
-            .any(|channel| channel.remote_pubkey == gw_a_node_pubkey)
-        {
-            return Ok(());
-        }
+        poll("Wait for channel update", || async {
+            let channels = gw_b
+                .list_active_channels()
+                .await
+                .context("list channels")
+                .map_err(ControlFlow::Break)?;
 
-        Err(ControlFlow::Continue(anyhow!("channel not found")))
-    })
-    .await?;
+            if channels
+                .iter()
+                .any(|channel| channel.remote_pubkey == gw_a_node_pubkey)
+            {
+                return Ok(());
+            }
+
+            Err(ControlFlow::Continue(anyhow!("channel not found")))
+        })
+        .await?;
+
+        // TODO: Check that gw_a recognizes the channel as well.
+    }
 
     Ok(())
 }

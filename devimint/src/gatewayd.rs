@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::util::{backoff_util, retry};
+use fedimint_logging::LOG_DEVIMINT;
+use ln_gateway::gateway_lnrpc::OpenChannelResponse;
 use ln_gateway::lightning::ChannelInfo;
 use ln_gateway::rpc::V1_API_ENDPOINT;
 use tracing::info;
@@ -201,8 +203,8 @@ impl Gatewayd {
         host: String,
         channel_size_sats: u64,
         push_amount_sats: Option<u64>,
-    ) -> Result<()> {
-        cmd!(
+    ) -> Result<OpenChannelResponse> {
+        let response = cmd!(
             self,
             "lightning",
             "open-channel",
@@ -215,9 +217,10 @@ impl Gatewayd {
             "--push-amount-sats",
             push_amount_sats.unwrap_or(0)
         )
-        .run()
+        .out_json()
         .await?;
-        Ok(())
+        info!(target: LOG_DEVIMINT, "open-channel response: {:?}", response);
+        serde_json::from_value(response).map_err(|err| anyhow::anyhow!(err))
     }
 
     pub async fn list_active_channels(&self) -> Result<Vec<ChannelInfo>> {
