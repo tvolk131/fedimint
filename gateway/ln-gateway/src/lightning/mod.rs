@@ -4,7 +4,6 @@ pub mod lnd;
 
 use std::fmt::Debug;
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -224,9 +223,16 @@ impl dyn ILnRpcClient {
         } = self.info().await?;
         let node_pub_key = PublicKey::from_slice(&pub_key)
             .map_err(|e| GatewayError::InvalidMetadata(format!("Invalid node pubkey {e}")))?;
-        let network = Network::from_str(&network).map_err(|e| {
-            GatewayError::InvalidMetadata(format!("Invalid network {network}: {e}"))
-        })?;
+        let network = match network.try_into().map_err(|e| {
+            GatewayError::InvalidMetadata(format!(
+                "Invalid network proto enum variant {network}: {e}"
+            ))
+        })? {
+            crate::gateway_lnrpc::get_node_info_response::Network::Mainnet => Network::Bitcoin,
+            crate::gateway_lnrpc::get_node_info_response::Network::Testnet => Network::Testnet,
+            crate::gateway_lnrpc::get_node_info_response::Network::Signet => Network::Signet,
+            crate::gateway_lnrpc::get_node_info_response::Network::Regtest => Network::Regtest,
+        };
         Ok((node_pub_key, alias, network, block_height, synced_to_chain))
     }
 }

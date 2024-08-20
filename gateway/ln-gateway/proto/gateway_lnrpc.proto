@@ -67,15 +67,24 @@ message GetNodeInfoResponse {
   // The alias of the lightning node
   string alias = 2;
 
-  // The network the node is on. Valid values are "bitcoin" | "testnet" | "signet" | "regtest"
-  string network = 3;
-
   // The best block height that the associated lightning node is aware of
   // If `synced_to_chain` is true, then the node is also fully synced to this height
   uint32 block_height = 4;
 
   // Whether the associated lightning node is fully synced up to `block_height`
   bool synced_to_chain = 5;
+
+  enum Network {
+    MAINNET = 0;
+    TESTNET = 1;
+    SIGNET = 2;
+    REGTEST = 3;
+  }
+
+  // The network the node is on.
+  Network network = 6;
+
+  reserved 3; // Deprecated fields.
 }
 
 message PayInvoiceRequest {

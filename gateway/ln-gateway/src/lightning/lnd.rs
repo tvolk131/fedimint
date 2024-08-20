@@ -662,7 +662,7 @@ impl ILnRpcClient for GatewayLndClient {
                     failure_reason: format!("Failed to parse public key {e:?}"),
                 })?;
 
-        let network = match info
+        let network_or = match info
             .chains
             .first()
             .ok_or_else(|| LightningRpcError::FailedToGetNodeInfo {
@@ -671,17 +671,17 @@ impl ILnRpcClient for GatewayLndClient {
             .network
             .as_str()
         {
-            // LND uses "mainnet", but rust-bitcoin uses "bitcoin".
-            // TODO: create a fedimint `Network` type that understands "mainnet"
-            "mainnet" => "bitcoin",
-            other => other,
-        }
-        .to_string();
+            "mainnet" => Some(crate::gateway_lnrpc::get_node_info_response::Network::Mainnet),
+            "testnet" => Some(crate::gateway_lnrpc::get_node_info_response::Network::Testnet),
+            "signet" => Some(crate::gateway_lnrpc::get_node_info_response::Network::Signet),
+            "regtest" => Some(crate::gateway_lnrpc::get_node_info_response::Network::Regtest),
+            _ => None,
+        };
 
         return Ok(GetNodeInfoResponse {
             pub_key: pub_key.serialize().to_vec(),
             alias: info.alias,
-            network,
+            network: network_or.map_or(0, std::convert::Into::into),
             block_height: info.block_height,
             synced_to_chain: info.synced_to_chain,
         });

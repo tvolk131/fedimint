@@ -25,6 +25,7 @@ use ln_gateway::gateway_lnrpc::create_invoice_request::Description;
 use ln_gateway::gateway_lnrpc::gateway_lightning_server::{
     GatewayLightning, GatewayLightningServer,
 };
+use ln_gateway::gateway_lnrpc::get_node_info_response::Network;
 use ln_gateway::gateway_lnrpc::get_route_hints_response::{RouteHint, RouteHintHop};
 use ln_gateway::gateway_lnrpc::intercept_htlc_response::{Action, Cancel, Forward, Settle};
 use ln_gateway::gateway_lnrpc::list_active_channels_response::ChannelInfo;
@@ -214,7 +215,7 @@ impl ClnRpcService {
         })
     }
 
-    async fn info(&self) -> Result<(PublicKey, String, String, u32, bool), ClnExtensionError> {
+    async fn info(&self) -> Result<(PublicKey, String, Network, u32, bool), ClnExtensionError> {
         self.rpc_client()
             .await?
             .call(cln_rpc::Request::Getinfo(
@@ -231,6 +232,18 @@ impl ClnRpcService {
                     warning_lightningd_sync,
                     ..
                 }) => {
+                    let network = match network.as_str() {
+                        "bitcoin" => Network::Mainnet,
+                        "testnet" => Network::Testnet,
+                        "signet" => Network::Signet,
+                        "regtest" => Network::Regtest,
+                        unknown_network => {
+                            return Err(ClnExtensionError::Error(anyhow!(
+                                "Unknown network: {unknown_network}"
+                            )))
+                        }
+                    };
+
                     // FIXME: How to handle missing alias?
                     let alias = alias.unwrap_or_default();
                     let synced_to_chain =
@@ -449,7 +462,7 @@ impl GatewayLightning for ClnRpcService {
                 tonic::Response::new(GetNodeInfoResponse {
                     pub_key: pub_key.serialize().to_vec(),
                     alias,
-                    network,
+                    network: network.into(),
                     block_height,
                     synced_to_chain,
                 })
@@ -867,8 +880,12 @@ impl GatewayLightning for ClnRpcService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let network = bitcoin::Network::from_str(info.2.as_str())
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let network = match info.2 {
+            Network::Mainnet => bitcoin::Network::Bitcoin,
+            Network::Testnet => bitcoin::Network::Testnet,
+            Network::Signet => bitcoin::Network::Signet,
+            Network::Regtest => bitcoin::Network::Regtest,
+        };
 
         let invoice_builder = InvoiceBuilder::new(Currency::from(network))
             .amount_milli_satoshis(amount_msat)
