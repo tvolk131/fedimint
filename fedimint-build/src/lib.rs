@@ -10,7 +10,7 @@
 //!
 //! ```norust
 //! [build-dependencies]
-//! fedimint-build = { version = "=0.4.0-alpha", path = "../fedimint-build" }
+//! fedimint-build = { workspace = true }
 //! ```
 //!
 //! in `Cargo.toml`, and:
@@ -26,13 +26,23 @@
 //! This will define `FEDIMINT_BUILD_CODE_VERSION` at the build time, which can
 //! be accessed via `fedimint_build_code_version_env!()` and passed to binary
 //! builders like `FedimintCli::new`.
-pub mod envs;
+
+mod envs;
 
 use std::env;
 use std::path::Path;
 use std::process::Command;
 
 use crate::envs::{FEDIMINT_BUILD_CODE_VERSION_ENV, FORCE_GIT_HASH_ENV};
+
+/// Run from a `build.rs` script to detect code version. See [`crate`] for
+/// description.
+pub fn set_code_version() {
+    if let Err(e) = set_code_version_inner() {
+        eprintln!("Failed to detect git hash version: {e}. Set {FORCE_GIT_HASH_ENV} to enforce the version and skip auto-detection.");
+        println!("cargo:rustc-env={FEDIMINT_BUILD_CODE_VERSION_ENV}=0000000000000000000000000000000000000000");
+    }
+}
 
 fn set_code_version_inner() -> Result<(), String> {
     println!("cargo:rerun-if-env-changed={FORCE_GIT_HASH_ENV}");
@@ -120,14 +130,5 @@ fn call_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
     match String::from_utf8(output.stdout) {
         Ok(o) => Ok(o.trim().to_string()),
         Err(e) => Err(format!("Invalid UTF-8 sequence detected: {e}")),
-    }
-}
-
-/// Run from a `build.rs` script to detect code version. See [`crate`] for
-/// description.
-pub fn set_code_version() {
-    if let Err(e) = set_code_version_inner() {
-        eprintln!("Failed to detect git hash version: {e}. Set {FORCE_GIT_HASH_ENV} to enforce the version and skip auto-detection.");
-        println!("cargo:rustc-env={FEDIMINT_BUILD_CODE_VERSION_ENV}=0000000000000000000000000000000000000000");
     }
 }
