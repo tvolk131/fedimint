@@ -196,42 +196,13 @@ impl Drop for GatewayLdkClient {
 #[async_trait]
 impl ILnRpcClient for GatewayLdkClient {
     async fn info(&self) -> Result<GetNodeInfoResponse, LightningRpcError> {
-        let node_status = self.node.status();
-
-        let Some(chain_tip_block_summary) = self
-            .esplora_client
-            .get_blocks(None)
-            .await
-            .map_err(|e| LightningRpcError::FailedToGetNodeInfo {
-                failure_reason: format!("Failed get chain tip block summary: {e:?}"),
-            })?
-            .into_iter()
-            .next()
-        else {
-            return Err(LightningRpcError::FailedToGetNodeInfo {
-                failure_reason:
-                    "Failed to get chain tip block summary (empty block list was returned)"
-                        .to_string(),
-            });
-        };
-
-        let esplora_chain_tip_timestamp = chain_tip_block_summary.time.timestamp;
-        let block_height: u32 = chain_tip_block_summary.time.height;
-
-        let synced_to_chain = node_status.latest_wallet_sync_timestamp.unwrap_or_default()
-            > esplora_chain_tip_timestamp
-            && node_status
-                .latest_onchain_wallet_sync_timestamp
-                .unwrap_or_default()
-                > esplora_chain_tip_timestamp;
-
         Ok(GetNodeInfoResponse {
             pub_key: self.node.node_id().serialize().to_vec(),
             // TODO: This is a placeholder. We need to get the actual alias from the LDK node.
             alias: format!("LDK Fedimint Gateway Node {}", self.node.node_id()),
             network: self.node.config().network.to_string(),
-            block_height,
-            synced_to_chain,
+            block_height: self.node.status().current_best_block.height,
+            synced_to_chain: true,
         })
     }
 
@@ -533,6 +504,12 @@ impl ILnRpcClient for GatewayLdkClient {
     }
 
     async fn sync_to_chain(&self, block_height: u32) -> Result<EmptyResponse, LightningRpcError> {
+        println!("Syncing to chain at block height {}...", block_height);
+        println!(
+            "Current height: {}",
+            self.node.status().current_best_block.height
+        );
+
         loop {
             self.node
                 .sync_wallets()
@@ -540,9 +517,21 @@ impl ILnRpcClient for GatewayLdkClient {
                     failure_reason: e.to_string(),
                 })?;
 
-            if self.node.status().current_best_block.height < block_height {
+            let current_block_height = self.node.status().current_best_block.height;
+
+            let node_info = self.info().await?;
+
+            if current_block_height < block_height || !node_info.synced_to_chain {
+                println!(
+                    "Waiting for block height to reach {} (currently at {})",
+                    block_height, current_block_height
+                );
                 fedimint_core::runtime::sleep(Duration::from_millis(100)).await;
             } else {
+                println!(
+                    "Block height reached! Actual height is {}",
+                    current_block_height
+                );
                 break;
             }
         }

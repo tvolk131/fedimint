@@ -17,6 +17,7 @@ use fedimint_core::util::write_overwrite_async;
 use fedimint_core::BitcoinHash;
 use fedimint_logging::LOG_DEVIMINT;
 use fedimint_testing::gateway::LightningNodeType;
+use futures::FutureExt;
 use hex::ToHex;
 use itertools::Itertools;
 use tokio::fs;
@@ -129,9 +130,10 @@ impl Bitcoind {
             }
         }
 
+        let blocks = 101;
+
         if !skip_setup {
             // mine blocks
-            let blocks = 101;
             let address = block_in_place(|| client.get_new_address(None, None))?.assume_checked();
             debug!(target: LOG_DEVIMINT, blocks_num=blocks, %address, "Mining blocks to address");
             block_in_place(|| {
@@ -142,12 +144,12 @@ impl Bitcoind {
             trace!(target: LOG_DEVIMINT, blocks_num=blocks, %address, "Mining blocks to address complete");
         }
 
-        // wait bitciond is ready
+        // wait bitcoind is ready
         poll("bitcoind", || async {
             let info = block_in_place(|| client.get_blockchain_info())
                 .context("bitcoind getblockchaininfo")
                 .map_err(ControlFlow::Continue)?;
-            if info.blocks > 100 {
+            if info.blocks >= blocks {
                 Ok(())
             } else {
                 Err(ControlFlow::Continue(anyhow!(
@@ -157,7 +159,12 @@ impl Bitcoind {
             }
         })
         .await?;
-        debug!("Bitcoind ready");
+        info!("Bitcoind ready");
+        // Print wallet funds
+        info!(
+            "Wallet funds: {:?}",
+            block_in_place(|| client.get_balance(None, None))?
+        );
         Ok(())
     }
 
@@ -219,7 +226,7 @@ impl Bitcoind {
     }
 
     pub async fn send_to(&self, addr: String, amount: u64) -> Result<bitcoin::Txid> {
-        debug!(target: LOG_DEVIMINT, amount, addr, "Sending funds from bitcoind");
+        info!(target: LOG_DEVIMINT, amount, addr, "Sending funds from bitcoind");
         let amount = bitcoin::Amount::from_sat(amount);
         let tx = self
             .wallet_client()
@@ -756,7 +763,7 @@ impl Lnd {
 }
 
 // TODO(tvolk131): Remove this method and instead use
-// `open_channel_between_gateways()` below once 0.4.0 is released
+// `open_channels_between_gateways()` below once 0.4.0 is released
 pub async fn open_channel(
     process_mgr: &ProcessManager,
     bitcoind: &Bitcoind,
@@ -869,15 +876,20 @@ pub async fn open_channels_between_gateways(
     bitcoind: &Bitcoind,
     gateways: &[NamedGateway<'_>],
 ) -> Result<()> {
-    debug!(target: LOG_DEVIMINT, "Syncing gateway lightning nodes to chain tip...");
-    futures::future::try_join_all(
-        gateways
-            .iter()
-            .map(|(gw, _gw_name)| gw.wait_for_chain_sync(bitcoind)),
-    )
+    info!(target: LOG_DEVIMINT, "Syncing gateway lightning nodes to chain tip... {}", bitcoind.get_block_count().unwrap());
+    futures::future::try_join_all(gateways.iter().map(|(gw, gw_name)| {
+        let gw_name = (*gw_name).to_string();
+        gw.wait_for_chain_sync(bitcoind).then(move |_| {
+            info!(target: LOG_DEVIMINT, "Synced {gw_name} to chain tip!");
+            async {
+                let res: anyhow::Result<()> = Ok(());
+                res
+            }
+        })
+    }))
     .await?;
 
-    debug!(target: LOG_DEVIMINT, "Funding all gateway lightning nodes...");
+    info!(target: LOG_DEVIMINT, "Funding all gateway lightning nodes...");
     for (gw, _gw_name) in gateways {
         let funding_addr = gw.get_ln_onchain_address().await?;
         bitcoind.send_to(funding_addr, 100_000_000).await?;
@@ -885,12 +897,17 @@ pub async fn open_channels_between_gateways(
 
     bitcoind.mine_blocks(10).await?;
 
-    debug!(target: LOG_DEVIMINT, "Syncing gateway lightning nodes to chain tip...");
-    futures::future::try_join_all(
-        gateways
-            .iter()
-            .map(|(gw, _gw_name)| gw.wait_for_chain_sync(bitcoind)),
-    )
+    info!(target: LOG_DEVIMINT, "Syncing gateway lightning nodes to chain tip... {}", bitcoind.get_block_count().unwrap());
+    futures::future::try_join_all(gateways.iter().map(|(gw, gw_name)| {
+        let gw_name = (*gw_name).to_string();
+        gw.wait_for_chain_sync(bitcoind).then(move |_| {
+            info!(target: LOG_DEVIMINT, "Synced {gw_name} to chain tip!");
+            async {
+                let res: anyhow::Result<()> = Ok(());
+                res
+            }
+        })
+    }))
     .await?;
 
     // All unique pairs of gateways.
@@ -955,12 +972,17 @@ pub async fn open_channels_between_gateways(
 
     bitcoind.mine_blocks(10).await?;
 
-    debug!(target: LOG_DEVIMINT, "Syncing gateway lightning nodes to chain tip...");
-    futures::future::try_join_all(
-        gateways
-            .iter()
-            .map(|(gw, _gw_name)| gw.wait_for_chain_sync(bitcoind)),
-    )
+    info!(target: LOG_DEVIMINT, "Syncing gateway lightning nodes to chain tip... {}", bitcoind.get_block_count().unwrap());
+    futures::future::try_join_all(gateways.iter().map(|(gw, gw_name)| {
+        let gw_name = (*gw_name).to_string();
+        gw.wait_for_chain_sync(bitcoind).then(move |_| {
+            info!(target: LOG_DEVIMINT, "Synced {gw_name} to chain tip!");
+            async {
+                let res: anyhow::Result<()> = Ok(());
+                res
+            }
+        })
+    }))
     .await?;
 
     for ((gw_a, _gw_a_name), (gw_b, _gw_b_name)) in &gateway_pairs {
@@ -1102,7 +1124,9 @@ impl Esplora {
         );
         let process = process_mgr.spawn_daemon("esplora", cmd).await?;
 
-        Self::wait_for_ready(process_mgr).await?;
+        let block_count = bitcoind.get_block_count()?;
+
+        Self::wait_for_ready(process_mgr, block_count - 1).await?;
         debug!(target: LOG_DEVIMINT, "Esplora ready");
 
         Ok(Self {
@@ -1112,7 +1136,7 @@ impl Esplora {
     }
 
     /// Wait until the server is able to respond to requests.
-    async fn wait_for_ready(process_mgr: &ProcessManager) -> Result<()> {
+    async fn wait_for_ready(process_mgr: &ProcessManager, chain_height: u64) -> Result<()> {
         let client = esplora_client::Builder::new(&format!(
             "http://localhost:{}",
             process_mgr.globals.FM_PORT_ESPLORA
@@ -1121,10 +1145,14 @@ impl Esplora {
         .expect("esplora client build failed");
 
         poll("esplora server ready", || async {
-            client
-                .get_fee_estimates()
+            let current_chain_height = client
+                .get_height()
                 .await
                 .map_err(|e| ControlFlow::Continue(anyhow::anyhow!(e)))?;
+
+            if (current_chain_height as u64) < chain_height {
+                return Err(ControlFlow::Continue(anyhow!("esplora not ready")));
+            }
 
             Ok(())
         })

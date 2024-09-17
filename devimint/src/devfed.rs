@@ -136,6 +136,7 @@ impl DevJitFed {
             let bitcoind = bitcoind.clone();
             || async move {
                 let bitcoind = bitcoind.get_try().await?.deref().clone();
+                bitcoind.wallet_client.get_try().await?;
                 Ok(Arc::new(Electrs::new(&process_mgr, bitcoind).await?))
             }
         });
@@ -144,6 +145,7 @@ impl DevJitFed {
             let bitcoind = bitcoind.clone();
             || async move {
                 let bitcoind = bitcoind.get_try().await?.deref().clone();
+                bitcoind.wallet_client.get_try().await?;
                 Ok(Arc::new(Esplora::new(&process_mgr, bitcoind).await?))
             }
         });
