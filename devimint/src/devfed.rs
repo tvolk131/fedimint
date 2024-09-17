@@ -6,7 +6,7 @@ use fedimint_core::runtime;
 use fedimint_core::task::jit::{JitTry, JitTryAnyhow};
 use fedimint_logging::LOG_DEVIMINT;
 use tokio::join;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::external::{
     open_channel, open_channels_between_gateways, Bitcoind, Electrs, Esplora, Lightningd, Lnd,
@@ -106,29 +106,37 @@ impl DevJitFed {
         );
         let start_time = fedimint_core::time::now();
 
-        debug!("Starting dev federation");
+        info!("Starting dev federation");
 
         let bitcoind = JitTry::new_try({
             let process_mgr = process_mgr.to_owned();
-            move || async move { Ok(Arc::new(Bitcoind::new(&process_mgr, skip_setup).await?)) }
+            move || async move {
+                info!("Starting bitcoind...");
+                let bitcoind = Bitcoind::new(&process_mgr, skip_setup).await?;
+                info!("Started bitcoind!");
+                Ok(Arc::new(bitcoind))
+            }
         });
         let cln = JitTry::new_try({
             let process_mgr = process_mgr.to_owned();
             let bitcoind = bitcoind.clone();
             || async move {
-                Ok(Arc::new(
-                    Lightningd::new(&process_mgr, bitcoind.get_try().await?.deref().clone())
-                        .await?,
-                ))
+                let bitcoind = bitcoind.get_try().await?.deref().clone();
+                info!("Starting CLN...");
+                let cln = Lightningd::new(&process_mgr, bitcoind).await?;
+                info!("Started CLN");
+                Ok(Arc::new(cln))
             }
         });
         let lnd = JitTry::new_try({
             let process_mgr = process_mgr.to_owned();
             let bitcoind = bitcoind.clone();
             || async move {
-                Ok(Arc::new(
-                    Lnd::new(&process_mgr, bitcoind.get_try().await?.deref().clone()).await?,
-                ))
+                let bitcoind = bitcoind.get_try().await?.deref().clone();
+                info!("Starting LND...");
+                let lnd = Lnd::new(&process_mgr, bitcoind).await?;
+                info!("Started LND");
+                Ok(Arc::new(lnd))
             }
         });
         let electrs = JitTryAnyhow::new_try({
@@ -136,15 +144,19 @@ impl DevJitFed {
             let bitcoind = bitcoind.clone();
             || async move {
                 let bitcoind = bitcoind.get_try().await?.deref().clone();
-                Ok(Arc::new(Electrs::new(&process_mgr, bitcoind).await?))
+                info!("Starting electrs...");
+                let electrs = Electrs::new(&process_mgr, bitcoind).await?;
+                info!("Started electrs");
+                Ok(Arc::new(electrs))
             }
         });
         let esplora = JitTryAnyhow::new_try({
             let process_mgr = process_mgr.to_owned();
-            let bitcoind = bitcoind.clone();
             || async move {
-                let bitcoind = bitcoind.get_try().await?.deref().clone();
-                Ok(Arc::new(Esplora::new(&process_mgr, bitcoind).await?))
+                info!("Starting esplora...");
+                let esplora = Esplora::new(&process_mgr).await?;
+                info!("Started esplora");
+                Ok(Arc::new(esplora))
             }
         });
 
@@ -153,6 +165,7 @@ impl DevJitFed {
             let bitcoind = bitcoind.clone();
             move || async move {
                 let bitcoind = bitcoind.get_try().await?.deref().clone();
+                info!("Starting federation...");
                 let mut fed = Federation::new(
                     &process_mgr,
                     bitcoind,
@@ -164,6 +177,7 @@ impl DevJitFed {
 
                 // Create a degraded federation if there are offline nodes
                 fed.degrade_federation(&process_mgr).await?;
+                info!("Started federation");
 
                 Ok(Arc::new(fed))
             }
@@ -174,9 +188,10 @@ impl DevJitFed {
             let cln = cln.clone();
             || async move {
                 let cln = cln.get_try().await?.deref().clone();
-                Ok(Arc::new(
-                    Gatewayd::new(&process_mgr, LightningNode::Cln(cln)).await?,
-                ))
+                info!("Starting CLN gateway...");
+                let gw_cln = Gatewayd::new(&process_mgr, LightningNode::Cln(cln)).await?;
+                info!("Started CLN gateway");
+                Ok(Arc::new(gw_cln))
             }
         });
         let gw_cln_registered = JitTryAnyhow::new_try({
@@ -187,7 +202,9 @@ impl DevJitFed {
                 let fed = fed.get_try().await?.deref();
 
                 if !skip_setup {
+                    info!("Registering CLN gateway with federation...");
                     gw_cln.connect_fed(fed).await?;
+                    info!("Registered CLN gateway with federation");
                 }
                 Ok(Arc::new(()))
             }
@@ -197,9 +214,10 @@ impl DevJitFed {
             let lnd = lnd.clone();
             || async move {
                 let lnd = lnd.get_try().await?.deref().clone();
-                Ok(Arc::new(
-                    Gatewayd::new(&process_mgr, LightningNode::Lnd(lnd)).await?,
-                ))
+                info!("Starting LND gateway...");
+                let gw_lnd = Gatewayd::new(&process_mgr, LightningNode::Lnd(lnd)).await?;
+                info!("Started LND gateway");
+                Ok(Arc::new(gw_lnd))
             }
         });
         let gw_lnd_registered = JitTryAnyhow::new_try({
@@ -208,8 +226,11 @@ impl DevJitFed {
             move || async move {
                 let gw_lnd = gw_lnd.get_try().await?.deref();
                 let fed = fed.get_try().await?.deref();
+
                 if !skip_setup {
+                    info!("Registering LND gateway with federation...");
                     gw_lnd.connect_fed(fed).await?;
+                    info!("Registered LND gateway with federation");
                 }
                 Ok(Arc::new(()))
             }
@@ -221,9 +242,10 @@ impl DevJitFed {
                 let gatewayd_version = crate::util::Gatewayd::version_or_default().await;
                 if gatewayd_version >= *VERSION_0_5_0_ALPHA {
                     esplora.get_try().await?;
-                    Ok(Arc::new(Some(
-                        Gatewayd::new(&process_mgr, LightningNode::Ldk).await?,
-                    )))
+                    info!("Starting LDK gateway...");
+                    let gw_ldk = Gatewayd::new(&process_mgr, LightningNode::Ldk).await?;
+                    info!("Started LDK gateway");
+                    Ok(Arc::new(Some(gw_ldk)))
                 } else {
                     Ok(Arc::new(None))
                 }
@@ -234,10 +256,13 @@ impl DevJitFed {
             let fed = fed.clone();
             move || async move {
                 let gw_ldk = gw_ldk.get_try().await?.deref();
+
                 if let Some(gw_ldk) = gw_ldk {
                     let fed = fed.get_try().await?.deref();
                     if !skip_setup {
+                        info!("Registering LDK gateway with federation...");
                         gw_ldk.connect_fed(fed).await?;
+                        info!("Registered LDK gateway with federation");
                     }
                 }
                 Ok(Arc::new(()))

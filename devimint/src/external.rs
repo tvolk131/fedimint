@@ -883,7 +883,7 @@ pub async fn open_channels_between_gateways(
         bitcoind.send_to(funding_addr, 100_000_000).await?;
     }
 
-    bitcoind.mine_blocks(10).await?;
+    bitcoind.mine_blocks(11).await?;
 
     debug!(target: LOG_DEVIMINT, "Syncing gateway lightning nodes to chain tip...");
     futures::future::try_join_all(
@@ -914,7 +914,7 @@ pub async fn open_channels_between_gateways(
             tokio::task::spawn(async move {
                 // Sometimes channel openings just after funding the lightning nodes don't work right away.
                 // This resolves itself after a few seconds, so we don't need to poll for very long.
-                poll_with_timeout("Open channel", Duration::from_secs(10), || async {
+                poll_with_timeout("Open channel", Duration::from_secs(20), || async {
                     gw_a.open_channel(&gw_b, 10_000_000, Some(push_amount)).await.map_err(ControlFlow::Continue)
                 })
                 .await
@@ -953,7 +953,7 @@ pub async fn open_channels_between_gateways(
         }
     }
 
-    bitcoind.mine_blocks(10).await?;
+    bitcoind.mine_blocks(11).await?;
 
     debug!(target: LOG_DEVIMINT, "Syncing gateway lightning nodes to chain tip...");
     futures::future::try_join_all(
@@ -1066,14 +1066,10 @@ impl Electrs {
 #[derive(Clone)]
 pub struct Esplora {
     _process: ProcessHandle,
-    _bitcoind: Bitcoind,
 }
 
 impl Esplora {
-    pub async fn new(process_mgr: &ProcessManager, bitcoind: Bitcoind) -> Result<Self> {
-        // workaround: will crash(?) on start if it gets a bad response from
-        // bitcoind
-        bitcoind.poll_ready().await?;
+    pub async fn new(process_mgr: &ProcessManager) -> Result<Self> {
         debug!("Starting esplora");
         let daemon_dir = process_mgr
             .globals
@@ -1105,10 +1101,7 @@ impl Esplora {
         Self::wait_for_ready(process_mgr).await?;
         debug!(target: LOG_DEVIMINT, "Esplora ready");
 
-        Ok(Self {
-            _bitcoind: bitcoind,
-            _process: process,
-        })
+        Ok(Self { _process: process })
     }
 
     /// Wait until the server is able to respond to requests.
@@ -1150,7 +1143,7 @@ pub async fn external_daemons(process_mgr: &ProcessManager) -> Result<ExternalDa
         Lightningd::new(process_mgr, bitcoind.clone()),
         Lnd::new(process_mgr, bitcoind.clone()),
         Electrs::new(process_mgr, bitcoind.clone()),
-        Esplora::new(process_mgr, bitcoind.clone()),
+        Esplora::new(process_mgr),
     )?;
     open_channel(process_mgr, &bitcoind, &cln, &lnd).await?;
     // make sure the bitcoind wallet is ready

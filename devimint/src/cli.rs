@@ -254,16 +254,16 @@ pub async fn handle_command(cmd: Cmd, common_args: CommonArgs) -> Result<()> {
                         const GW_PEGIN_AMOUNT: u64 = 1_000_000;
                         const CLIENT_PEGIN_AMOUNT: u64 = 1_000_000;
 
-                        let (operation_id, (), (), ()) = tokio::try_join!(
+                        let ((), (), (), ()) = tokio::try_join!(
                             async {
-                                let (address, operation_id) =
+                                let (address, _operation_id) =
                                     dev_fed.internal_client().await?.get_deposit_addr().await?;
                                 dev_fed
                                     .bitcoind()
                                     .await?
                                     .send_to(address, CLIENT_PEGIN_AMOUNT)
-                                    .await?;
-                                Ok(operation_id)
+                                    .await
+                                    .map(|_| ())
                             },
                             async {
                                 let pegin_addr = dev_fed
@@ -311,11 +311,6 @@ pub async fn handle_command(cmd: Cmd, common_args: CommonArgs) -> Result<()> {
                         )?;
 
                         dev_fed.bitcoind().await?.mine_blocks_no_wait(11).await?;
-                        dev_fed
-                            .internal_client()
-                            .await?
-                            .await_deposit(&operation_id)
-                            .await?;
 
                         info!(target: LOG_DEVIMINT,
                         elapsed_ms = %pegin_start_time.elapsed().as_millis(),

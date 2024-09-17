@@ -717,7 +717,7 @@ impl Federation {
         self.bitcoind
             .send_to(address, amount + deposit_fees)
             .await?;
-        self.bitcoind.mine_blocks(21).await?;
+        self.bitcoind.mine_blocks(11).await?;
 
         Ok(operation_id)
     }
@@ -743,7 +743,7 @@ impl Federation {
         self.bitcoind
             .send_to(pegin_addr, amount + deposit_fees)
             .await?;
-        self.bitcoind.mine_blocks(21).await?;
+        self.bitcoind.mine_blocks(11).await?;
         poll("gateway pegin", || async {
             let gateway_balance = cmd!(gw, "balance", "--federation-id={fed_id}")
                 .out_json()
