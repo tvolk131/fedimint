@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use bitcoincore_rpc::bitcoin::{Address, BlockHash};
+use bitcoincore_rpc::bitcoin::{Address, Block, BlockHash};
 use bitcoincore_rpc::bitcoincore_rpc_json::{GetBalancesResult, GetBlockchainInfoResult};
 use bitcoincore_rpc::{bitcoin, RpcApi};
 use cln_rpc::primitives::{Amount as ClnRpcAmount, AmountOrAny};
@@ -231,6 +231,34 @@ impl Bitcoind {
     pub async fn get_txout_proof(&self, txid: &bitcoin::Txid) -> Result<String> {
         let proof = self.get_tx_out_proof(&[*txid], None).await?;
         Ok(proof.encode_hex())
+    }
+
+    pub fn transaction_is_known(&self, txid: &bitcoin::Txid) -> Result<bool> {
+        if self.get_raw_transaction(txid).is_ok() {
+            return Ok(true);
+        }
+
+        let block_height = self.get_block_count()? - 1;
+
+        for i in 0..block_height {
+            let block_hash = self.get_block_hash(i)?;
+            let block = self.get_block(&block_hash)?;
+            for tx in block.txdata {
+                if tx.txid() == *txid {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn get_block_hash(&self, height: u64) -> Result<BlockHash> {
+        Ok(block_in_place(|| self.client.get_block_hash(height))?)
+    }
+
+    fn get_block(&self, hash: &BlockHash) -> Result<Block> {
+        Ok(block_in_place(|| self.client.get_block(hash))?)
     }
 
     pub fn get_raw_transaction(&self, txid: &bitcoin::Txid) -> Result<String> {
@@ -870,7 +898,7 @@ pub async fn open_channels_between_gateways(
     bitcoind: &Bitcoind,
     gateways: &[NamedGateway<'_>],
 ) -> Result<()> {
-    debug!(target: LOG_DEVIMINT, "Syncing gateway lightning nodes to chain tip...");
+    info!(target: LOG_DEVIMINT, "Syncing gateway lightning nodes to chain tip...");
     futures::future::try_join_all(
         gateways
             .iter()
@@ -878,7 +906,7 @@ pub async fn open_channels_between_gateways(
     )
     .await?;
 
-    debug!(target: LOG_DEVIMINT, "Funding all gateway lightning nodes...");
+    info!(target: LOG_DEVIMINT, "Funding all gateway lightning nodes...");
     for (gw, _gw_name) in gateways {
         let funding_addr = gw.get_ln_onchain_address().await?;
         bitcoind.send_to(funding_addr, 100_000_000).await?;
@@ -886,7 +914,7 @@ pub async fn open_channels_between_gateways(
 
     bitcoind.mine_blocks(20).await?;
 
-    debug!(target: LOG_DEVIMINT, "Syncing gateway lightning nodes to chain tip...");
+    info!(target: LOG_DEVIMINT, "Syncing gateway lightning nodes to chain tip...");
     futures::future::try_join_all(
         gateways
             .iter()
@@ -916,8 +944,12 @@ pub async fn open_channels_between_gateways(
             info!(target: LOG_DEVIMINT, from=%gw_a_name, to=%gw_b_name, "Opening channel with {sats_per_side} sats on each side...");
             tokio::task::spawn(async move {
                 // Sometimes channel openings just after funding the lightning nodes don't work right away.
+                // This resolves itself after a few seconds, so we don't need to poll for very long.
                 let res = poll(&format!("Open channel from {gw_a_name} to {gw_b_name}"), || async {
-                    gw_a.open_channel(&gw_b, sats_per_side * 2, Some(sats_per_side)).await.map_err(ControlFlow::Continue)
+                    let gw_a_name = gw_a_name.clone();
+                    let gw_b_name = gw_b_name.clone();
+                    let txid = gw_a.open_channel(&gw_b, sats_per_side * 2, Some(sats_per_side)).await.map_err(ControlFlow::Continue)?;
+                    Ok((gw_a_name, gw_b_name, txid))
                 })
                 .await;
 
@@ -951,12 +983,14 @@ pub async fn open_channels_between_gateways(
 
     // Wait for all channel funding transaction to be known by bitcoind.
     let mut is_missing_any_txids = false;
-    for txid_or in &channel_funding_txids {
+    for (gw_a_name, gw_b_name, txid_or) in &channel_funding_txids {
         if let Some(txid) = txid_or {
             loop {
+                info!(target: LOG_DEVIMINT, "Checking if channel funding transaction between {gw_a_name} and {gw_b_name} is known by bitcoind...");
+
                 // Bitcoind's getrawtransaction RPC call will return an error if the transaction
                 // is not known.
-                if bitcoind.get_raw_transaction(txid).is_ok() {
+                if bitcoind.transaction_is_known(txid).is_ok() {
                     break;
                 }
 
@@ -966,6 +1000,7 @@ pub async fn open_channels_between_gateways(
         } else {
             is_missing_any_txids = true;
         }
+        info!(target: LOG_DEVIMINT, "Channel funding transaction between {gw_a_name} and {gw_b_name} is known by bitcoind");
     }
 
     // `open_channel` may not have sent out the channel funding transaction
@@ -977,7 +1012,7 @@ pub async fn open_channels_between_gateways(
 
     bitcoind.mine_blocks(20).await?;
 
-    debug!(target: LOG_DEVIMINT, "Syncing gateway lightning nodes to chain tip...");
+    info!(target: LOG_DEVIMINT, "Syncing gateway lightning nodes to chain tip...");
     futures::future::try_join_all(
         gateways
             .iter()
@@ -985,12 +1020,13 @@ pub async fn open_channels_between_gateways(
     )
     .await?;
 
-    for ((gw_a, _gw_a_name), (gw_b, _gw_b_name)) in &gateway_pairs {
+    for ((gw_a, gw_a_name), (gw_b, gw_b_name)) in &gateway_pairs {
         let gw_a_node_pubkey = gw_a.lightning_pubkey().await?;
         let gw_b_node_pubkey = gw_b.lightning_pubkey().await?;
 
         wait_for_ready_channel_on_gateway_with_counterparty(gw_b, gw_a_node_pubkey).await?;
         wait_for_ready_channel_on_gateway_with_counterparty(gw_a, gw_b_node_pubkey).await?;
+        info!(target: LOG_DEVIMINT, "Channels between {gw_a_name} and {gw_b_name} are ready");
     }
 
     Ok(())

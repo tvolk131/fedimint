@@ -14,7 +14,6 @@ use fedimint_core::bitcoin_migration::{
 use fedimint_core::runtime::spawn;
 use fedimint_core::task::TaskGroup;
 use fedimint_core::{Amount, BitcoinAmountOrAll};
-use ldk_node::config::EsploraSyncConfig;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::lightning::ln::PaymentHash;
 use ldk_node::lightning::routing::gossip::NodeAlias;
@@ -453,6 +452,22 @@ impl ILnRpcClient for GatewayLdkClient {
         channel_size_sats: u64,
         push_amount_sats: u64,
     ) -> Result<OpenChannelResponse, LightningRpcError> {
+        let funding_txid_or = self
+            .node
+            .list_channels()
+            .iter()
+            .find(|channel| {
+                channel.counterparty_node_id == bitcoin30_to_bitcoin32_secp256k1_pubkey(&pubkey)
+            })
+            .and_then(|channel| channel.funding_txo)
+            .map(|funding_txo| funding_txo.txid);
+
+        if let Some(funding_txid) = funding_txid_or {
+            return Ok(OpenChannelResponse {
+                funding_txid: funding_txid.to_string(),
+            });
+        }
+
         let push_amount_msats_or = if push_amount_sats == 0 {
             None
         } else {
@@ -477,7 +492,7 @@ impl ILnRpcClient for GatewayLdkClient {
             })?;
 
         // The channel isn't always visible immediately, so we need to poll for it.
-        for _ in 0..10 {
+        for _ in 0..100 {
             let funding_txid_or = self
                 .node
                 .list_channels()
