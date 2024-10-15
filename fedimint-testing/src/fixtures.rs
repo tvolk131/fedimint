@@ -187,7 +187,9 @@ impl Fixtures {
         let listen: SocketAddr = "127.0.0.1:9000".parse().unwrap();
         let address: SafeUrl = format!("http://{listen}").parse().unwrap();
 
-        let ln_client: Arc<dyn ILnRpcClient> = lightning_builder.build().await.into();
+        // TODO: Pass in the test runtime rather than spawning a new one.
+        let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+        let ln_client: Arc<dyn ILnRpcClient> = lightning_builder.build(runtime).await.into();
         let (lightning_public_key, lightning_alias, lightning_network, _, _) = ln_client
             .parsed_node_info()
             .await

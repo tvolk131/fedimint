@@ -1,5 +1,6 @@
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ln_gateway::lightning::{ILnRpcClient, LightningBuilder};
@@ -43,7 +44,7 @@ pub struct FakeLightningBuilder;
 
 #[async_trait]
 impl LightningBuilder for FakeLightningBuilder {
-    async fn build(&self) -> Box<dyn ILnRpcClient> {
+    async fn build(&self, _runtime: Arc<tokio::runtime::Runtime>) -> Box<dyn ILnRpcClient> {
         Box::new(FakeLightningTest::new())
     }
 }

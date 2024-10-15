@@ -72,6 +72,7 @@ impl GatewayLdkClient {
         network: Network,
         lightning_port: u16,
         mnemonic: Mnemonic,
+        runtime: Arc<tokio::runtime::Runtime>,
     ) -> anyhow::Result<Self> {
         let mut node_builder = ldk_node::Builder::from_config(ldk_node::Config {
             network: bitcoin30_to_bitcoin32_network(&network),
@@ -94,9 +95,7 @@ impl GatewayLdkClient {
         node_builder.set_storage_dir_path(data_dir_str.to_string());
 
         let node = Arc::new(node_builder.build()?);
-        // TODO: Call `start_with_runtime()` instead of `start()`.
-        // See https://github.com/fedimint/fedimint/issues/6159
-        node.start().map_err(|e| {
+        node.start_with_runtime(runtime).map_err(|e| {
             error!(?e, "Failed to start LDK Node");
             LightningRpcError::FailedToConnect
         })?;
