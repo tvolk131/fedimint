@@ -19,11 +19,11 @@ use lightning_invoice::{
 use ln_gateway::gateway_lnrpc::{
     self, CloseChannelsWithPeerResponse, CreateInvoiceRequest, CreateInvoiceResponse,
     EmptyResponse, GetBalancesResponse, GetLnOnchainAddressResponse, GetNodeInfoResponse,
-    GetRouteHintsResponse, InterceptHtlcResponse, OpenChannelResponse, PayInvoiceResponse,
+    GetRouteHintsResponse, InterceptPaymentResponse, OpenChannelResponse, PayInvoiceResponse,
     WithdrawOnchainResponse,
 };
 use ln_gateway::lightning::{
-    ChannelInfo, HtlcResult, ILnRpcClient, LightningRpcError, RouteHtlcStream,
+    ChannelInfo, ILnRpcClient, LightningRpcError, PaymentResult, RoutePaymentStream,
 };
 use rand::rngs::OsRng;
 use tokio::sync::mpsc;
@@ -185,22 +185,22 @@ impl ILnRpcClient for FakeLightningTest {
         })
     }
 
-    async fn route_htlcs<'a>(
+    async fn route_payments<'a>(
         self: Box<Self>,
         task_group: &TaskGroup,
-    ) -> Result<(RouteHtlcStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
+    ) -> Result<(RoutePaymentStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
         let handle = task_group.make_handle();
         let shutdown_receiver = handle.make_shutdown_rx();
 
-        // `FakeLightningTest` will never intercept any HTLCs because there is no
+        // `FakeLightningTest` will never intercept any payments because there is no
         // lightning connection, so instead we just create a stream that blocks
         // until the task group is shutdown.
-        let (_, mut receiver) = mpsc::channel::<HtlcResult>(0);
-        let stream: BoxStream<'a, HtlcResult> = Box::pin(stream! {
+        let (_, mut receiver) = mpsc::channel::<PaymentResult>(0);
+        let stream: BoxStream<'a, PaymentResult> = Box::pin(stream! {
             shutdown_receiver.await;
             // This block, and `receiver`, exist solely to satisfy the type checker.
-            if let Some(htlc_result) = receiver.recv().await {
-                yield htlc_result;
+            if let Some(payment_result) = receiver.recv().await {
+                yield payment_result;
             }
         });
         Ok((stream, Arc::new(Self::new())))
@@ -208,7 +208,7 @@ impl ILnRpcClient for FakeLightningTest {
 
     async fn complete_htlc(
         &self,
-        _htlc: InterceptHtlcResponse,
+        _payment: InterceptPaymentResponse,
     ) -> Result<EmptyResponse, LightningRpcError> {
         Ok(EmptyResponse {})
     }

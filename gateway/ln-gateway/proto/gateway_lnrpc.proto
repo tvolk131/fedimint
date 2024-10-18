@@ -24,15 +24,15 @@ service GatewayLightning {
   rpc PayPrunedInvoice(PayPrunedInvoiceRequest) returns (PayInvoiceResponse) {}
 
   /*
-   * RouteHtlcs opens a bi-directional stream for the client to receive intercepted
-   * HTLCs. `InterceptHtlcRequest` is sent from the server to alert the client that
-   * an HTLC has been intercepted and needs to be processed. The client is expected
-   * to response with `InterceptHtlcResponse` after the HTLC has been processed with
-   * the appropriate action (Settle, Forward, Cancel).
+   * RoutePayments opens a bi-directional stream for the client to receive intercepted
+   * payments. `InterceptHtlcRequest` is sent from the server to alert the client that
+   * a payment has been intercepted and needs to be processed. The client is expected
+   * to response with `InterceptPaymentResponse` after the payment has been processed
+   * with the appropriate action (Settle, Forward, Cancel).
    */
-  rpc RouteHtlcs(EmptyRequest) returns (stream InterceptHtlcRequest) {}
+  rpc RoutePayments(EmptyRequest) returns (stream InterceptHtlcRequest) {}
 
-  rpc CompleteHtlc(InterceptHtlcResponse) returns (EmptyResponse) {}
+  rpc CompletePayment(InterceptPaymentResponse) returns (EmptyResponse) {}
 
   rpc CreateInvoice(CreateInvoiceRequest) returns (CreateInvoiceResponse) {}
 
@@ -164,7 +164,7 @@ message InterceptHtlcRequest {
   uint64 htlc_id = 13;
 }
 
-message InterceptHtlcResponse {
+message InterceptPaymentResponse {
   message Settle {
     // The preimage for settling an intercepted HTLC
     bytes preimage = 1;

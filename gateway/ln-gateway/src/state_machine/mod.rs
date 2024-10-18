@@ -532,7 +532,7 @@ impl GatewayClientModule {
         loop {
             match stream.next().await {
                 Some(GatewayClientStateMachines::Complete(state)) => match state.state {
-                    GatewayCompleteStates::HtlcFinished => {
+                    GatewayCompleteStates::PaymentFinished => {
                         info!(%state, "LNv1 completion state machine finished");
                         return;
                     }

@@ -15,15 +15,15 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use super::{GatewayClientContext, GatewayClientStateMachines};
-use crate::gateway_lnrpc::intercept_htlc_response::{Action, Cancel, Settle};
-use crate::gateway_lnrpc::InterceptHtlcResponse;
+use crate::gateway_lnrpc::intercept_payment_response::{Action, Cancel, Settle};
+use crate::gateway_lnrpc::InterceptPaymentResponse;
 
 #[derive(Error, Debug, Serialize, Deserialize, Encodable, Decodable, Clone, Eq, PartialEq)]
-enum CompleteHtlcError {
+enum CompletePaymentError {
     #[error("Incoming contract was not funded")]
     IncomingContractNotFunded,
     #[error("Failed to complete HTLC")]
-    FailedToCompleteHtlc,
+    FailedToCompletePayment,
 }
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
@@ -36,15 +36,15 @@ enum CompleteHtlcError {
 /// classDef virtual fill:#fff,stroke-dasharray: 5 5
 ///
 ///    WaitForPreimage -- incoming contract not funded --> Failure
-///    WaitForPreimage -- successfully retrieved preimage --> CompleteHtlc
-///    CompleteHtlc -- successfully completed or canceled htlc --> HtlcFinished
-///    CompleteHtlc -- failed to finish htlc --> Failure
+///    WaitForPreimage -- successfully retrieved preimage --> CompletePayment
+///    CompletePayment -- successfully completed or canceled htlc --> HtlcFinished
+///    CompletePayment -- failed to finish htlc --> Failure
 /// ```
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Decodable, Encodable)]
 pub enum GatewayCompleteStates {
     WaitForPreimage(WaitForPreimageState),
-    CompleteHtlc(CompleteHtlcState),
-    HtlcFinished,
+    CompletePayment(CompletePaymentState),
+    PaymentFinished,
     Failure,
 }
 
@@ -52,8 +52,8 @@ impl fmt::Display for GatewayCompleteStates {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GatewayCompleteStates::WaitForPreimage(_) => write!(f, "WaitForPreimage"),
-            GatewayCompleteStates::CompleteHtlc(_) => write!(f, "CompleteHtlc"),
-            GatewayCompleteStates::HtlcFinished => write!(f, "HtlcFinished"),
+            GatewayCompleteStates::CompletePayment(_) => write!(f, "CompletePayment"),
+            GatewayCompleteStates::PaymentFinished => write!(f, "PaymentFinished"),
             GatewayCompleteStates::Failure => write!(f, "Failure"),
         }
     }
@@ -95,7 +95,7 @@ impl State for GatewayCompleteStateMachine {
             GatewayCompleteStates::WaitForPreimage(_state) => {
                 WaitForPreimageState::transitions(context.clone(), self.common.clone())
             }
-            GatewayCompleteStates::CompleteHtlc(state) => {
+            GatewayCompleteStates::CompletePayment(state) => {
                 state.transitions(context.clone(), self.common.clone())
             }
             _ => vec![],
@@ -127,7 +127,7 @@ impl WaitForPreimageState {
     async fn await_preimage(
         context: GatewayClientContext,
         common: GatewayCompleteCommon,
-    ) -> Result<Preimage, CompleteHtlcError> {
+    ) -> Result<Preimage, CompletePaymentError> {
         let mut stream = context.notifier.subscribe(common.operation_id).await;
         loop {
             debug!("Waiting for preimage for {common:?}");
@@ -139,11 +139,11 @@ impl WaitForPreimageState {
                     }
                     IncomingSmStates::RefundSubmitted { out_points, error } => {
                         info!("Refund submitted for {common:?}: {out_points:?} {error}");
-                        return Err(CompleteHtlcError::IncomingContractNotFunded);
+                        return Err(CompletePaymentError::IncomingContractNotFunded);
                     }
                     IncomingSmStates::FundingFailed { error } => {
                         warn!("Funding failed for {common:?}: {error}");
-                        return Err(CompleteHtlcError::IncomingContractNotFunded);
+                        return Err(CompletePaymentError::IncomingContractNotFunded);
                     }
                     _ => {}
                 }
@@ -152,19 +152,19 @@ impl WaitForPreimageState {
     }
 
     fn transition_complete_htlc(
-        result: Result<Preimage, CompleteHtlcError>,
+        result: Result<Preimage, CompletePaymentError>,
         common: GatewayCompleteCommon,
     ) -> GatewayCompleteStateMachine {
         match result {
             Ok(preimage) => GatewayCompleteStateMachine {
                 common,
-                state: GatewayCompleteStates::CompleteHtlc(CompleteHtlcState {
+                state: GatewayCompleteStates::CompletePayment(CompletePaymentState {
                     outcome: HtlcOutcome::Success(preimage),
                 }),
             },
             Err(e) => GatewayCompleteStateMachine {
                 common,
-                state: GatewayCompleteStates::CompleteHtlc(CompleteHtlcState {
+                state: GatewayCompleteStates::CompletePayment(CompletePaymentState {
                     outcome: HtlcOutcome::Failure(e.to_string()),
                 }),
             },
@@ -179,11 +179,11 @@ enum HtlcOutcome {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Decodable, Encodable)]
-pub struct CompleteHtlcState {
+pub struct CompletePaymentState {
     outcome: HtlcOutcome,
 }
 
-impl CompleteHtlcState {
+impl CompletePaymentState {
     fn transitions(
         &self,
         context: GatewayClientContext,
@@ -202,7 +202,7 @@ impl CompleteHtlcState {
         context: GatewayClientContext,
         common: GatewayCompleteCommon,
         outcome: HtlcOutcome,
-    ) -> Result<(), CompleteHtlcError> {
+    ) -> Result<(), CompletePaymentError> {
         // Wait until the lightning node is online to complete the HTLC
         loop {
             let htlc_outcome = outcome.clone();
@@ -210,7 +210,7 @@ impl CompleteHtlcState {
             match lightning_context {
                 Ok(lightning_context) => {
                     let htlc = match htlc_outcome {
-                        HtlcOutcome::Success(preimage) => InterceptHtlcResponse {
+                        HtlcOutcome::Success(preimage) => InterceptPaymentResponse {
                             action: Some(Action::Settle(Settle {
                                 preimage: preimage.0.to_vec(),
                             })),
@@ -218,7 +218,7 @@ impl CompleteHtlcState {
                             incoming_chan_id: common.incoming_chan_id,
                             htlc_id: common.htlc_id,
                         },
-                        HtlcOutcome::Failure(reason) => InterceptHtlcResponse {
+                        HtlcOutcome::Failure(reason) => InterceptPaymentResponse {
                             action: Some(Action::Cancel(Cancel { reason })),
                             payment_hash: common.payment_hash.to_byte_array().to_vec(),
                             incoming_chan_id: common.incoming_chan_id,
@@ -230,7 +230,7 @@ impl CompleteHtlcState {
                         .lnrpc
                         .complete_htlc(htlc)
                         .await
-                        .map_err(|_| CompleteHtlcError::FailedToCompleteHtlc)?;
+                        .map_err(|_| CompletePaymentError::FailedToCompletePayment)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -242,13 +242,13 @@ impl CompleteHtlcState {
     }
 
     fn transition_success(
-        result: &Result<(), CompleteHtlcError>,
+        result: &Result<(), CompletePaymentError>,
         common: GatewayCompleteCommon,
     ) -> GatewayCompleteStateMachine {
         match result {
             Ok(()) => GatewayCompleteStateMachine {
                 common,
-                state: GatewayCompleteStates::HtlcFinished,
+                state: GatewayCompleteStates::PaymentFinished,
             },
             Err(_) => GatewayCompleteStateMachine {
                 common,

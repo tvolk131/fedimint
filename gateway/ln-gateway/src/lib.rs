@@ -81,8 +81,10 @@ use fedimint_wallet_client::{
     WalletClientInit, WalletClientModule, WalletCommonInit, WithdrawState,
 };
 use futures::stream::StreamExt;
-use gateway_lnrpc::intercept_htlc_response::{Action, Cancel};
-use gateway_lnrpc::{CloseChannelsWithPeerResponse, InterceptHtlcRequest, InterceptHtlcResponse};
+use gateway_lnrpc::intercept_payment_response::{Action, Cancel};
+use gateway_lnrpc::{
+    CloseChannelsWithPeerResponse, InterceptHtlcRequest, InterceptPaymentResponse,
+};
 use lightning::{ILnRpcClient, LightningBuilder, LightningRpcError};
 use lightning_invoice::{Bolt11Invoice, RoutingFees};
 use rand::{thread_rng, Rng};
@@ -101,10 +103,12 @@ use crate::db::{get_gatewayd_database_migrations, FederationConfig};
 use crate::envs::FM_GATEWAY_MNEMONIC_ENV;
 use crate::error::{AdminGatewayError, LNv1Error, LNv2Error, PublicGatewayError};
 use crate::gateway_lnrpc::create_invoice_request::Description;
-use crate::gateway_lnrpc::intercept_htlc_response::Forward;
+use crate::gateway_lnrpc::intercept_payment_response::Forward;
 use crate::gateway_lnrpc::CreateInvoiceRequest;
 use crate::gateway_module_v2::GatewayClientModuleV2;
-use crate::lightning::{GatewayLightningBuilder, LightningContext, LightningMode, RouteHtlcStream};
+use crate::lightning::{
+    GatewayLightningBuilder, LightningContext, LightningMode, RoutePaymentStream,
+};
 use crate::rpc::rpc_server::{hash_password, run_webserver};
 use crate::rpc::{
     BackupPayload, BalancePayload, ConnectFedPayload, DepositAddressPayload, FederationBalanceInfo,
@@ -442,7 +446,7 @@ impl Gateway {
                     let lnrpc_route = self_copy.lightning_builder.build().await;
 
                     debug!("Establishing lightning payment stream...");
-                    let (stream, ln_client) = match lnrpc_route.route_htlcs(&payment_stream_task_group).await
+                    let (stream, ln_client) = match lnrpc_route.route_payments(&payment_stream_task_group).await
                     {
                         Ok((stream, ln_client)) => (stream, ln_client),
                         Err(e) => {
@@ -451,7 +455,7 @@ impl Gateway {
                         }
                     };
 
-                    // Successful calls to `route_htlcs` establish a connection
+                    // Successful calls to `route_payments` establish a connection
                     self_copy.set_gateway_state(GatewayState::Connected).await;
                     info!("Established lightning payment stream");
 
@@ -482,7 +486,7 @@ impl Gateway {
     async fn route_lightning_payments<'a>(
         &'a self,
         handle: &TaskHandle,
-        mut stream: RouteHtlcStream<'a>,
+        mut stream: RoutePaymentStream<'a>,
         ln_client: Arc<dyn ILnRpcClient>,
     ) -> ReceivePaymentStreamAction {
         let (lightning_public_key, lightning_alias, lightning_network) =
@@ -670,7 +674,7 @@ impl Gateway {
         {
             error!("Error relaying incoming lightning payment: {error:?}");
 
-            let outcome = InterceptHtlcResponse {
+            let outcome = InterceptPaymentResponse {
                 action: Some(Action::Cancel(Cancel {
                     reason: "Insufficient Liquidity".to_string(),
                 })),
@@ -741,7 +745,7 @@ impl Gateway {
         htlc_request: InterceptHtlcRequest,
         lightning_context: &LightningContext,
     ) {
-        let outcome = InterceptHtlcResponse {
+        let outcome = InterceptPaymentResponse {
             action: Some(Action::Forward(Forward {})),
             payment_hash: htlc_request.payment_hash,
             incoming_chan_id: htlc_request.incoming_chan_id,

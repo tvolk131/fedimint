@@ -10,8 +10,8 @@ use fedimint_core::task::sleep;
 use tracing::warn;
 
 use super::FinalReceiveState;
-use crate::gateway_lnrpc::intercept_htlc_response::{Action, Cancel, Settle};
-use crate::gateway_lnrpc::InterceptHtlcResponse;
+use crate::gateway_lnrpc::intercept_payment_response::{Action, Cancel, Settle};
+use crate::gateway_lnrpc::InterceptPaymentResponse;
 use crate::gateway_module_v2::GatewayClientContextV2;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
@@ -148,7 +148,7 @@ impl CompleteStateMachine {
             }),
         };
 
-        let intercept_htlc_response = InterceptHtlcResponse {
+        let intercept_payment_response = InterceptPaymentResponse {
             action: Some(action),
             payment_hash: payment_hash.to_byte_array().to_vec(),
             incoming_chan_id,
@@ -160,7 +160,7 @@ impl CompleteStateMachine {
                 Ok(lightning_context) => {
                     match lightning_context
                         .lnrpc
-                        .complete_htlc(intercept_htlc_response.clone())
+                        .complete_htlc(intercept_payment_response.clone())
                         .await
                     {
                         Ok(..) => return,

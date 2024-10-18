@@ -26,13 +26,13 @@ use ln_gateway::gateway_lnrpc::gateway_lightning_server::{
     GatewayLightning, GatewayLightningServer,
 };
 use ln_gateway::gateway_lnrpc::get_route_hints_response::{RouteHint, RouteHintHop};
-use ln_gateway::gateway_lnrpc::intercept_htlc_response::{Action, Cancel, Forward, Settle};
+use ln_gateway::gateway_lnrpc::intercept_payment_response::{Action, Cancel, Forward, Settle};
 use ln_gateway::gateway_lnrpc::list_active_channels_response::ChannelInfo;
 use ln_gateway::gateway_lnrpc::{
     CloseChannelsWithPeerRequest, CloseChannelsWithPeerResponse, CreateInvoiceRequest,
     CreateInvoiceResponse, EmptyRequest, EmptyResponse, GetBalancesResponse,
     GetLnOnchainAddressResponse, GetNodeInfoResponse, GetRouteHintsRequest, GetRouteHintsResponse,
-    InterceptHtlcRequest, InterceptHtlcResponse, ListActiveChannelsResponse, OpenChannelRequest,
+    InterceptHtlcRequest, InterceptPaymentResponse, ListActiveChannelsResponse, OpenChannelRequest,
     OpenChannelResponse, PayInvoiceRequest, PayInvoiceResponse, PayPrunedInvoiceRequest,
     PrunedInvoice, WithdrawOnchainRequest, WithdrawOnchainResponse,
 };
@@ -748,12 +748,12 @@ impl GatewayLightning for ClnRpcService {
         }
     }
 
-    type RouteHtlcsStream = ReceiverStream<Result<InterceptHtlcRequest, Status>>;
+    type RoutePaymentsStream = ReceiverStream<Result<InterceptHtlcRequest, Status>>;
 
-    async fn route_htlcs(
+    async fn route_payments(
         &self,
         _: tonic::Request<EmptyRequest>,
-    ) -> Result<tonic::Response<Self::RouteHtlcsStream>, Status> {
+    ) -> Result<tonic::Response<Self::RoutePaymentsStream>, Status> {
         // First create new channel that we will use to send responses back to gatewayd
         let (gatewayd_sender, gatewayd_receiver) =
             mpsc::channel::<Result<InterceptHtlcRequest, Status>>(100);
@@ -765,11 +765,11 @@ impl GatewayLightning for ClnRpcService {
         Ok(tonic::Response::new(ReceiverStream::new(gatewayd_receiver)))
     }
 
-    async fn complete_htlc(
+    async fn complete_payment(
         &self,
-        intercept_response: tonic::Request<InterceptHtlcResponse>,
+        intercept_response: tonic::Request<InterceptPaymentResponse>,
     ) -> Result<tonic::Response<EmptyResponse>, Status> {
-        let InterceptHtlcResponse {
+        let InterceptPaymentResponse {
             action,
             incoming_chan_id,
             htlc_id,

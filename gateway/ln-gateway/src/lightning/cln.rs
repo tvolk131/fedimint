@@ -13,13 +13,13 @@ use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
 use tracing::info;
 
-use super::{ChannelInfo, ILnRpcClient, LightningRpcError, RouteHtlcStream};
+use super::{ChannelInfo, ILnRpcClient, LightningRpcError, RoutePaymentStream};
 use crate::gateway_lnrpc::gateway_lightning_client::GatewayLightningClient;
 use crate::gateway_lnrpc::{
     self, CloseChannelsWithPeerRequest, CloseChannelsWithPeerResponse, CreateInvoiceRequest,
     CreateInvoiceResponse, EmptyRequest, EmptyResponse, GetBalancesResponse,
     GetLnOnchainAddressResponse, GetNodeInfoResponse, GetRouteHintsRequest, GetRouteHintsResponse,
-    InterceptHtlcResponse, OpenChannelRequest, OpenChannelResponse, PayInvoiceResponse,
+    InterceptPaymentResponse, OpenChannelRequest, OpenChannelResponse, PayInvoiceResponse,
     PayPrunedInvoiceRequest, WithdrawOnchainRequest, WithdrawOnchainResponse,
 };
 use crate::lightning::MAX_LIGHTNING_RETRIES;
@@ -127,15 +127,15 @@ impl ILnRpcClient for NetworkLnRpcClient {
         true
     }
 
-    async fn route_htlcs<'a>(
+    async fn route_payments<'a>(
         self: Box<Self>,
         _task_group: &TaskGroup,
-    ) -> Result<(RouteHtlcStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
+    ) -> Result<(RoutePaymentStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
         let mut client = self.connect().await?;
         let res = client
-            .route_htlcs(EmptyRequest {})
+            .route_payments(EmptyRequest {})
             .await
-            .map_err(|status| LightningRpcError::FailedToRouteHtlcs {
+            .map_err(|status| LightningRpcError::FailedToRoutePayments {
                 failure_reason: status.message().to_string(),
             })?;
         Ok((
@@ -146,11 +146,11 @@ impl ILnRpcClient for NetworkLnRpcClient {
 
     async fn complete_htlc(
         &self,
-        htlc: InterceptHtlcResponse,
+        payment: InterceptPaymentResponse,
     ) -> Result<EmptyResponse, LightningRpcError> {
         let mut client = self.connect().await?;
-        let res = client.complete_htlc(htlc).await.map_err(|status| {
-            LightningRpcError::FailedToCompleteHtlc {
+        let res = client.complete_payment(payment).await.map_err(|status| {
+            LightningRpcError::FailedToCompletePayment {
                 failure_reason: status.message().to_string(),
             }
         })?;

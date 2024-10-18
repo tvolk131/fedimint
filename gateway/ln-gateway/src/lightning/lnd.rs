@@ -41,15 +41,17 @@ use tonic_lnd::walletrpc::AddrRequest;
 use tonic_lnd::{connect, Client as LndClient};
 use tracing::{debug, error, info, trace, warn};
 
-use super::{ChannelInfo, ILnRpcClient, LightningRpcError, RouteHtlcStream, MAX_LIGHTNING_RETRIES};
+use super::{
+    ChannelInfo, ILnRpcClient, LightningRpcError, RoutePaymentStream, MAX_LIGHTNING_RETRIES,
+};
 use crate::db::GatewayDbtxNcExt;
 use crate::gateway_lnrpc::create_invoice_request::Description;
 use crate::gateway_lnrpc::get_route_hints_response::{RouteHint, RouteHintHop};
-use crate::gateway_lnrpc::intercept_htlc_response::{Action, Cancel, Forward, Settle};
+use crate::gateway_lnrpc::intercept_payment_response::{Action, Cancel, Forward, Settle};
 use crate::gateway_lnrpc::{
     CloseChannelsWithPeerResponse, CreateInvoiceRequest, CreateInvoiceResponse, EmptyResponse,
     GetBalancesResponse, GetLnOnchainAddressResponse, GetNodeInfoResponse, GetRouteHintsResponse,
-    InterceptHtlcRequest, InterceptHtlcResponse, OpenChannelResponse, PayInvoiceResponse,
+    InterceptHtlcRequest, InterceptPaymentResponse, OpenChannelResponse, PayInvoiceResponse,
     WithdrawOnchainResponse,
 };
 
@@ -233,7 +235,7 @@ impl GatewayLndClient {
             .await
             .map_err(|status| {
                 error!(?status, "Failed to list all invoices");
-                LightningRpcError::FailedToRouteHtlcs {
+                LightningRpcError::FailedToRoutePayments {
                     failure_reason: "Failed to list all invoices".to_string(),
                 }
             })?
@@ -487,7 +489,7 @@ impl GatewayLndClient {
     ) -> Result<(), LightningRpcError> {
         // TODO: Consider retrying this if the send fails
         lnd_sender.send(response).await.map_err(|send_error| {
-            LightningRpcError::FailedToCompleteHtlc {
+            LightningRpcError::FailedToCompletePayment {
                 failure_reason: format!(
                     "Failed to send ForwardHtlcInterceptResponse to LND {send_error:?}"
                 ),
@@ -561,7 +563,7 @@ impl GatewayLndClient {
                 lookup_modifier: 0,
             })
             .await
-            .map_err(|_| LightningRpcError::FailedToCompleteHtlc {
+            .map_err(|_| LightningRpcError::FailedToCompletePayment {
                 failure_reason: "Hold invoice does not exist".to_string(),
             })?
             .into_inner();
@@ -573,7 +575,7 @@ impl GatewayLndClient {
                 "HOLD invoice state is not accepted {}",
                 PrettyPaymentHash(&payment_hash)
             );
-            return Err(LightningRpcError::FailedToCompleteHtlc {
+            return Err(LightningRpcError::FailedToCompletePayment {
                 failure_reason: "HOLD invoice state is not accepted".to_string(),
             });
         }
@@ -588,7 +590,7 @@ impl GatewayLndClient {
                     "Failed to settle HOLD invoice {}",
                     PrettyPaymentHash(&payment_hash)
                 );
-                LightningRpcError::FailedToCompleteHtlc {
+                LightningRpcError::FailedToCompletePayment {
                     failure_reason: "Failed to settle HOLD invoice".to_string(),
                 }
             })?;
@@ -608,7 +610,7 @@ impl GatewayLndClient {
                 lookup_modifier: 0,
             })
             .await
-            .map_err(|_| LightningRpcError::FailedToCompleteHtlc {
+            .map_err(|_| LightningRpcError::FailedToCompletePayment {
                 failure_reason: "Hold invoice does not exist".to_string(),
             })?
             .into_inner();
@@ -630,7 +632,7 @@ impl GatewayLndClient {
                     "Failed to cancel HOLD invoice {}",
                     PrettyPaymentHash(&payment_hash)
                 );
-                LightningRpcError::FailedToCompleteHtlc {
+                LightningRpcError::FailedToCompletePayment {
                     failure_reason: "Failed to cancel HOLD invoice".to_string(),
                 }
             })?;
@@ -929,10 +931,10 @@ impl ILnRpcClient for GatewayLndClient {
         true
     }
 
-    async fn route_htlcs<'a>(
+    async fn route_payments<'a>(
         self: Box<Self>,
         task_group: &TaskGroup,
-    ) -> Result<(RouteHtlcStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
+    ) -> Result<(RoutePaymentStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
         const CHANNEL_SIZE: usize = 100;
 
         // Channel to send intercepted htlc to the gateway for processing
@@ -961,14 +963,14 @@ impl ILnRpcClient for GatewayLndClient {
 
     async fn complete_htlc(
         &self,
-        htlc: InterceptHtlcResponse,
+        payment: InterceptPaymentResponse,
     ) -> Result<EmptyResponse, LightningRpcError> {
-        let InterceptHtlcResponse {
+        let InterceptPaymentResponse {
             action,
             payment_hash,
             incoming_chan_id,
             htlc_id,
-        } = htlc;
+        } = payment;
 
         let (action, preimage) = match action {
             Some(Action::Settle(Settle { preimage })) => {
@@ -1023,7 +1025,7 @@ impl ILnRpcClient for GatewayLndClient {
         }
 
         error!("Gatewayd has not started to route HTLCs");
-        Err(LightningRpcError::FailedToCompleteHtlc {
+        Err(LightningRpcError::FailedToCompletePayment {
             failure_reason: "Gatewayd has not started to route HTLCs".to_string(),
         })
     }

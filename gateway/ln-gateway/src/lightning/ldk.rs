@@ -20,13 +20,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
 use tracing::{error, info};
 
-use super::{ChannelInfo, ILnRpcClient, LightningRpcError, RouteHtlcStream};
+use super::{ChannelInfo, ILnRpcClient, LightningRpcError, RoutePaymentStream};
 use crate::gateway_lnrpc::create_invoice_request::Description;
-use crate::gateway_lnrpc::intercept_htlc_response::{Action, Settle};
+use crate::gateway_lnrpc::intercept_payment_response::{Action, Settle};
 use crate::gateway_lnrpc::{
     CloseChannelsWithPeerResponse, CreateInvoiceRequest, CreateInvoiceResponse, EmptyResponse,
     GetBalancesResponse, GetLnOnchainAddressResponse, GetNodeInfoResponse, GetRouteHintsResponse,
-    InterceptHtlcRequest, InterceptHtlcResponse, OpenChannelResponse, PayInvoiceResponse,
+    InterceptHtlcRequest, InterceptPaymentResponse, OpenChannelResponse, PayInvoiceResponse,
     WithdrawOnchainResponse,
 };
 
@@ -39,13 +39,13 @@ pub struct GatewayLdkClient {
 
     /// A handle to the task that processes incoming events from the lightning
     /// node. Responsible for sending incoming HTLCs to the caller of
-    /// `route_htlcs`.
+    /// `route_payments`.
     /// TODO: This should be a shutdown sender instead, and we can discard the
     /// handle.
     event_handler_task_handle: tokio::task::JoinHandle<()>,
 
     /// The HTLC stream, until it is taken by calling
-    /// `ILnRpcClient::route_htlcs`.
+    /// `ILnRpcClient::route_payments`.
     htlc_stream_receiver_or:
         Option<tokio::sync::mpsc::Receiver<Result<InterceptHtlcRequest, Status>>>,
 }
@@ -292,15 +292,15 @@ impl ILnRpcClient for GatewayLdkClient {
         }
     }
 
-    async fn route_htlcs<'a>(
+    async fn route_payments<'a>(
         mut self: Box<Self>,
         _task_group: &TaskGroup,
-    ) -> Result<(RouteHtlcStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
+    ) -> Result<(RoutePaymentStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
         let route_htlc_stream = match self.htlc_stream_receiver_or.take() {
             Some(stream) => Ok(Box::pin(ReceiverStream::new(stream))),
-            None => Err(LightningRpcError::FailedToRouteHtlcs {
+            None => Err(LightningRpcError::FailedToRoutePayments {
                 failure_reason:
-                    "Stream does not exist. Likely was already taken by calling `route_htlcs()`."
+                    "Stream does not exist. Likely was already taken by calling `route_payments()`."
                         .to_string(),
             }),
         }?;
@@ -310,23 +310,23 @@ impl ILnRpcClient for GatewayLdkClient {
 
     async fn complete_htlc(
         &self,
-        htlc: InterceptHtlcResponse,
+        payment: InterceptPaymentResponse,
     ) -> Result<EmptyResponse, LightningRpcError> {
-        let InterceptHtlcResponse {
+        let InterceptPaymentResponse {
             action,
             payment_hash,
             incoming_chan_id: _,
             htlc_id: _,
-        } = htlc;
+        } = payment;
 
         let ph = PaymentHash(payment_hash.clone().try_into().map_err(|_| {
-            LightningRpcError::FailedToCompleteHtlc {
+            LightningRpcError::FailedToCompletePayment {
                 failure_reason: "Failed to parse payment hash".to_string(),
             }
         })?);
 
         // TODO: Get the actual amount from the LDK node. Probably makes the
-        // most sense to pipe it through the `InterceptHtlcResponse` struct.
+        // most sense to pipe it through the `InterceptPaymentResponse` struct.
         // This value is only used by `ldk-node` to ensure that the amount
         // claimed isn't less than the amount expected, but we've already
         // verified that the amount is correct when we intercepted the payment.
@@ -342,13 +342,13 @@ impl ILnRpcClient for GatewayLdkClient {
                     claimable_amount_msat,
                     PaymentPreimage(preimage.try_into().unwrap()),
                 )
-                .map_err(|_| LightningRpcError::FailedToCompleteHtlc {
+                .map_err(|_| LightningRpcError::FailedToCompletePayment {
                     failure_reason: format!("Failed to claim LDK payment with hash {ph_hex_str}"),
                 })?;
         } else {
             error!("Unwinding payment with hash {ph_hex_str} because the action was not `Settle`");
             self.node.bolt11_payment().fail_for_hash(ph).map_err(|_| {
-                LightningRpcError::FailedToCompleteHtlc {
+                LightningRpcError::FailedToCompletePayment {
                     failure_reason: format!("Failed to unwind LDK payment with hash {ph_hex_str}"),
                 }
             })?;

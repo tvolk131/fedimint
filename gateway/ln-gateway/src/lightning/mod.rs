@@ -33,14 +33,14 @@ use crate::envs::{
 use crate::gateway_lnrpc::{
     CloseChannelsWithPeerResponse, CreateInvoiceRequest, CreateInvoiceResponse, EmptyResponse,
     GetBalancesResponse, GetLnOnchainAddressResponse, GetNodeInfoResponse, GetRouteHintsResponse,
-    InterceptHtlcRequest, InterceptHtlcResponse, OpenChannelResponse, PayInvoiceResponse,
+    InterceptHtlcRequest, InterceptPaymentResponse, OpenChannelResponse, PayInvoiceResponse,
     WithdrawOnchainResponse,
 };
 
 pub const MAX_LIGHTNING_RETRIES: u32 = 10;
 
-pub type HtlcResult = std::result::Result<InterceptHtlcRequest, tonic::Status>;
-pub type RouteHtlcStream<'a> = BoxStream<'a, HtlcResult>;
+pub type PaymentResult = std::result::Result<InterceptHtlcRequest, tonic::Status>;
+pub type RoutePaymentStream<'a> = BoxStream<'a, PaymentResult>;
 
 #[derive(
     Error, Debug, Serialize, Deserialize, Encodable, Decodable, Clone, Eq, PartialEq, Hash,
@@ -54,10 +54,10 @@ pub enum LightningRpcError {
     FailedToGetRouteHints { failure_reason: String },
     #[error("Payment failed: {failure_reason}")]
     FailedPayment { failure_reason: String },
-    #[error("Failed to route HTLCs: {failure_reason}")]
-    FailedToRouteHtlcs { failure_reason: String },
-    #[error("Failed to complete HTLC: {failure_reason}")]
-    FailedToCompleteHtlc { failure_reason: String },
+    #[error("Failed to route payments: {failure_reason}")]
+    FailedToRoutePayments { failure_reason: String },
+    #[error("Failed to complete payment: {failure_reason}")]
+    FailedToCompletePayment { failure_reason: String },
     #[error("Failed to open channel: {failure_reason}")]
     FailedToOpenChannel { failure_reason: String },
     #[error("Failed to close channel: {failure_reason}")]
@@ -147,23 +147,23 @@ pub trait ILnRpcClient: Debug + Send + Sync {
     /// and a new client. `complete_htlc` must be called for all successfully
     /// intercepted HTLCs sent to the returned stream.
     ///
-    /// `route_htlcs` can only be called once for a given client, since the
+    /// `route_payments` can only be called once for a given client, since the
     /// returned stream grants exclusive routing decisions to the caller.
     /// For this reason, `route_htlc` consumes the client and returns one
-    /// wrapped in an `Arc`. This lets the compiler enforce that `route_htlcs`
-    /// can only be called once for a given client, since the value inside
-    /// the `Arc` cannot be consumed.
-    async fn route_htlcs<'a>(
+    /// wrapped in an `Arc`. This lets the compiler enforce that
+    /// `route_payments` can only be called once for a given client, since
+    /// the value inside the `Arc` cannot be consumed.
+    async fn route_payments<'a>(
         self: Box<Self>,
         task_group: &TaskGroup,
-    ) -> Result<(RouteHtlcStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError>;
+    ) -> Result<(RoutePaymentStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError>;
 
     /// Complete an HTLC that was intercepted by the gateway. Must be called for
     /// all successfully intercepted HTLCs sent to the stream returned by
-    /// `route_htlcs`.
+    /// `route_payments`.
     async fn complete_htlc(
         &self,
-        htlc: InterceptHtlcResponse,
+        payment: InterceptPaymentResponse,
     ) -> Result<EmptyResponse, LightningRpcError>;
 
     async fn create_invoice(
