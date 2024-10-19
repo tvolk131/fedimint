@@ -7,8 +7,7 @@ use async_trait::async_trait;
 use bitcoin::{secp256k1, Address, Network, OutPoint};
 use fedimint_bip39::Mnemonic;
 use fedimint_core::bitcoin_migration::{
-    bitcoin30_to_bitcoin32_address, bitcoin30_to_bitcoin32_payment_preimage,
-    bitcoin32_to_bitcoin30_address,
+    bitcoin30_to_bitcoin32_address, bitcoin32_to_bitcoin30_address,
 };
 use fedimint_core::runtime::spawn;
 use fedimint_core::task::TaskGroup;
@@ -378,9 +377,7 @@ impl ILnRpcClient for GatewayLdkClient {
                 .claim_for_hash(
                     ph,
                     claimable_amount_msat,
-                    bitcoin30_to_bitcoin32_payment_preimage(&PaymentPreimage(
-                        preimage.try_into().unwrap(),
-                    )),
+                    PaymentPreimage(preimage.try_into().unwrap()),
                 )
                 .map_err(|_| LightningRpcError::FailedToCompleteHtlc {
                     failure_reason: format!("Failed to claim LDK payment with hash {ph_hex_str}"),

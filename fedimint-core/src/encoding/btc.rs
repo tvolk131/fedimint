@@ -9,8 +9,8 @@ use miniscript::{Descriptor, MiniscriptKey};
 
 use super::get_network_from_address;
 use crate::bitcoin_migration::{
-    bitcoin29_to_bitcoin30_network_magic, bitcoin29_to_bitcoin30_psbt,
-    bitcoin30_to_bitcoin29_network_magic, bitcoin30_to_bitcoin29_psbt,
+    bitcoin29_to_bitcoin32_network_magic, bitcoin29_to_bitcoin32_psbt,
+    bitcoin32_to_bitcoin29_network_magic, bitcoin32_to_bitcoin29_psbt,
     checked_address_to_unchecked_address,
 };
 use crate::encoding::{Decodable, DecodeError, Encodable};
@@ -54,7 +54,7 @@ impl_encode_decode_bridge!(bitcoin::merkle_tree::PartialMerkleTree);
 impl crate::encoding::Encodable for bitcoin::psbt::Psbt {
     fn consensus_encode<W: std::io::Write>(&self, writer: &mut W) -> Result<usize, std::io::Error> {
         bitcoin29::consensus::Encodable::consensus_encode(
-            &bitcoin30_to_bitcoin29_psbt(self),
+            &bitcoin32_to_bitcoin29_psbt(self),
             writer,
         )
     }
@@ -65,7 +65,7 @@ impl crate::encoding::Decodable for bitcoin::psbt::Psbt {
         d: &mut D,
         _modules: &ModuleDecoderRegistry,
     ) -> Result<Self, crate::encoding::DecodeError> {
-        Ok(bitcoin29_to_bitcoin30_psbt(
+        Ok(bitcoin29_to_bitcoin32_psbt(
             &bitcoin29::consensus::Decodable::consensus_decode_from_finite_reader(d)
                 .map_err(crate::encoding::DecodeError::from_err)?,
         ))
@@ -148,7 +148,7 @@ impl Encodable for bitcoin::p2p::Magic {
     fn consensus_encode<W: Write>(&self, writer: &mut W) -> Result<usize, Error> {
         // The encoding format for bitcoin v0.30 is different from bitcoin v0.29. We're
         // converting before encoding to maintain backwards compatibility.
-        let num = bitcoin30_to_bitcoin29_network_magic(self);
+        let num = bitcoin32_to_bitcoin29_network_magic(self);
         num.consensus_encode(writer)
     }
 }
@@ -161,7 +161,7 @@ impl Decodable for bitcoin::p2p::Magic {
         // The encoding format for bitcoin v0.30 is different from bitcoin v0.29. We're
         // converting after decoding to maintain backwards compatibility.
         let num = u32::consensus_decode(d, modules)?;
-        Ok(bitcoin29_to_bitcoin30_network_magic(num))
+        Ok(bitcoin29_to_bitcoin32_network_magic(num))
     }
 }
 
