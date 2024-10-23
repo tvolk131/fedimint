@@ -1,7 +1,10 @@
 use std::time::Duration;
 
-use bitcoin30::address::NetworkUnchecked;
+use bitcoin::address::NetworkUnchecked;
 use clap::Subcommand;
+use fedimint_core::bitcoin_migration::{
+    bitcoin32_to_bitcoin30_secp256k1_pubkey, bitcoin32_to_bitcoin30_unchecked_address,
+};
 use fedimint_core::util::{backoff_util, retry};
 use fedimint_core::{Amount, BitcoinAmountOrAll};
 use lightning_invoice::Bolt11Invoice;
@@ -49,7 +52,7 @@ pub enum LightningCommands {
     OpenChannel {
         /// The public key of the node to open a channel with
         #[clap(long)]
-        pubkey: bitcoin30::secp256k1::PublicKey,
+        pubkey: bitcoin::secp256k1::PublicKey,
 
         #[clap(long)]
         host: String,
@@ -67,7 +70,7 @@ pub enum LightningCommands {
     CloseChannelsWithPeer {
         // The public key of the node to close channels with
         #[clap(long)]
-        pubkey: bitcoin30::secp256k1::PublicKey,
+        pubkey: bitcoin::secp256k1::PublicKey,
     },
     /// List active channels.
     ListActiveChannels,
@@ -76,7 +79,7 @@ pub enum LightningCommands {
     WithdrawOnchain {
         /// The address to withdraw funds to.
         #[clap(long)]
-        address: bitcoin30::Address<NetworkUnchecked>,
+        address: bitcoin::Address<NetworkUnchecked>,
 
         /// The amount to withdraw.
         /// Can be "all" to withdraw all funds, an amount + unit (e.g. "1000
@@ -153,6 +156,8 @@ impl LightningCommands {
                 channel_size_sats,
                 push_amount_sats,
             } => {
+                let pubkey = bitcoin32_to_bitcoin30_secp256k1_pubkey(&pubkey);
+
                 let funding_txid = create_client()
                     .open_channel(OpenChannelPayload {
                         pubkey,
@@ -164,6 +169,8 @@ impl LightningCommands {
                 println!("{funding_txid}");
             }
             Self::CloseChannelsWithPeer { pubkey } => {
+                let pubkey = bitcoin32_to_bitcoin30_secp256k1_pubkey(&pubkey);
+
                 let response = create_client()
                     .close_channels_with_peer(CloseChannelsWithPeerPayload { pubkey })
                     .await?;
@@ -178,6 +185,8 @@ impl LightningCommands {
                 amount,
                 fee_rate_sats_per_vbyte,
             } => {
+                let address = bitcoin32_to_bitcoin30_unchecked_address(&address);
+
                 let response = create_client()
                     .withdraw_onchain(WithdrawOnchainPayload {
                         address,
