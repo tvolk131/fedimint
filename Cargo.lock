@@ -2539,6 +2539,7 @@ version = "0.5.0-alpha"
 dependencies = [
  "anyhow",
  "bitcoin 0.30.2",
+ "bitcoin 0.32.3",
  "bitcoin_hashes 0.12.0",
  "fedimint-client",
  "fedimint-core",
@@ -2564,6 +2565,7 @@ dependencies = [
  "async-trait",
  "axum 0.7.7",
  "bitcoin 0.30.2",
+ "bitcoin 0.32.3",
  "bitcoin_hashes 0.12.0",
  "clap",
  "cln-plugin",
@@ -2702,6 +2704,7 @@ version = "0.5.0-alpha"
 dependencies = [
  "anyhow",
  "bitcoin 0.30.2",
+ "bitcoin 0.32.3",
  "bitcoin_hashes 0.12.0",
  "fedimint-core",
  "fedimint-ln-common",
@@ -3312,6 +3315,7 @@ version = "0.5.0-alpha"
 dependencies = [
  "anyhow",
  "bitcoin 0.30.2",
+ "bitcoin 0.32.3",
  "fedimint-core",
  "hex",
  "impl-tools",
@@ -3330,6 +3334,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bitcoin 0.30.2",
+ "bitcoin 0.32.3",
  "erased-serde",
  "fedimint-bitcoind",
  "fedimint-core",
