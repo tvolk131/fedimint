@@ -10,6 +10,7 @@ use bitcoincore_rpc::bitcoincore_rpc_json::{GetBalancesResult, GetBlockchainInfo
 use bitcoincore_rpc::RpcApi;
 use cln_rpc::primitives::{Amount as ClnRpcAmount, AmountOrAny};
 use cln_rpc::ClnRpc;
+use fedimint_core::bitcoin_migration::bitcoin30_to_bitcoin32_secp256k1_pubkey;
 use fedimint_core::encoding::Encodable;
 use fedimint_core::task::jit::{JitTry, JitTryAnyhow};
 use fedimint_core::task::{block_in_place, block_on, sleep, timeout};
@@ -1010,10 +1011,10 @@ async fn wait_for_ready_channel_on_gateway_with_counterparty(
             .context("list channels")
             .map_err(ControlFlow::Break)?;
 
-        if channels
-            .iter()
-            .any(|channel| channel.remote_pubkey == counterparty_lightning_node_pubkey)
-        {
+        if channels.iter().any(|channel| {
+            channel.remote_pubkey
+                == bitcoin30_to_bitcoin32_secp256k1_pubkey(&counterparty_lightning_node_pubkey)
+        }) {
             return Ok(());
         }
 

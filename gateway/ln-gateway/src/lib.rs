@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use bitcoin30::{Address, Network, Txid};
+use bitcoin::{Address, Network, Txid};
 use bitcoin_hashes::{sha256, Hash};
 use clap::Parser;
 use client::GatewayClientBuilder;
@@ -52,7 +52,10 @@ use fedimint_client::module::init::ClientModuleInitRegistry;
 use fedimint_client::secret::RootSecretStrategy;
 use fedimint_client::{Client, ClientHandleArc};
 use fedimint_core::bitcoin_migration::{
-    bitcoin30_to_bitcoin32_network, bitcoin32_to_bitcoin30_network,
+    bitcoin30_to_bitcoin32_address, bitcoin30_to_bitcoin32_amount, bitcoin30_to_bitcoin32_keypair,
+    bitcoin30_to_bitcoin32_secp256k1_pubkey, bitcoin30_to_bitcoin32_txid,
+    bitcoin32_to_bitcoin30_amount, bitcoin32_to_bitcoin30_secp256k1_pubkey,
+    bitcoin32_to_bitcoin30_unchecked_address,
 };
 use fedimint_core::config::FederationId;
 use fedimint_core::core::{
@@ -513,7 +516,7 @@ impl Gateway {
                 .await
         };
 
-        if bitcoin32_to_bitcoin30_network(&gateway_config.network) != lightning_network {
+        if gateway_config.network != lightning_network {
             warn!(
                 "Lightning node does not match previously configured gateway network : ({:?})",
                 gateway_config.network
@@ -817,7 +820,7 @@ impl Gateway {
             lightning_alias: Some(lightning_context.lightning_alias.clone()),
             gateway_id: self.gateway_id,
             gateway_state: self.state.read().await.to_string(),
-            network: Some(bitcoin32_to_bitcoin30_network(&gateway_config.network)),
+            network: Some(gateway_config.network),
             block_height: Some(node_info.3),
             synced_to_chain: node_info.4,
             api: self.versioned_api.clone(),
@@ -882,7 +885,7 @@ impl Gateway {
             .expect("Must have client module")
             .allocate_deposit_address_expert_only(())
             .await?;
-        Ok(address)
+        Ok(bitcoin30_to_bitcoin32_address(&address))
     }
 
     /// Returns a Bitcoin TXID from a peg-out transaction for a specific
@@ -902,11 +905,15 @@ impl Gateway {
             // the amount we are withdrawing
             BitcoinAmountOrAll::All => {
                 let balance =
-                    bitcoin30::Amount::from_sat(client.value().get_balance().await.msats / 1000);
+                    bitcoin::Amount::from_sat(client.value().get_balance().await.msats / 1000);
                 let fees = wallet_module
-                    .get_withdraw_fees(address.clone(), balance)
+                    .get_withdraw_fees(
+                        bitcoin32_to_bitcoin30_unchecked_address(&address),
+                        bitcoin32_to_bitcoin30_amount(&balance),
+                    )
                     .await?;
-                let withdraw_amount = balance.checked_sub(fees.amount());
+                let withdraw_amount =
+                    balance.checked_sub(bitcoin30_to_bitcoin32_amount(&fees.amount()));
                 if withdraw_amount.is_none() {
                     return Err(AdminGatewayError::WithdrawError {
                         failure_reason: format!(
@@ -917,15 +924,20 @@ impl Gateway {
                 (withdraw_amount.unwrap(), fees)
             }
             BitcoinAmountOrAll::Amount(amount) => (
-                amount,
+                bitcoin30_to_bitcoin32_amount(&amount),
                 wallet_module
-                    .get_withdraw_fees(address.clone(), amount)
+                    .get_withdraw_fees(bitcoin32_to_bitcoin30_unchecked_address(&address), amount)
                     .await?,
             ),
         };
 
         let operation_id = wallet_module
-            .withdraw(address.clone(), amount, fees, ())
+            .withdraw(
+                bitcoin32_to_bitcoin30_unchecked_address(&address),
+                bitcoin32_to_bitcoin30_amount(&amount),
+                fees,
+                (),
+            )
             .await?;
         let mut updates = wallet_module
             .subscribe_withdraw_updates(operation_id)
@@ -939,7 +951,7 @@ impl Gateway {
                         "Sent {amount} funds to address {}",
                         address.assume_checked()
                     );
-                    return Ok(txid);
+                    return Ok(bitcoin30_to_bitcoin32_txid(&txid));
                 }
                 WithdrawState::Failed(e) => {
                     return Err(AdminGatewayError::WithdrawError { failure_reason: e });
@@ -1161,11 +1173,7 @@ impl Gateway {
         };
 
         if self.is_running_lnv1() {
-            Self::check_lnv1_federation_network(
-                &client,
-                bitcoin32_to_bitcoin30_network(&gateway_config.network),
-            )
-            .await?;
+            Self::check_lnv1_federation_network(&client, gateway_config.network).await?;
             client
                 .get_first_module::<GatewayClientModule>()?
                 .try_register_with_federation(
@@ -1179,11 +1187,7 @@ impl Gateway {
         }
 
         if self.is_running_lnv2() {
-            Self::check_lnv2_federation_network(
-                &client,
-                bitcoin32_to_bitcoin30_network(&gateway_config.network),
-            )
-            .await?;
+            Self::check_lnv2_federation_network(&client, gateway_config.network).await?;
         }
 
         // no need to enter span earlier, because connect-fed has a span
@@ -1321,7 +1325,7 @@ impl Gateway {
                         "Cannot change network while connected to a federation".to_string(),
                     ));
                 }
-                prev_config.network = bitcoin30_to_bitcoin32_network(&network);
+                prev_config.network = network;
             }
 
             if let Some(num_route_hints) = num_route_hints {
@@ -1345,7 +1349,7 @@ impl Gateway {
 
             GatewayConfiguration {
                 hashed_password,
-                network: bitcoin30_to_bitcoin32_network(&lightning_network),
+                network: lightning_network,
                 num_route_hints: DEFAULT_NUM_ROUTE_HINTS,
                 routing_fees: DEFAULT_FEES,
                 password_salt,
@@ -1426,7 +1430,12 @@ impl Gateway {
         let context = self.get_lightning_context().await?;
         let res = context
             .lnrpc
-            .open_channel(pubkey, host, channel_size_sats, push_amount_sats)
+            .open_channel(
+                bitcoin30_to_bitcoin32_secp256k1_pubkey(&pubkey),
+                host,
+                channel_size_sats,
+                push_amount_sats,
+            )
             .await?;
         Txid::from_str(&res.funding_txid).map_err(|e| {
             AdminGatewayError::Lightning(LightningRpcError::InvalidMetadata {
@@ -1442,7 +1451,10 @@ impl Gateway {
         CloseChannelsWithPeerPayload { pubkey }: CloseChannelsWithPeerPayload,
     ) -> AdminResult<CloseChannelsWithPeerResponse> {
         let context = self.get_lightning_context().await?;
-        let response = context.lnrpc.close_channels_with_peer(pubkey).await?;
+        let response = context
+            .lnrpc
+            .close_channels_with_peer(bitcoin30_to_bitcoin32_secp256k1_pubkey(&pubkey))
+            .await?;
         Ok(response)
     }
 
@@ -1722,7 +1734,7 @@ impl Gateway {
         let hashed_password = hash_password(password, password_salt);
         let gateway_config = GatewayConfiguration {
             hashed_password,
-            network: bitcoin30_to_bitcoin32_network(&network),
+            network,
             num_route_hints,
             routing_fees: routing_fees.0,
             password_salt,
@@ -1872,7 +1884,7 @@ impl Gateway {
             ))))?;
         let ln_cfg: &LightningClientConfig = cfg.cast()?;
 
-        if bitcoin32_to_bitcoin30_network(&ln_cfg.network) != network {
+        if ln_cfg.network != network {
             error!(
                 "Federation {federation_id} runs on {} but this gateway supports {network}",
                 ln_cfg.network,
@@ -1903,7 +1915,7 @@ impl Gateway {
             ))))?;
         let ln_cfg: &fedimint_lnv2_common::config::LightningClientConfig = cfg.cast()?;
 
-        if bitcoin32_to_bitcoin30_network(&ln_cfg.network) != network {
+        if ln_cfg.network != network {
             error!(
                 "Federation {federation_id} runs on {} but this gateway supports {network}",
                 ln_cfg.network,
@@ -1939,7 +1951,7 @@ impl Gateway {
         self.federation_manager
             .read()
             .await
-            .unannounce_from_all_federations(gateway_keypair)
+            .unannounce_from_all_federations(bitcoin30_to_bitcoin32_keypair(&gateway_keypair))
             .await;
     }
 }
@@ -1976,7 +1988,9 @@ impl Gateway {
             .public_key_v2(federation_id)
             .await
             .map(|module_public_key| RoutingInfo {
-                lightning_public_key: context.lightning_public_key,
+                lightning_public_key: bitcoin32_to_bitcoin30_secp256k1_pubkey(
+                    &context.lightning_public_key,
+                ),
                 module_public_key,
                 send_fee_default: PaymentFee::SEND_FEE_LIMIT_DEFAULT,
                 // The base fee ensures that the gateway does not loose sats sending the payment due

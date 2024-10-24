@@ -6,15 +6,15 @@ use std::time::Duration;
 
 use anyhow::ensure;
 use async_trait::async_trait;
-use bitcoin30::Address;
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::Address;
 use bitcoin_hashes::{sha256, Hash};
 use fedimint_core::db::Database;
 use fedimint_core::task::{sleep, TaskGroup};
-use fedimint_core::{secp256k1, Amount, BitcoinAmountOrAll};
+use fedimint_core::{Amount, BitcoinAmountOrAll};
 use fedimint_ln_common::PrunedInvoice;
 use fedimint_lnv2_common::contracts::PaymentImage;
 use hex::ToHex;
-use secp256k1::PublicKey;
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
@@ -1246,7 +1246,7 @@ impl ILnRpcClient for GatewayLndClient {
 
         for channel in &channels_with_peer {
             let channel_point =
-                bitcoin30::OutPoint::from_str(&channel.channel_point).map_err(|e| {
+                bitcoin::OutPoint::from_str(&channel.channel_point).map_err(|e| {
                     LightningRpcError::FailedToCloseChannelsWithPeer {
                         failure_reason: format!("Failed to parse channel point {e:?}"),
                     }
@@ -1258,7 +1258,7 @@ impl ILnRpcClient for GatewayLndClient {
                     channel_point: Some(ChannelPoint {
                         funding_txid: Some(
                             tonic_lnd::lnrpc::channel_point::FundingTxid::FundingTxidBytes(
-                                <bitcoin30::Txid as AsRef<[u8]>>::as_ref(&channel_point.txid)
+                                <bitcoin::Txid as AsRef<[u8]>>::as_ref(&channel_point.txid)
                                     .to_vec(),
                             ),
                         ),

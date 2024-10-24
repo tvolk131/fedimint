@@ -4,7 +4,9 @@ use std::sync::Arc;
 use fedimint_client::sm::{ClientSMDatabaseTransaction, State, StateTransition};
 use fedimint_client::transaction::ClientInput;
 use fedimint_client::DynGlobalClientContext;
-use fedimint_core::bitcoin_migration::bitcoin30_to_bitcoin32_keypair;
+use fedimint_core::bitcoin_migration::{
+    bitcoin30_to_bitcoin32_keypair, bitcoin30_to_bitcoin32_secp256k1_pubkey,
+};
 use fedimint_core::core::OperationId;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::secp256k1::KeyPair;
@@ -170,7 +172,9 @@ impl SendStateMachine {
             .await
             .map_err(|e| Cancelled::LightningRpcError(e.to_string()))?;
 
-        if lightning_context.lightning_public_key == invoice.get_payee_pub_key() {
+        if lightning_context.lightning_public_key
+            == bitcoin30_to_bitcoin32_secp256k1_pubkey(&invoice.get_payee_pub_key())
+        {
             let (contract, client) = context
                 .gateway
                 .get_registered_incoming_contract_and_client_v2(

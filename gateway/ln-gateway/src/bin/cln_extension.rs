@@ -14,6 +14,7 @@ use cln_rpc::model;
 use cln_rpc::model::requests::SendpayRoute;
 use cln_rpc::model::responses::ListpeerchannelsChannels;
 use cln_rpc::primitives::ShortChannelId;
+use fedimint_core::bitcoin_migration::bitcoin32_to_bitcoin30_network;
 use fedimint_core::secp256k1::{All, PublicKey, Secp256k1, SecretKey};
 use fedimint_core::task::{timeout, TaskGroup};
 use fedimint_core::util::handle_version_hash_command;
@@ -868,16 +869,17 @@ impl GatewayLightning for ClnRpcService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let network = bitcoin30::Network::from_str(info.2.as_str())
+        let network = bitcoin::Network::from_str(info.2.as_str())
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let invoice_builder = InvoiceBuilder::new(Currency::from(network))
-            .amount_milli_satoshis(amount_msat)
-            .payment_hash(payment_hash)
-            .payment_secret(PaymentSecret(OsRng.gen()))
-            .duration_since_epoch(fedimint_core::time::duration_since_epoch())
-            .min_final_cltv_expiry_delta(18)
-            .expiry_time(Duration::from_secs(expiry_secs.into()));
+        let invoice_builder =
+            InvoiceBuilder::new(Currency::from(bitcoin32_to_bitcoin30_network(&network)))
+                .amount_milli_satoshis(amount_msat)
+                .payment_hash(payment_hash)
+                .payment_secret(PaymentSecret(OsRng.gen()))
+                .duration_since_epoch(fedimint_core::time::duration_since_epoch())
+                .min_final_cltv_expiry_delta(18)
+                .expiry_time(Duration::from_secs(expiry_secs.into()));
 
         let invoice_builder = match description {
             Description::Direct(description) => invoice_builder.invoice_description(

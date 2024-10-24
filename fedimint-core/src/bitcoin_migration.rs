@@ -157,12 +157,12 @@ pub fn bitcoin32_to_bitcoin30_network(network: &bitcoin::Network) -> bitcoin30::
     .expect("Failed to convert bitcoin32 network to bitcoin30 network")
 }
 
-fn bitcoin30_to_bitcoin32_txid(txid: &bitcoin30::Txid) -> bitcoin::Txid {
+pub fn bitcoin30_to_bitcoin32_txid(txid: &bitcoin30::Txid) -> bitcoin::Txid {
     bitcoin::Txid::from_str(&txid.to_string())
         .expect("Failed to convert bitcoin30 txid to bitcoin32 txid")
 }
 
-fn bitcoin32_to_bitcoin30_txid(txid: &bitcoin::Txid) -> bitcoin30::Txid {
+pub fn bitcoin32_to_bitcoin30_txid(txid: &bitcoin::Txid) -> bitcoin30::Txid {
     bitcoin30::Txid::from_str(&txid.to_string())
         .expect("Failed to convert bitcoin32 txid to bitcoin30 txid")
 }
@@ -203,6 +203,13 @@ pub fn bitcoin32_to_bitcoin30_schnorr_signature(
         &bincode::serialize(&signature).expect("Failed to serialize bitcoin32 schnorr signature"),
     )
     .expect("Failed to convert bitcoin32 schnorr signature to bitcoin30 schnorr signature")
+}
+
+pub fn bitcoin30_to_bitcoin32_message(
+    message: &bitcoin30::secp256k1::Message,
+) -> bitcoin::secp256k1::Message {
+    bitcoin::secp256k1::Message::from_digest_slice(message.to_string().as_bytes())
+        .expect("Failed to convert bitcoin30 secp256k1 message to bitcoin32 secp256k1 message")
 }
 
 #[cfg(test)]

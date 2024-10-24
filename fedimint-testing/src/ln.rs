@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use async_stream::stream;
 use async_trait::async_trait;
+use bitcoin::Address;
 use bitcoin30::hashes::{sha256, Hash};
 use bitcoin30::key::KeyPair;
 use bitcoin30::secp256k1::{PublicKey, SecretKey};
-use bitcoin30::Address;
 use fedimint_core::task::TaskGroup;
 use fedimint_core::util::BoxStream;
 use fedimint_core::{secp256k1, Amount, BitcoinAmountOrAll};
@@ -281,7 +281,7 @@ impl ILnRpcClient for FakeLightningTest {
 
     async fn open_channel(
         &self,
-        _pubkey: bitcoin30::secp256k1::PublicKey,
+        _pubkey: bitcoin::secp256k1::PublicKey,
         _host: String,
         _channel_size_sats: u64,
         _push_amount_sats: u64,
@@ -293,7 +293,7 @@ impl ILnRpcClient for FakeLightningTest {
 
     async fn close_channels_with_peer(
         &self,
-        _pubkey: bitcoin30::secp256k1::PublicKey,
+        _pubkey: bitcoin::secp256k1::PublicKey,
     ) -> Result<CloseChannelsWithPeerResponse, LightningRpcError> {
         Err(LightningRpcError::FailedToCloseChannelsWithPeer {
             failure_reason: "FakeLightningTest does not support closing channels by peer"

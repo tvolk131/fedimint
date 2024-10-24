@@ -1,16 +1,20 @@
 use std::fmt::{self, Display};
 use std::sync::Arc;
 
+use bitcoin::secp256k1;
 use bitcoin_hashes::sha256;
 use fedimint_client::sm::{ClientSMDatabaseTransaction, State, StateTransition};
 use fedimint_client::transaction::{ClientInput, ClientOutput};
 use fedimint_client::{ClientHandleArc, DynGlobalClientContext};
-use fedimint_core::bitcoin_migration::bitcoin30_to_bitcoin32_keypair;
+use fedimint_core::bitcoin_migration::{
+    bitcoin30_to_bitcoin32_message, bitcoin32_to_bitcoin30_schnorr_signature,
+    bitcoin32_to_bitcoin30_secp256k1_pubkey,
+};
 use fedimint_core::config::FederationId;
 use fedimint_core::core::OperationId;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::util::Spanned;
-use fedimint_core::{secp256k1, Amount, OutPoint, TransactionId};
+use fedimint_core::{Amount, OutPoint, TransactionId};
 use fedimint_ln_client::api::LnFederationApi;
 use fedimint_ln_client::pay::{PayInvoicePayload, PaymentData};
 use fedimint_ln_common::config::FeeToAmount;
@@ -588,7 +592,7 @@ impl GatewayPayInvoice {
 
     fn validate_outgoing_account(
         account: &OutgoingContractAccount,
-        redeem_key: bitcoin30::key::KeyPair,
+        redeem_key: bitcoin::key::Keypair,
         timelock_delta: u64,
         consensus_block_count: u64,
         payment_data: &PaymentData,
@@ -600,7 +604,7 @@ impl GatewayPayInvoice {
             return Err(OutgoingContractError::CancelledContract);
         }
 
-        if account.contract.gateway_key != our_pub_key {
+        if account.contract.gateway_key != bitcoin32_to_bitcoin30_secp256k1_pubkey(&our_pub_key) {
             return Err(OutgoingContractError::NotOurKey);
         }
 
@@ -651,7 +655,11 @@ impl GatewayPayInvoice {
             None => None,
             Some(hop) => match context.gateway.state.read().await.clone() {
                 GatewayState::Running { lightning_context } => {
-                    if hop.src_node_id != lightning_context.lightning_public_key {
+                    if hop.src_node_id
+                        != bitcoin32_to_bitcoin30_secp256k1_pubkey(
+                            &lightning_context.lightning_public_key,
+                        )
+                    {
                         return None;
                     }
 
@@ -719,7 +727,7 @@ impl GatewayPayClaimOutgoingContract {
             input: claim_input,
             state_machines: Arc::new(|_, _| vec![]),
             amount: contract.amount,
-            keys: vec![bitcoin30_to_bitcoin32_keypair(&context.redeem_key)],
+            keys: vec![context.redeem_key],
         };
 
         let out_points = global_context
@@ -903,12 +911,12 @@ impl GatewayPayCancelContract {
     ) -> GatewayPayStateMachine {
         info!("Canceling outgoing contract {contract:?}");
         let cancel_signature = context.secp.sign_schnorr(
-            &contract.contract.cancellation_message().into(),
+            &bitcoin30_to_bitcoin32_message(&contract.contract.cancellation_message().into()),
             &context.redeem_key,
         );
         let cancel_output = LightningOutput::new_v0_cancel_outgoing(
             contract.contract.contract_id(),
-            cancel_signature,
+            bitcoin32_to_bitcoin30_schnorr_signature(&cancel_signature),
         );
         let client_output = ClientOutput::<LightningOutput, GatewayClientStateMachines> {
             output: cancel_output,

@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use anyhow::ensure;
 use async_stream::stream;
-use bitcoin30::key::Secp256k1;
-use bitcoin30::secp256k1::All;
+use bitcoin::key::Secp256k1;
+use bitcoin::secp256k1;
+use bitcoin::secp256k1::All;
 use bitcoin_hashes::{sha256, Hash};
 use fedimint_api_client::api::DynModuleApi;
 use fedimint_client::derivable_secret::ChildId;
@@ -21,11 +22,15 @@ use fedimint_client::sm::util::MapStateTransitions;
 use fedimint_client::sm::{Context, DynState, ModuleNotifier, State};
 use fedimint_client::transaction::{ClientOutput, TransactionBuilder};
 use fedimint_client::{sm_enum_variant_translation, AddStateMachinesError, DynGlobalClientContext};
+use fedimint_core::bitcoin_migration::{
+    bitcoin30_to_bitcoin32_keypair, bitcoin30_to_bitcoin32_message, bitcoin32_to_bitcoin30_keypair,
+    bitcoin32_to_bitcoin30_schnorr_signature, bitcoin32_to_bitcoin30_secp256k1_pubkey,
+};
 use fedimint_core::core::{Decoder, IntoDynInstance, ModuleInstanceId, ModuleKind, OperationId};
 use fedimint_core::db::{AutocommitError, DatabaseTransaction};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::{ApiVersion, ModuleInit, MultiApiVersion};
-use fedimint_core::{apply, async_trait_maybe_send, secp256k1, Amount, OutPoint, TransactionId};
+use fedimint_core::{apply, async_trait_maybe_send, Amount, OutPoint, TransactionId};
 use fedimint_ln_client::api::LnFederationApi;
 use fedimint_ln_client::incoming::{
     FundingOfferState, IncomingSmCommon, IncomingSmError, IncomingSmStates, IncomingStateMachine,
@@ -45,7 +50,7 @@ use fedimint_ln_common::{
 };
 use futures::StreamExt;
 use lightning_invoice::RoutingFees;
-use secp256k1::KeyPair;
+use secp256k1::Keypair;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
@@ -142,10 +147,12 @@ impl ClientModuleInit for GatewayClientInit {
         Ok(GatewayClientModule {
             cfg: args.cfg().clone(),
             notifier: args.notifier().clone(),
-            redeem_key: args
-                .module_root_secret()
-                .child_key(ChildId(0))
-                .to_secp_key(&Secp256k1::new()),
+            redeem_key: bitcoin30_to_bitcoin32_keypair(
+                &args
+                    .module_root_secret()
+                    .child_key(ChildId(0))
+                    .to_secp_key(&fedimint_core::secp256k1::Secp256k1::new()),
+            ),
             module_api: args.module_api().clone(),
             timelock_delta: self.timelock_delta,
             federation_index: self.federation_index,
@@ -157,7 +164,7 @@ impl ClientModuleInit for GatewayClientInit {
 
 #[derive(Debug, Clone)]
 pub struct GatewayClientContext {
-    redeem_key: KeyPair,
+    redeem_key: Keypair,
     timelock_delta: u64,
     secp: Secp256k1<All>,
     pub ln_decoder: Decoder,
@@ -173,7 +180,7 @@ impl From<&GatewayClientContext> for LightningClientContext {
     fn from(ctx: &GatewayClientContext) -> Self {
         LightningClientContext {
             ln_decoder: ctx.ln_decoder.clone(),
-            redeem_key: ctx.redeem_key,
+            redeem_key: bitcoin32_to_bitcoin30_keypair(&ctx.redeem_key),
             gateway_conn: Arc::new(RealGatewayConnection::default()),
         }
     }
@@ -187,7 +194,7 @@ impl From<&GatewayClientContext> for LightningClientContext {
 pub struct GatewayClientModule {
     cfg: LightningClientConfig,
     pub notifier: ModuleNotifier<GatewayClientStateMachines>,
-    pub redeem_key: KeyPair,
+    pub redeem_key: Keypair,
     timelock_delta: u64,
     federation_index: u64,
     module_api: DynModuleApi,
@@ -245,8 +252,12 @@ impl GatewayClientModule {
         LightningGatewayAnnouncement {
             info: LightningGateway {
                 federation_index: self.federation_index,
-                gateway_redeem_key: self.redeem_key.public_key(),
-                node_pub_key: lightning_context.lightning_public_key,
+                gateway_redeem_key: bitcoin32_to_bitcoin30_secp256k1_pubkey(
+                    &self.redeem_key.public_key(),
+                ),
+                node_pub_key: bitcoin32_to_bitcoin30_secp256k1_pubkey(
+                    &lightning_context.lightning_public_key,
+                ),
                 lightning_alias: lightning_context.lightning_alias,
                 api: self.gateway.versioned_api.clone(),
                 route_hints,
@@ -275,7 +286,7 @@ impl GatewayClientModule {
             &self.module_api,
             htlc.payment_hash,
             htlc.outgoing_amount_msat,
-            self.redeem_key,
+            bitcoin32_to_bitcoin30_keypair(&self.redeem_key),
         )
         .await?;
 
@@ -323,7 +334,7 @@ impl GatewayClientModule {
             &self.module_api,
             payment_hash,
             swap.amount_msat,
-            self.redeem_key,
+            bitcoin32_to_bitcoin30_keypair(&self.redeem_key),
         )
         .await?;
 
@@ -376,7 +387,7 @@ impl GatewayClientModule {
     /// removing gateway registrations is best effort, this does not return
     /// an error and simply emits a warning when the registration cannot be
     /// removed.
-    pub async fn remove_from_federation(&self, gateway_keypair: KeyPair) {
+    pub async fn remove_from_federation(&self, gateway_keypair: Keypair) {
         // Removing gateway registrations is best effort, so just emit a warning if it
         // fails
         if let Err(e) = self.remove_from_federation_inner(gateway_keypair).await {
@@ -395,11 +406,11 @@ impl GatewayClientModule {
     /// peer maintains their own list of registered gateways, the gateway
     /// needs to provide a signature that is signed by the private key of the
     /// gateway id to remove the registration.
-    async fn remove_from_federation_inner(&self, gateway_keypair: KeyPair) -> anyhow::Result<()> {
+    async fn remove_from_federation_inner(&self, gateway_keypair: Keypair) -> anyhow::Result<()> {
         let gateway_id = gateway_keypair.public_key();
         let challenges = self
             .module_api
-            .get_remove_gateway_challenge(gateway_id)
+            .get_remove_gateway_challenge(bitcoin32_to_bitcoin30_secp256k1_pubkey(&gateway_id))
             .await;
 
         let fed_public_key = self.cfg.threshold_pub_key;
@@ -407,13 +418,16 @@ impl GatewayClientModule {
             .into_iter()
             .filter_map(|(peer_id, challenge)| {
                 let msg = create_gateway_remove_message(fed_public_key, peer_id, challenge?);
-                let signature = gateway_keypair.sign_schnorr(msg);
-                Some((peer_id, signature))
+                let signature = gateway_keypair.sign_schnorr(bitcoin30_to_bitcoin32_message(&msg));
+                Some((
+                    peer_id,
+                    bitcoin32_to_bitcoin30_schnorr_signature(&signature),
+                ))
             })
             .collect::<BTreeMap<_, _>>();
 
         let remove_gateway_request = RemoveGatewayRequest {
-            gateway_id,
+            gateway_id: bitcoin32_to_bitcoin30_secp256k1_pubkey(&gateway_id),
             signatures,
         };
 

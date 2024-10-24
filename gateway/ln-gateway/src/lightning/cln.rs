@@ -3,11 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bitcoin30::Address;
+use bitcoin::{secp256k1, Address};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::task::{sleep, TaskGroup};
 use fedimint_core::util::SafeUrl;
-use fedimint_core::{secp256k1, Amount, BitcoinAmountOrAll};
+use fedimint_core::{Amount, BitcoinAmountOrAll};
 use fedimint_ln_common::PrunedInvoice;
 use tonic::transport::{Channel, Endpoint};
 use tonic::Request;

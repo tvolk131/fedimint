@@ -4,12 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bitcoin30::{secp256k1, Address, Network, OutPoint};
+use bitcoin::{secp256k1, Address, Network, OutPoint};
 use fedimint_bip39::Mnemonic;
 use fedimint_core::bitcoin_migration::{
-    bitcoin30_to_bitcoin32_address, bitcoin30_to_bitcoin32_invoice, bitcoin30_to_bitcoin32_network,
-    bitcoin30_to_bitcoin32_payment_preimage, bitcoin30_to_bitcoin32_secp256k1_pubkey,
-    bitcoin32_to_bitcoin30_outpoint, bitcoin32_to_bitcoin30_secp256k1_pubkey,
+    bitcoin30_to_bitcoin32_invoice, bitcoin30_to_bitcoin32_payment_preimage,
+    bitcoin32_to_bitcoin30_txid,
 };
 use fedimint_core::runtime::spawn;
 use fedimint_core::task::TaskGroup;
@@ -88,7 +87,7 @@ impl GatewayLdkClient {
         };
 
         let mut node_builder = ldk_node::Builder::from_config(ldk_node::config::Config {
-            network: bitcoin30_to_bitcoin32_network(&network),
+            network,
             listening_addresses: Some(vec![SocketAddress::TcpIpV4 {
                 addr: [0, 0, 0, 0],
                 port: lightning_port,
@@ -166,7 +165,7 @@ impl GatewayLdkClient {
     async fn outpoint_to_scid(&self, funding_txo: OutPoint) -> anyhow::Result<u64> {
         let block_height = self
             .esplora_client
-            .get_merkle_proof(&funding_txo.txid)
+            .get_merkle_proof(&bitcoin32_to_bitcoin30_txid(&funding_txo.txid))
             .await?
             .ok_or(anyhow::anyhow!("Failed to get merkle proof"))?
             .block_height;
@@ -183,7 +182,7 @@ impl GatewayLdkClient {
             .txdata
             .iter()
             .enumerate()
-            .find(|(_, tx)| tx.txid() == funding_txo.txid)
+            .find(|(_, tx)| tx.txid() == bitcoin32_to_bitcoin30_txid(&funding_txo.txid))
             .ok_or(anyhow::anyhow!("Failed to find transaction"))?
             .0 as u32;
 
@@ -459,13 +458,10 @@ impl ILnRpcClient for GatewayLdkClient {
         let onchain = self.node.onchain_payment();
 
         let txid = match amount {
-            BitcoinAmountOrAll::All => {
-                onchain.send_all_to_address(&bitcoin30_to_bitcoin32_address(&address))
+            BitcoinAmountOrAll::All => onchain.send_all_to_address(&address),
+            BitcoinAmountOrAll::Amount(amount_sats) => {
+                onchain.send_to_address(&address, amount_sats.to_sat())
             }
-            BitcoinAmountOrAll::Amount(amount_sats) => onchain.send_to_address(
-                &bitcoin30_to_bitcoin32_address(&address),
-                amount_sats.to_sat(),
-            ),
         }
         .map_err(|e| LightningRpcError::FailedToWithdrawOnchain {
             failure_reason: e.to_string(),
@@ -492,7 +488,7 @@ impl ILnRpcClient for GatewayLdkClient {
         let user_channel_id = self
             .node
             .open_announced_channel(
-                bitcoin30_to_bitcoin32_secp256k1_pubkey(&pubkey),
+                pubkey,
                 SocketAddress::from_str(&host).map_err(|e| {
                     LightningRpcError::FailedToConnectToPeer {
                         failure_reason: e.to_string(),
@@ -536,15 +532,15 @@ impl ILnRpcClient for GatewayLdkClient {
     ) -> Result<CloseChannelsWithPeerResponse, LightningRpcError> {
         let mut num_channels_closed = 0;
 
-        for channel_with_peer in self.node.list_channels().iter().filter(|channel| {
-            channel.counterparty_node_id == bitcoin30_to_bitcoin32_secp256k1_pubkey(&pubkey)
-        }) {
+        for channel_with_peer in self
+            .node
+            .list_channels()
+            .iter()
+            .filter(|channel| channel.counterparty_node_id == pubkey)
+        {
             if self
                 .node
-                .close_channel(
-                    &channel_with_peer.user_channel_id,
-                    bitcoin30_to_bitcoin32_secp256k1_pubkey(&pubkey),
-                )
+                .close_channel(&channel_with_peer.user_channel_id, pubkey)
                 .is_ok()
             {
                 num_channels_closed += 1;
@@ -566,17 +562,12 @@ impl ILnRpcClient for GatewayLdkClient {
             .filter(|channel| channel.is_channel_ready)
         {
             channels.push(ChannelInfo {
-                remote_pubkey: bitcoin32_to_bitcoin30_secp256k1_pubkey(
-                    &channel_details.counterparty_node_id,
-                ),
+                remote_pubkey: channel_details.counterparty_node_id,
                 channel_size_sats: channel_details.channel_value_sats,
                 outbound_liquidity_sats: channel_details.outbound_capacity_msat / 1000,
                 inbound_liquidity_sats: channel_details.inbound_capacity_msat / 1000,
                 short_channel_id: match channel_details.funding_txo {
-                    Some(funding_txo) => self
-                        .outpoint_to_scid(bitcoin32_to_bitcoin30_outpoint(&funding_txo))
-                        .await
-                        .unwrap_or(0),
+                    Some(funding_txo) => self.outpoint_to_scid(funding_txo).await.unwrap_or(0),
                     None => 0,
                 },
             });

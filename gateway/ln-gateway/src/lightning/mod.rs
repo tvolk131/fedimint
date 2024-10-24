@@ -8,15 +8,15 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bitcoin30::{Address, Network};
+use bitcoin::secp256k1::{self, PublicKey};
+use bitcoin::{Address, Network};
 use clap::Subcommand;
 use fedimint_bip39::Mnemonic;
 use fedimint_core::db::Database;
 use fedimint_core::encoding::{Decodable, Encodable};
-use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::task::TaskGroup;
 use fedimint_core::util::SafeUrl;
-use fedimint_core::{secp256k1, Amount, BitcoinAmountOrAll};
+use fedimint_core::{Amount, BitcoinAmountOrAll};
 use fedimint_ln_common::route_hints::RouteHint;
 use fedimint_ln_common::PrunedInvoice;
 use futures::stream::BoxStream;
