@@ -1,12 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bitcoin::secp256k1::Keypair;
 use bitcoin30::hashes::sha256;
-use bitcoin30::secp256k1;
+use bitcoin30::secp256k1::{self, KeyPair};
 use fedimint_client::sm::{ClientSMDatabaseTransaction, State, StateTransition};
 use fedimint_client::transaction::ClientInput;
 use fedimint_client::DynGlobalClientContext;
-use fedimint_core::bitcoin_migration::bitcoin30_to_bitcoin32_keypair;
+use fedimint_core::bitcoin_migration::bitcoin32_to_bitcoin30_keypair;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::OperationId;
 use fedimint_core::encoding::{Decodable, Encodable};
@@ -16,7 +17,6 @@ use fedimint_core::{OutPoint, TransactionId};
 use fedimint_lnv2_common::contracts::OutgoingContract;
 use fedimint_lnv2_common::{LightningInput, LightningInputV0, OutgoingWitness};
 use secp256k1::schnorr::Signature;
-use secp256k1::KeyPair;
 use tracing::error;
 
 use crate::api::LnFederationApi;
@@ -46,7 +46,7 @@ pub struct SendSMCommon {
     pub gateway_api: SafeUrl,
     pub contract: OutgoingContract,
     pub invoice: LightningInvoice,
-    pub refund_keypair: KeyPair,
+    pub refund_keypair: Keypair,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Decodable, Encodable)]
@@ -101,7 +101,7 @@ impl State for SendStateMachine {
                             context.federation_id,
                             self.common.contract.clone(),
                             self.common.invoice.clone(),
-                            self.common.refund_keypair,
+                            bitcoin32_to_bitcoin30_keypair(&self.common.refund_keypair),
                             context.clone(),
                         ),
                         move |dbtx, response, old_state| {
@@ -220,9 +220,7 @@ impl SendStateMachine {
                         OutgoingWitness::Cancel(signature),
                     )),
                     amount: old_state.common.contract.amount,
-                    keys: vec![bitcoin30_to_bitcoin32_keypair(
-                        &old_state.common.refund_keypair,
-                    )],
+                    keys: vec![old_state.common.refund_keypair],
                     // The input of the refund tx is managed by this state machine
                     state_machines: Arc::new(|_, _| vec![]),
                 };
@@ -279,9 +277,7 @@ impl SendStateMachine {
                 OutgoingWitness::Refund,
             )),
             amount: old_state.common.contract.amount,
-            keys: vec![bitcoin30_to_bitcoin32_keypair(
-                &old_state.common.refund_keypair,
-            )],
+            keys: vec![old_state.common.refund_keypair],
             // The input of the refund tx is managed by this state machine
             state_machines: Arc::new(|_, _| vec![]),
         };

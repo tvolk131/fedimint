@@ -1,12 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitcoin30::key::KeyPair;
+use bitcoin::key::Keypair;
 use fedimint_api_client::api::DynModuleApi;
 use fedimint_client::sm::{ClientSMDatabaseTransaction, DynState, State, StateTransition};
 use fedimint_client::transaction::ClientInput;
 use fedimint_client::DynGlobalClientContext;
-use fedimint_core::bitcoin_migration::bitcoin30_to_bitcoin32_keypair;
 use fedimint_core::core::{IntoDynInstance, ModuleInstanceId, OperationId};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::task::sleep;
@@ -94,7 +93,7 @@ impl IntoDynInstance for LightningReceiveStateMachine {
 pub struct LightningReceiveSubmittedOfferV0 {
     pub offer_txid: TransactionId,
     pub invoice: Bolt11Invoice,
-    pub payment_keypair: KeyPair,
+    pub payment_keypair: Keypair,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Decodable, Encodable)]
@@ -279,14 +278,14 @@ impl LightningReceiveConfirmedInvoice {
     async fn claim_incoming_contract(
         dbtx: &mut ClientSMDatabaseTransaction<'_, '_>,
         contract: IncomingContractAccount,
-        keypair: KeyPair,
+        keypair: Keypair,
         global_context: DynGlobalClientContext,
     ) -> (TransactionId, Vec<OutPoint>) {
         let input = contract.claim();
         let client_input = ClientInput::<LightningInput, LightningClientStateMachines> {
             input,
             amount: contract.amount,
-            keys: vec![bitcoin30_to_bitcoin32_keypair(&keypair)],
+            keys: vec![keypair],
             // The input of the refund tx is managed by this state machine, so no new state machines
             // need to be created
             state_machines: Arc::new(|_, _| vec![]),

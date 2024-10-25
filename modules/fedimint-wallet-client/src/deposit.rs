@@ -2,10 +2,11 @@ use std::cmp;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use bitcoin::secp256k1::Keypair;
 use fedimint_client::sm::{ClientSMDatabaseTransaction, State, StateTransition};
 use fedimint_client::transaction::ClientInput;
 use fedimint_client::DynGlobalClientContext;
-use fedimint_core::bitcoin_migration::bitcoin30_to_bitcoin32_keypair;
+use fedimint_core::bitcoin_migration::bitcoin32_to_bitcoin30_secp256k1_pubkey;
 use fedimint_core::core::OperationId;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::task::sleep;
@@ -14,7 +15,6 @@ use fedimint_core::{Amount, OutPoint, TransactionId};
 use fedimint_wallet_common::tweakable::Tweakable;
 use fedimint_wallet_common::txoproof::PegInProof;
 use fedimint_wallet_common::WalletInput;
-use secp256k1::KeyPair;
 use tracing::{debug, instrument, trace, warn};
 
 use crate::api::WalletFederationApi;
@@ -100,11 +100,14 @@ impl State for DepositStateMachine {
 
 async fn await_created_btc_transaction_submitted(
     context: WalletClientContext,
-    tweak: KeyPair,
+    tweak: Keypair,
 ) -> (bitcoin30::Transaction, u32) {
     let script = context
         .wallet_descriptor
-        .tweak(&tweak.public_key(), &context.secp)
+        .tweak(
+            &bitcoin32_to_bitcoin30_secp256k1_pubkey(&tweak.public_key()),
+            &context.secp,
+        )
         .script_pubkey();
     loop {
         match context.rpc.watch_script_history(&script).await {
@@ -270,7 +273,9 @@ pub(crate) async fn transition_btc_tx_confirmed(
         txout_proof,
         awaiting_confirmation_state.btc_transaction,
         awaiting_confirmation_state.out_idx,
-        awaiting_confirmation_state.tweak_key.public_key(),
+        bitcoin32_to_bitcoin30_secp256k1_pubkey(
+            &awaiting_confirmation_state.tweak_key.public_key(),
+        ),
     )
     .expect("TODO: handle API returning faulty proofs");
 
@@ -280,9 +285,7 @@ pub(crate) async fn transition_btc_tx_confirmed(
 
     let client_input = ClientInput::<WalletInput, WalletClientStates> {
         input: wallet_input,
-        keys: vec![bitcoin30_to_bitcoin32_keypair(
-            &awaiting_confirmation_state.tweak_key,
-        )],
+        keys: vec![awaiting_confirmation_state.tweak_key],
         amount,
         state_machines: Arc::new(|_, _| vec![]),
     };
@@ -311,7 +314,7 @@ pub enum DepositStates {
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Decodable, Encodable)]
 pub struct CreatedDepositState {
-    pub(crate) tweak_key: KeyPair,
+    pub(crate) tweak_key: Keypair,
     pub(crate) timeout_at: SystemTime,
 }
 
@@ -320,7 +323,7 @@ pub struct WaitingForConfirmationsDepositState {
     /// Key pair of which the public was used to tweak the federation's wallet
     /// descriptor. The secret key is later used to sign the fedimint claim
     /// transaction.
-    tweak_key: KeyPair,
+    tweak_key: Keypair,
     /// The bitcoin transaction is saved as soon as we see it so the transaction
     /// can be re-transmitted if it's evicted from the mempool.
     pub(crate) btc_transaction: bitcoin30::Transaction,

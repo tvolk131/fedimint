@@ -23,7 +23,7 @@ use fedimint_client::sm::{Context, DynState, ModuleNotifier, State};
 use fedimint_client::transaction::{ClientOutput, TransactionBuilder};
 use fedimint_client::{sm_enum_variant_translation, AddStateMachinesError, DynGlobalClientContext};
 use fedimint_core::bitcoin_migration::{
-    bitcoin30_to_bitcoin32_keypair, bitcoin30_to_bitcoin32_message, bitcoin32_to_bitcoin30_keypair,
+    bitcoin30_to_bitcoin32_keypair, bitcoin30_to_bitcoin32_message,
     bitcoin32_to_bitcoin30_schnorr_signature, bitcoin32_to_bitcoin30_secp256k1_pubkey,
 };
 use fedimint_core::core::{Decoder, IntoDynInstance, ModuleInstanceId, ModuleKind, OperationId};
@@ -180,7 +180,7 @@ impl From<&GatewayClientContext> for LightningClientContext {
     fn from(ctx: &GatewayClientContext) -> Self {
         LightningClientContext {
             ln_decoder: ctx.ln_decoder.clone(),
-            redeem_key: bitcoin32_to_bitcoin30_keypair(&ctx.redeem_key),
+            redeem_key: ctx.redeem_key,
             gateway_conn: Arc::new(RealGatewayConnection::default()),
         }
     }
@@ -286,7 +286,7 @@ impl GatewayClientModule {
             &self.module_api,
             htlc.payment_hash,
             htlc.outgoing_amount_msat,
-            bitcoin32_to_bitcoin30_keypair(&self.redeem_key),
+            self.redeem_key,
         )
         .await?;
 
@@ -334,7 +334,7 @@ impl GatewayClientModule {
             &self.module_api,
             payment_hash,
             swap.amount_msat,
-            bitcoin32_to_bitcoin30_keypair(&self.redeem_key),
+            self.redeem_key,
         )
         .await?;
 

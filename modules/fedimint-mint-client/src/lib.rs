@@ -47,7 +47,7 @@ use fedimint_client::sm::util::MapStateTransitions;
 use fedimint_client::sm::{Context, DynState, ModuleNotifier, State, StateTransition};
 use fedimint_client::transaction::{ClientInput, ClientOutput, TransactionBuilder};
 use fedimint_client::{sm_enum_variant_translation, DynGlobalClientContext};
-use fedimint_core::bitcoin_migration::bitcoin30_to_bitcoin32_keypair;
+use fedimint_core::bitcoin_migration::bitcoin32_to_bitcoin30_secp256k1_pubkey;
 use fedimint_core::config::{FederationId, FederationIdPrefix};
 use fedimint_core::core::{Decoder, IntoDynInstance, ModuleInstanceId, ModuleKind, OperationId};
 use fedimint_core::db::{
@@ -60,7 +60,7 @@ use fedimint_core::module::registry::{ModuleDecoderRegistry, ModuleRegistry};
 use fedimint_core::module::{
     ApiVersion, CommonModuleInit, ModuleCommon, ModuleInit, MultiApiVersion,
 };
-use fedimint_core::secp256k1::{All, KeyPair, Secp256k1};
+use fedimint_core::secp256k1::{All, Secp256k1};
 use fedimint_core::util::{BoxFuture, BoxStream, NextOrPending, SafeUrl};
 use fedimint_core::{
     apply, async_trait_maybe_send, push_db_pair_items, Amount, OutPoint, PeerId, Tiered,
@@ -73,6 +73,7 @@ use fedimint_mint_common::config::MintClientConfig;
 pub use fedimint_mint_common::*;
 use futures::{pin_mut, StreamExt};
 use hex::ToHex;
+use secp256k1_29::Keypair;
 use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 use tbs::{AggregatePublicKey, Signature};
@@ -388,7 +389,7 @@ impl OOBNotes {
 pub struct OOBNoteV2 {
     pub amount: Amount,
     pub sig: Signature,
-    pub key: KeyPair,
+    pub key: Keypair,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encodable, Decodable)]
@@ -1218,7 +1219,7 @@ impl MintClientModule {
 
             inputs.push(ClientInput {
                 input: MintInput::new_v0(amount, note),
-                keys: vec![bitcoin30_to_bitcoin32_keypair(&spendable_note.spend_key)],
+                keys: vec![spendable_note.spend_key],
                 amount,
                 state_machines: sm_gen,
             });
@@ -1647,7 +1648,9 @@ impl MintClientModule {
                 bail!("Note {idx} has an invalid federation signature");
             }
 
-            let expected_nonce = Nonce(snote.spend_key.public_key());
+            let expected_nonce = Nonce(bitcoin32_to_bitcoin30_secp256k1_pubkey(
+                &snote.spend_key.public_key(),
+            ));
             if note.nonce != expected_nonce {
                 bail!("Note {idx} cannot be spent using the supplied spend key");
             }
@@ -2048,7 +2051,7 @@ impl State for MintClientStateMachines {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Encodable, Decodable)]
 pub struct SpendableNote {
     pub signature: tbs::Signature,
-    pub spend_key: KeyPair,
+    pub spend_key: Keypair,
 }
 
 impl fmt::Debug for SpendableNote {
@@ -2068,7 +2071,9 @@ impl fmt::Display for SpendableNote {
 
 impl SpendableNote {
     pub fn nonce(&self) -> Nonce {
-        Nonce(self.spend_key.public_key())
+        Nonce(bitcoin32_to_bitcoin30_secp256k1_pubkey(
+            &self.spend_key.public_key(),
+        ))
     }
 
     fn note(&self) -> Note {
@@ -2107,7 +2112,7 @@ pub struct SpendableNoteUndecoded {
     // verifying they serialize and decode the same.
     #[serde(serialize_with = "serdect::array::serialize_hex_lower_or_bin")]
     pub signature: [u8; 48],
-    pub spend_key: KeyPair,
+    pub spend_key: Keypair,
 }
 
 impl fmt::Display for SpendableNoteUndecoded {
@@ -2128,7 +2133,9 @@ impl fmt::Debug for SpendableNoteUndecoded {
 
 impl SpendableNoteUndecoded {
     fn nonce(&self) -> Nonce {
-        Nonce(self.spend_key.public_key())
+        Nonce(bitcoin32_to_bitcoin30_secp256k1_pubkey(
+            &self.spend_key.public_key(),
+        ))
     }
 
     pub fn decode(self) -> anyhow::Result<SpendableNote> {
@@ -2263,6 +2270,7 @@ mod tests {
     use std::str::FromStr;
 
     use bitcoin_hashes::Hash;
+    use fedimint_core::bitcoin_migration::bitcoin30_to_bitcoin32_keypair;
     use fedimint_core::config::FederationId;
     use fedimint_core::encoding::Decodable;
     use fedimint_core::invite_code::{InviteCode, InviteCodeV2};
@@ -2522,7 +2530,7 @@ mod tests {
             notes: iter::repeat(OOBNoteV2 {
                 amount: Amount::from_msats(1),
                 sig: Signature(bls12_381::G1Affine::generator()),
-                key: SecretKey::new(&mut OsRng).keypair(SECP256K1),
+                key: bitcoin30_to_bitcoin32_keypair(&SecretKey::new(&mut OsRng).keypair(SECP256K1)),
             })
             .take(NUMBER_OF_NOTES)
             .collect(),

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use assert_matches::assert_matches;
 use fedimint_client::Client;
+use fedimint_core::bitcoin_migration::bitcoin30_to_bitcoin32_keypair;
 use fedimint_core::util::NextOrPending;
 use fedimint_core::{sats, Amount};
 use fedimint_dummy_client::{DummyClientInit, DummyClientModule};
@@ -423,7 +424,9 @@ async fn can_receive_for_other_user() -> anyhow::Result<()> {
     // Create a new client and try to receive the locked payment
     let new_client = fed.new_client().await;
     let new_ln_module = new_client.get_first_module::<LightningClientModule>()?;
-    let operation_id = new_ln_module.scan_receive_for_user(keypair, ()).await?;
+    let operation_id = new_ln_module
+        .scan_receive_for_user(bitcoin30_to_bitcoin32_keypair(&keypair), ())
+        .await?;
     let mut sub3 = new_ln_module
         .subscribe_ln_claim(operation_id)
         .await?
@@ -482,7 +485,9 @@ async fn can_receive_for_other_user() -> anyhow::Result<()> {
     // Create a new client and try to receive the locked payment
     let new_client = fed.new_client().await;
     let new_ln_module = new_client.get_first_module::<LightningClientModule>()?;
-    let operation_id = new_ln_module.scan_receive_for_user(keypair, ()).await?;
+    let operation_id = new_ln_module
+        .scan_receive_for_user(bitcoin30_to_bitcoin32_keypair(&keypair), ())
+        .await?;
     let mut sub3 = new_ln_module
         .subscribe_ln_claim(operation_id)
         .await?
@@ -606,6 +611,7 @@ mod fedimint_migration_tests {
     use anyhow::ensure;
     use bitcoin_hashes::{sha256, Hash};
     use fedimint_client::module::init::DynClientModuleInit;
+    use fedimint_core::bitcoin_migration::bitcoin30_to_bitcoin32_keypair;
     use fedimint_core::config::FederationId;
     use fedimint_core::core::OperationId;
     use fedimint_core::db::{
@@ -889,7 +895,9 @@ mod fedimint_migration_tests {
             invoice
                 .consensus_encode(&mut submitted_offer_variant)
                 .expect("Invoice is encodable");
-            let receiving_key = ReceivingKey::Personal(KeyPair::new_global(&mut OsRng));
+            let receiving_key = ReceivingKey::Personal(bitcoin30_to_bitcoin32_keypair(
+                &KeyPair::new_global(&mut OsRng),
+            ));
             receiving_key
                 .consensus_encode(&mut submitted_offer_variant)
                 .expect("ReceivingKey is encodable");
@@ -908,7 +916,7 @@ mod fedimint_migration_tests {
             invoice
                 .consensus_encode(&mut submitted_offer_variant)
                 .expect("Invoice is encodable");
-            let keypair = KeyPair::new_global(&mut OsRng);
+            let keypair = bitcoin30_to_bitcoin32_keypair(&KeyPair::new_global(&mut OsRng));
             keypair
                 .consensus_encode(&mut submitted_offer_variant)
                 .expect("Keypair is encodable");
@@ -923,7 +931,7 @@ mod fedimint_migration_tests {
             invoice
                 .consensus_encode(&mut confirmed_variant)
                 .expect("Invoice is encodable");
-            let keypair = KeyPair::new_global(&mut OsRng);
+            let keypair = bitcoin30_to_bitcoin32_keypair(&KeyPair::new_global(&mut OsRng));
             keypair
                 .consensus_encode(&mut confirmed_variant)
                 .expect("Keypair is encodable");
@@ -945,7 +953,7 @@ mod fedimint_migration_tests {
             contract: outgoing_contract.clone(),
         };
         let contract = OutgoingContractData {
-            recovery_key: KeyPair::from_secret_key(&secp, &sk),
+            recovery_key: bitcoin30_to_bitcoin32_keypair(&KeyPair::from_secret_key(&secp, &sk)),
             contract_account: outgoing_account,
         };
         let ln_common = LightningPayCommon {

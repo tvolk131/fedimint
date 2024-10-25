@@ -8,17 +8,21 @@ use fedimint_api_client::query::FilterMapThreshold;
 use fedimint_client::module::ClientContext;
 use fedimint_client::sm::{ClientSMDatabaseTransaction, State, StateTransition};
 use fedimint_client::DynGlobalClientContext;
+use fedimint_core::bitcoin_migration::{
+    bitcoin30_to_bitcoin32_keypair, bitcoin32_to_bitcoin30_secp256k1_pubkey,
+};
 use fedimint_core::core::{Decoder, OperationId};
 use fedimint_core::db::IDatabaseTransactionOpsCoreTyped;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::ApiRequestErased;
-use fedimint_core::secp256k1::{KeyPair, Secp256k1, Signing};
+use fedimint_core::secp256k1::{Secp256k1, Signing};
 use fedimint_core::task::sleep;
 use fedimint_core::{Amount, NumPeersExt, OutPoint, PeerId, Tiered};
 use fedimint_derive_secret::{ChildId, DerivableSecret};
 use fedimint_logging::LOG_CLIENT_MODULE_MINT;
 use fedimint_mint_common::endpoint_constants::AWAIT_OUTPUT_OUTCOME_ENDPOINT;
 use fedimint_mint_common::{BlindNonce, MintOutputOutcome, Nonce};
+use secp256k1_29::Keypair;
 use serde::{Deserialize, Serialize};
 use tbs::{
     aggregate_signature_shares, blind_message, unblind_signature, AggregatePublicKey,
@@ -339,7 +343,7 @@ pub struct MintOutputStatesSucceeded {
 pub struct NoteIssuanceRequest {
     /// Spend key from which the note nonce (corresponding public key) is
     /// derived
-    spend_key: KeyPair,
+    spend_key: Keypair,
     /// Key to unblind the blind signature supplied by the mint for this note
     blinding_key: BlindingKey,
 }
@@ -364,7 +368,7 @@ impl NoteIssuanceRequest {
         let blinded_nonce = blind_message(nonce.to_message(), blinding_key);
 
         let cr = NoteIssuanceRequest {
-            spend_key,
+            spend_key: bitcoin30_to_bitcoin32_keypair(&spend_key),
             blinding_key,
         };
 
@@ -373,7 +377,9 @@ impl NoteIssuanceRequest {
 
     /// Return nonce of the e-cash note being requested
     pub fn nonce(&self) -> Nonce {
-        Nonce(self.spend_key.public_key())
+        Nonce(bitcoin32_to_bitcoin30_secp256k1_pubkey(
+            &self.spend_key.public_key(),
+        ))
     }
 
     pub fn blinded_message(&self) -> BlindedMessage {
