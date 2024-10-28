@@ -958,7 +958,10 @@ impl ILnRpcClient for GatewayLndClient {
         Ok((Box::pin(ReceiverStream::new(gateway_receiver)), new_client))
     }
 
-    async fn complete_htlc(&self, htlc: InterceptPaymentResponse) -> Result<(), LightningRpcError> {
+    async fn route_inbound_payment(
+        &self,
+        htlc: InterceptPaymentResponse,
+    ) -> Result<(), LightningRpcError> {
         let InterceptPaymentResponse {
             action,
             payment_hash,

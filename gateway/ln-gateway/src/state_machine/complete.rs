@@ -224,7 +224,7 @@ impl CompleteHtlcState {
 
                     lightning_context
                         .lnrpc
-                        .complete_htlc(htlc)
+                        .route_inbound_payment(htlc)
                         .await
                         .map_err(|_| CompleteHtlcError::FailedToCompleteHtlc)?;
                     return Ok(());

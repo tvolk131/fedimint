@@ -672,7 +672,7 @@ impl Gateway {
                 htlc_id: htlc_request.htlc_id,
             };
 
-            if let Err(error) = lightning_context.lnrpc.complete_htlc(outcome).await {
+            if let Err(error) = lightning_context.lnrpc.route_inbound_payment(outcome).await {
                 error!("Error sending HTLC response to lightning node: {error:?}");
             }
         }
@@ -741,7 +741,7 @@ impl Gateway {
             htlc_id: htlc_request.htlc_id,
         };
 
-        if let Err(error) = lightning_context.lnrpc.complete_htlc(outcome).await {
+        if let Err(error) = lightning_context.lnrpc.route_inbound_payment(outcome).await {
             error!("Error sending lightning payment response to lightning node: {error:?}");
         }
     }

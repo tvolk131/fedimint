@@ -140,8 +140,8 @@ pub trait ILnRpcClient: Debug + Send + Sync {
     }
 
     /// Consumes the current client and returns a stream of intercepted HTLCs
-    /// and a new client. `complete_htlc` must be called for all successfully
-    /// intercepted HTLCs sent to the returned stream.
+    /// and a new client. `route_inbound_payment` must be called for all
+    /// successfully intercepted HTLCs sent to the returned stream.
     ///
     /// `get_inbound_payment_stream` can only be called once for a given client,
     /// since the returned stream grants exclusive routing decisions to the
@@ -157,7 +157,10 @@ pub trait ILnRpcClient: Debug + Send + Sync {
     /// Complete an HTLC that was intercepted by the gateway. Must be called for
     /// all successfully intercepted HTLCs sent to the stream returned by
     /// `get_inbound_payment_stream`.
-    async fn complete_htlc(&self, htlc: InterceptPaymentResponse) -> Result<(), LightningRpcError>;
+    async fn route_inbound_payment(
+        &self,
+        htlc: InterceptPaymentResponse,
+    ) -> Result<(), LightningRpcError>;
 
     async fn create_invoice(
         &self,

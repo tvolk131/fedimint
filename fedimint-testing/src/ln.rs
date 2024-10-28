@@ -205,7 +205,7 @@ impl ILnRpcClient for FakeLightningTest {
         Ok((stream, Arc::new(Self::new())))
     }
 
-    async fn complete_htlc(
+    async fn route_inbound_payment(
         &self,
         _htlc: InterceptPaymentResponse,
     ) -> Result<(), LightningRpcError> {

@@ -150,7 +150,7 @@ impl CompleteStateMachine {
                 Ok(lightning_context) => {
                     match lightning_context
                         .lnrpc
-                        .complete_htlc(intercept_htlc_response.clone())
+                        .route_inbound_payment(intercept_htlc_response.clone())
                         .await
                     {
                         Ok(..) => return,

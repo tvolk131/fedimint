@@ -177,7 +177,10 @@ impl ILnRpcClient for NetworkLnRpcClient {
         ))
     }
 
-    async fn complete_htlc(&self, htlc: InterceptPaymentResponse) -> Result<(), LightningRpcError> {
+    async fn route_inbound_payment(
+        &self,
+        htlc: InterceptPaymentResponse,
+    ) -> Result<(), LightningRpcError> {
         let url = self
             .connection_url
             .join(CLN_COMPLETE_PAYMENT_ENDPOINT)
