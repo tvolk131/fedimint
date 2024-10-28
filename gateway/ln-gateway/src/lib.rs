@@ -438,7 +438,7 @@ impl Gateway {
                     let lnrpc_route = self_copy.lightning_builder.build().await;
 
                     debug!("Establishing lightning payment stream...");
-                    let (stream, ln_client) = match lnrpc_route.route_htlcs(&payment_stream_task_group).await
+                    let (stream, ln_client) = match lnrpc_route.get_inbound_payment_stream(&payment_stream_task_group).await
                     {
                         Ok((stream, ln_client)) => (stream, ln_client),
                         Err(e) => {
@@ -447,7 +447,7 @@ impl Gateway {
                         }
                     };
 
-                    // Successful calls to `route_htlcs` establish a connection
+                    // Successful calls to `get_inbound_payment_stream` establish a connection.
                     self_copy.set_gateway_state(GatewayState::Connected).await;
                     info!("Established lightning payment stream");
 

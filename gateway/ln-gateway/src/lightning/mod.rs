@@ -143,20 +143,20 @@ pub trait ILnRpcClient: Debug + Send + Sync {
     /// and a new client. `complete_htlc` must be called for all successfully
     /// intercepted HTLCs sent to the returned stream.
     ///
-    /// `route_htlcs` can only be called once for a given client, since the
-    /// returned stream grants exclusive routing decisions to the caller.
-    /// For this reason, `route_htlc` consumes the client and returns one
-    /// wrapped in an `Arc`. This lets the compiler enforce that `route_htlcs`
-    /// can only be called once for a given client, since the value inside
-    /// the `Arc` cannot be consumed.
-    async fn route_htlcs<'a>(
+    /// `get_inbound_payment_stream` can only be called once for a given client,
+    /// since the returned stream grants exclusive routing decisions to the
+    /// caller. For this reason, it consumes the client and returns an
+    /// `Arc`-wrapped client. This lets the compiler enforce that
+    /// `get_inbound_payment_stream` can only be called once for a given client,
+    /// since the value inside the `Arc` cannot be consumed.
+    async fn get_inbound_payment_stream<'a>(
         self: Box<Self>,
         task_group: &TaskGroup,
     ) -> Result<(RouteHtlcStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError>;
 
     /// Complete an HTLC that was intercepted by the gateway. Must be called for
     /// all successfully intercepted HTLCs sent to the stream returned by
-    /// `route_htlcs`.
+    /// `get_inbound_payment_stream`.
     async fn complete_htlc(&self, htlc: InterceptPaymentResponse) -> Result<(), LightningRpcError>;
 
     async fn create_invoice(

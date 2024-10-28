@@ -184,7 +184,7 @@ impl ILnRpcClient for FakeLightningTest {
         })
     }
 
-    async fn route_htlcs<'a>(
+    async fn get_inbound_payment_stream<'a>(
         self: Box<Self>,
         task_group: &TaskGroup,
     ) -> Result<(RouteHtlcStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {

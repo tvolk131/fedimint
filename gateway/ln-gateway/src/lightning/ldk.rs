@@ -46,13 +46,13 @@ pub struct GatewayLdkClient {
 
     /// A handle to the task that processes incoming events from the lightning
     /// node. Responsible for sending incoming HTLCs to the caller of
-    /// `route_htlcs`.
+    /// `ILnRpcClient::get_inbound_payment_stream`.
     /// TODO: This should be a shutdown sender instead, and we can discard the
     /// handle.
     event_handler_task_handle: tokio::task::JoinHandle<()>,
 
     /// The HTLC stream, until it is taken by calling
-    /// `ILnRpcClient::route_htlcs`.
+    /// `ILnRpcClient::get_inbound_payment_stream`.
     htlc_stream_receiver_or: Option<tokio::sync::mpsc::Receiver<InterceptPaymentRequest>>,
 }
 
@@ -329,7 +329,7 @@ impl ILnRpcClient for GatewayLdkClient {
         }
     }
 
-    async fn route_htlcs<'a>(
+    async fn get_inbound_payment_stream<'a>(
         mut self: Box<Self>,
         _task_group: &TaskGroup,
     ) -> Result<(RouteHtlcStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
@@ -337,7 +337,7 @@ impl ILnRpcClient for GatewayLdkClient {
             Some(stream) => Ok(Box::pin(ReceiverStream::new(stream))),
             None => Err(LightningRpcError::FailedToRouteHtlcs {
                 failure_reason:
-                    "Stream does not exist. Likely was already taken by calling `route_htlcs()`."
+                    "Stream does not exist. Likely was already taken by calling `get_inbound_payment_stream()`."
                         .to_string(),
             }),
         }?;
