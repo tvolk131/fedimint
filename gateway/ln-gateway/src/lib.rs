@@ -1243,25 +1243,20 @@ impl Gateway {
     /// backup strategy.
     pub async fn handle_mnemonic_msg(&self) -> AdminResult<MnemonicResponse> {
         let mnemonic = Self::load_or_generate_mnemonic(&self.gateway_db).await?;
-        let words = mnemonic
-            .words()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>();
+
         let all_federations = self
             .federation_manager
             .read()
             .await
             .get_all_federation_configs()
             .await
-            .keys()
-            .copied()
+            .into_keys()
             .collect::<BTreeSet<_>>();
-        let legacy_federations = self.client_builder.legacy_federations(all_federations);
-        let mnemonic_response = MnemonicResponse {
-            mnemonic: words,
-            legacy_federations,
-        };
-        Ok(mnemonic_response)
+
+        Ok(MnemonicResponse {
+            mnemonic: mnemonic.words().map(ToString::to_string).collect(),
+            legacy_federations: self.client_builder.legacy_federations(all_federations),
+        })
     }
 
     /// Handle a request to change a connected federation's configuration or
