@@ -36,7 +36,7 @@ use crate::{OpenChannelPayload, Preimage};
 
 pub const MAX_LIGHTNING_RETRIES: u32 = 10;
 
-pub type RouteHtlcStream<'a> = BoxStream<'a, InterceptPaymentRequest>;
+pub type InboundPaymentStream<'a> = BoxStream<'a, InterceptPaymentRequest>;
 
 #[derive(
     Error, Debug, Serialize, Deserialize, Encodable, Decodable, Clone, Eq, PartialEq, Hash,
@@ -152,7 +152,7 @@ pub trait ILnRpcClient: Debug + Send + Sync {
     async fn get_inbound_payment_stream<'a>(
         self: Box<Self>,
         task_group: &TaskGroup,
-    ) -> Result<(RouteHtlcStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError>;
+    ) -> Result<(InboundPaymentStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError>;
 
     /// Complete an HTLC that was intercepted by the gateway. Must be called for
     /// all successfully intercepted HTLCs sent to the stream returned by

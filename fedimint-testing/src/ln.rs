@@ -20,8 +20,8 @@ use lightning_invoice::{
 use ln_gateway::lightning::{
     ChannelInfo, CloseChannelsWithPeerResponse, CreateInvoiceRequest, CreateInvoiceResponse,
     GetBalancesResponse, GetLnOnchainAddressResponse, GetNodeInfoResponse, GetRouteHintsResponse,
-    ILnRpcClient, InterceptPaymentRequest, InterceptPaymentResponse, LightningRpcError,
-    OpenChannelResponse, PayInvoiceResponse, RouteHtlcStream, WithdrawOnchainResponse,
+    ILnRpcClient, InboundPaymentStream, InterceptPaymentRequest, InterceptPaymentResponse,
+    LightningRpcError, OpenChannelResponse, PayInvoiceResponse, WithdrawOnchainResponse,
 };
 use ln_gateway::rpc::{CloseChannelsWithPeerPayload, OpenChannelPayload, WithdrawOnchainPayload};
 use rand::rngs::OsRng;
@@ -187,7 +187,7 @@ impl ILnRpcClient for FakeLightningTest {
     async fn get_inbound_payment_stream<'a>(
         self: Box<Self>,
         task_group: &TaskGroup,
-    ) -> Result<(RouteHtlcStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
+    ) -> Result<(InboundPaymentStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
         let handle = task_group.make_handle();
         let shutdown_receiver = handle.make_shutdown_rx();
 

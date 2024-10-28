@@ -41,7 +41,9 @@ use tonic_lnd::walletrpc::AddrRequest;
 use tonic_lnd::{connect, Client as LndClient};
 use tracing::{debug, error, info, trace, warn};
 
-use super::{ChannelInfo, ILnRpcClient, LightningRpcError, RouteHtlcStream, MAX_LIGHTNING_RETRIES};
+use super::{
+    ChannelInfo, ILnRpcClient, InboundPaymentStream, LightningRpcError, MAX_LIGHTNING_RETRIES,
+};
 use crate::db::GatewayDbtxNcExt;
 use crate::lightning::{
     CloseChannelsWithPeerResponse, CreateInvoiceRequest, CreateInvoiceResponse,
@@ -929,7 +931,7 @@ impl ILnRpcClient for GatewayLndClient {
     async fn get_inbound_payment_stream<'a>(
         self: Box<Self>,
         task_group: &TaskGroup,
-    ) -> Result<(RouteHtlcStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
+    ) -> Result<(InboundPaymentStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
         const CHANNEL_SIZE: usize = 100;
 
         // Channel to send intercepted htlc to the gateway for processing

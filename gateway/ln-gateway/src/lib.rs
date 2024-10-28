@@ -100,7 +100,9 @@ use crate::db::{get_gatewayd_database_migrations, FederationConfig};
 use crate::envs::FM_GATEWAY_MNEMONIC_ENV;
 use crate::error::{AdminGatewayError, LNv1Error, LNv2Error, PublicGatewayError};
 use crate::gateway_module_v2::GatewayClientModuleV2;
-use crate::lightning::{GatewayLightningBuilder, LightningContext, LightningMode, RouteHtlcStream};
+use crate::lightning::{
+    GatewayLightningBuilder, InboundPaymentStream, LightningContext, LightningMode,
+};
 use crate::rpc::rpc_server::{hash_password, run_webserver};
 use crate::rpc::{
     BackupPayload, BalancePayload, ConnectFedPayload, DepositAddressPayload, FederationBalanceInfo,
@@ -478,7 +480,7 @@ impl Gateway {
     async fn route_lightning_payments<'a>(
         &'a self,
         handle: &TaskHandle,
-        mut stream: RouteHtlcStream<'a>,
+        mut stream: InboundPaymentStream<'a>,
         ln_client: Arc<dyn ILnRpcClient>,
     ) -> ReceivePaymentStreamAction {
         let (lightning_public_key, lightning_alias, lightning_network) =

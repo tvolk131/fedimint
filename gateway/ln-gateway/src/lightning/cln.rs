@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tracing::info;
 
-use super::{ChannelInfo, ILnRpcClient, LightningRpcError, RouteHtlcStream};
+use super::{ChannelInfo, ILnRpcClient, InboundPaymentStream, LightningRpcError};
 use crate::lightning::extension::{
     CLN_CLOSE_CHANNELS_WITH_PEER_ENDPOINT, CLN_COMPLETE_PAYMENT_ENDPOINT,
     CLN_CREATE_INVOICE_ENDPOINT, CLN_GET_BALANCES_ENDPOINT, CLN_INFO_ENDPOINT,
@@ -146,7 +146,7 @@ impl ILnRpcClient for NetworkLnRpcClient {
     async fn get_inbound_payment_stream<'a>(
         self: Box<Self>,
         _task_group: &TaskGroup,
-    ) -> Result<(RouteHtlcStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
+    ) -> Result<(InboundPaymentStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
         let url = self
             .connection_url
             .join(CLN_ROUTE_HTLCS_ENDPOINT)

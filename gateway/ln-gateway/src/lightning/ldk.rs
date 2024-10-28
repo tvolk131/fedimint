@@ -28,7 +28,7 @@ use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info};
 
-use super::{ChannelInfo, ILnRpcClient, LightningRpcError, RouteHtlcStream};
+use super::{ChannelInfo, ILnRpcClient, InboundPaymentStream, LightningRpcError};
 use crate::lightning::{
     CloseChannelsWithPeerResponse, CreateInvoiceRequest, CreateInvoiceResponse,
     GetBalancesResponse, GetLnOnchainAddressResponse, GetNodeInfoResponse, GetRouteHintsResponse,
@@ -45,15 +45,16 @@ pub struct GatewayLdkClient {
     esplora_client: esplora_client::AsyncClient,
 
     /// A handle to the task that processes incoming events from the lightning
-    /// node. Responsible for sending incoming HTLCs to the caller of
+    /// node. Responsible for sending inbound payments to the caller of
     /// `ILnRpcClient::get_inbound_payment_stream`.
     /// TODO: This should be a shutdown sender instead, and we can discard the
     /// handle.
     event_handler_task_handle: tokio::task::JoinHandle<()>,
 
-    /// The HTLC stream, until it is taken by calling
+    /// The inbound payment stream, until it is taken by calling
     /// `ILnRpcClient::get_inbound_payment_stream`.
-    htlc_stream_receiver_or: Option<tokio::sync::mpsc::Receiver<InterceptPaymentRequest>>,
+    inbound_payment_stream_receiver_or:
+        Option<tokio::sync::mpsc::Receiver<InterceptPaymentRequest>>,
 }
 
 impl std::fmt::Debug for GatewayLdkClient {
@@ -121,12 +122,13 @@ impl GatewayLdkClient {
             LightningRpcError::FailedToConnect
         })?;
 
-        let (htlc_stream_sender, htlc_stream_receiver) = tokio::sync::mpsc::channel(1024);
+        let (inbound_payment_stream_sender, inbound_payment_stream_receiver) =
+            tokio::sync::mpsc::channel(1024);
 
         let node_clone = node.clone();
         let event_handler_task_handle = spawn("ldk lightning node event handler", async move {
             loop {
-                Self::handle_next_event(&node_clone, &htlc_stream_sender).await;
+                Self::handle_next_event(&node_clone, &inbound_payment_stream_sender).await;
             }
         });
 
@@ -134,13 +136,13 @@ impl GatewayLdkClient {
             node,
             esplora_client: esplora_client::Builder::new(esplora_server_url).build_async()?,
             event_handler_task_handle,
-            htlc_stream_receiver_or: Some(htlc_stream_receiver),
+            inbound_payment_stream_receiver_or: Some(inbound_payment_stream_receiver),
         })
     }
 
     async fn handle_next_event(
         node: &ldk_node::Node,
-        htlc_stream_sender: &Sender<InterceptPaymentRequest>,
+        inbound_payment_stream_sender: &Sender<InterceptPaymentRequest>,
     ) {
         if let ldk_node::Event::PaymentClaimable {
             payment_id: _,
@@ -149,7 +151,7 @@ impl GatewayLdkClient {
             claim_deadline,
         } = node.next_event_async().await
         {
-            if let Err(e) = htlc_stream_sender
+            if let Err(e) = inbound_payment_stream_sender
                 .send(InterceptPaymentRequest {
                     payment_hash: Hash::from_slice(&payment_hash.0).expect("Failed to create Hash"),
                     amount_msat: claimable_amount_msat,
@@ -160,7 +162,7 @@ impl GatewayLdkClient {
                 })
                 .await
             {
-                error!(?e, "Failed send InterceptHtlcRequest to stream");
+                error!(?e, "Failed send InterceptPaymentRequest to stream");
             }
         }
 
@@ -332,8 +334,8 @@ impl ILnRpcClient for GatewayLdkClient {
     async fn get_inbound_payment_stream<'a>(
         mut self: Box<Self>,
         _task_group: &TaskGroup,
-    ) -> Result<(RouteHtlcStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
-        let route_htlc_stream = match self.htlc_stream_receiver_or.take() {
+    ) -> Result<(InboundPaymentStream<'a>, Arc<dyn ILnRpcClient>), LightningRpcError> {
+        let inbound_payment_stream = match self.inbound_payment_stream_receiver_or.take() {
             Some(stream) => Ok(Box::pin(ReceiverStream::new(stream))),
             None => Err(LightningRpcError::FailedToRouteHtlcs {
                 failure_reason:
@@ -342,7 +344,7 @@ impl ILnRpcClient for GatewayLdkClient {
             }),
         }?;
 
-        Ok((route_htlc_stream, Arc::new(*self)))
+        Ok((inbound_payment_stream, Arc::new(*self)))
     }
 
     async fn complete_htlc(&self, htlc: InterceptPaymentResponse) -> Result<(), LightningRpcError> {
