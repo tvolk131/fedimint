@@ -249,15 +249,12 @@ impl Decodable for bitcoin::hashes::sha256::Hash {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
     use std::str::FromStr;
 
     use bitcoin::hashes::Hash as BitcoinHash;
 
     use crate::encoding::btc::NetworkLegacyEncodingWrapper;
-    use crate::encoding::tests::test_roundtrip_expected;
-    use crate::encoding::{Decodable, Encodable};
-    use crate::ModuleDecoderRegistry;
+    use crate::encoding::tests::{test_roundtrip, test_roundtrip_expected};
 
     #[test_log::test]
     fn network_roundtrip() {
@@ -290,31 +287,8 @@ mod tests {
         ];
 
         for (network, magic_legacy_bytes, magic_bytes) in networks {
-            let mut network_legacy_encoded = Vec::new();
-            NetworkLegacyEncodingWrapper(network)
-                .consensus_encode(&mut network_legacy_encoded)
-                .unwrap();
-
-            let mut network_encoded = Vec::new();
-            network.consensus_encode(&mut network_encoded).unwrap();
-
-            let network_legacy_decoded = NetworkLegacyEncodingWrapper::consensus_decode(
-                &mut Cursor::new(network_legacy_encoded.clone()),
-                &ModuleDecoderRegistry::default(),
-            )
-            .unwrap()
-            .0;
-
-            let network_decoded = bitcoin::Network::consensus_decode(
-                &mut Cursor::new(network_encoded.clone()),
-                &ModuleDecoderRegistry::default(),
-            )
-            .unwrap();
-
-            assert_eq!(magic_legacy_bytes, *network_legacy_encoded);
-            assert_eq!(magic_bytes, *network_encoded);
-            assert_eq!(network, network_legacy_decoded);
-            assert_eq!(network, network_decoded);
+            test_roundtrip_expected(&NetworkLegacyEncodingWrapper(network), &magic_legacy_bytes);
+            test_roundtrip_expected(&network, &magic_bytes);
         }
     }
 
@@ -332,16 +306,7 @@ mod tests {
         for address_str in addresses {
             let address =
                 bitcoin::Address::from_str(address_str).expect("All tested addresses are valid");
-            let mut encoding = vec![];
-            address
-                .consensus_encode(&mut encoding)
-                .expect("Encoding to vec can't fail");
-            let mut cursor = Cursor::new(encoding);
-            let parsed_address =
-                bitcoin::Address::consensus_decode(&mut cursor, &ModuleDecoderRegistry::default())
-                    .expect("Decoding address failed");
-
-            assert_eq!(address, parsed_address);
+            test_roundtrip(&address);
         }
     }
 
