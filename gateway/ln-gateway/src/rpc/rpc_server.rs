@@ -25,13 +25,15 @@ use tracing::{error, info, instrument};
 
 use super::{
     BackupPayload, CloseChannelsWithPeerPayload, ConnectFedPayload,
-    CreateInvoiceForOperatorPayload, DepositAddressPayload, InfoPayload, LeaveFedPayload,
-    OpenChannelPayload, PayInvoiceForOperatorPayload, ReceiveEcashPayload, SendOnchainPayload,
-    SetConfigurationPayload, SpendEcashPayload, WithdrawPayload, ADDRESS_ENDPOINT, BACKUP_ENDPOINT,
+    CreateInvoiceForOperatorPayload, CreateOfferForOperatorPayload, DepositAddressPayload,
+    InfoPayload, LeaveFedPayload, OpenChannelPayload, PayInvoiceForOperatorPayload,
+    PayOfferAsOperatorPayload, ReceiveEcashPayload, SendOnchainPayload, SetConfigurationPayload,
+    SpendEcashPayload, WithdrawPayload, ADDRESS_ENDPOINT, BACKUP_ENDPOINT,
     CLOSE_CHANNELS_WITH_PEER_ENDPOINT, CONFIGURATION_ENDPOINT, CONNECT_FED_ENDPOINT,
-    CREATE_BOLT11_INVOICE_FOR_OPERATOR_ENDPOINT, GATEWAY_INFO_ENDPOINT, GATEWAY_INFO_POST_ENDPOINT,
-    GET_BALANCES_ENDPOINT, GET_LN_ONCHAIN_ADDRESS_ENDPOINT, LEAVE_FED_ENDPOINT,
-    LIST_ACTIVE_CHANNELS_ENDPOINT, MNEMONIC_ENDPOINT, OPEN_CHANNEL_ENDPOINT,
+    CREATE_BOLT11_INVOICE_FOR_OPERATOR_ENDPOINT, CREATE_BOLT12_OFFER_FOR_OPERATOR_ENDPOINT,
+    GATEWAY_INFO_ENDPOINT, GATEWAY_INFO_POST_ENDPOINT, GET_BALANCES_ENDPOINT,
+    GET_LN_ONCHAIN_ADDRESS_ENDPOINT, LEAVE_FED_ENDPOINT, LIST_ACTIVE_CHANNELS_ENDPOINT,
+    MNEMONIC_ENDPOINT, OPEN_CHANNEL_ENDPOINT, PAY_BOLT12_OFFER_AS_OPERATOR_ENDPOINT,
     PAY_INVOICE_FOR_OPERATOR_ENDPOINT, RECEIVE_ECASH_ENDPOINT, SEND_ONCHAIN_ENDPOINT,
     SET_CONFIGURATION_ENDPOINT, SPEND_ECASH_ENDPOINT, STOP_ENDPOINT, V1_API_ENDPOINT,
     WITHDRAW_ENDPOINT,
@@ -194,6 +196,14 @@ fn v1_routes(gateway: Arc<Gateway>, task_group: TaskGroup) -> Router {
             PAY_INVOICE_FOR_OPERATOR_ENDPOINT,
             post(pay_invoice_operator),
         )
+        .route(
+            CREATE_BOLT12_OFFER_FOR_OPERATOR_ENDPOINT,
+            post(create_offer_for_operator),
+        )
+        .route(
+            PAY_BOLT12_OFFER_AS_OPERATOR_ENDPOINT,
+            post(pay_offer_as_operator),
+        )
         .route(GET_LN_ONCHAIN_ADDRESS_ENDPOINT, get(get_ln_onchain_address))
         .route(OPEN_CHANNEL_ENDPOINT, post(open_channel))
         .route(
@@ -309,6 +319,26 @@ async fn pay_invoice_operator(
     Json(payload): Json<PayInvoiceForOperatorPayload>,
 ) -> Result<impl IntoResponse, AdminGatewayError> {
     let preimage = gateway.handle_pay_invoice_for_operator_msg(payload).await?;
+    Ok(Json(json!(preimage.0.encode_hex::<String>())))
+}
+
+#[instrument(skip_all, err, fields(?payload))]
+async fn create_offer_for_operator(
+    Extension(gateway): Extension<Arc<Gateway>>,
+    Json(payload): Json<CreateOfferForOperatorPayload>,
+) -> Result<impl IntoResponse, AdminGatewayError> {
+    let offer = gateway
+        .handle_create_offer_for_operator_msg(payload)
+        .await?;
+    Ok(Json(json!(offer.to_string())))
+}
+
+#[instrument(skip_all, err, fields(?payload))]
+async fn pay_offer_as_operator(
+    Extension(gateway): Extension<Arc<Gateway>>,
+    Json(payload): Json<PayOfferAsOperatorPayload>,
+) -> Result<impl IntoResponse, AdminGatewayError> {
+    let preimage = gateway.handle_pay_offer_as_operator_msg(payload).await?;
     Ok(Json(json!(preimage.0.encode_hex::<String>())))
 }
 

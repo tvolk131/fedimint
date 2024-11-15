@@ -32,6 +32,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ::lightning::offers::offer::Offer;
 use anyhow::{anyhow, Context};
 use bitcoin::hashes::sha256;
 use bitcoin::{Address, Network, Txid};
@@ -78,18 +79,18 @@ use fedimint_wallet_client::{
 };
 use futures::stream::StreamExt;
 use lightning::{
-    CloseChannelsWithPeerResponse, CreateInvoiceRequest, ILnRpcClient, InterceptPaymentRequest,
-    InterceptPaymentResponse, InvoiceDescription, LightningBuilder, LightningRpcError,
-    PaymentAction,
+    CloseChannelsWithPeerResponse, CreateInvoiceRequest, CreateOfferRequest, ILnRpcClient,
+    InterceptPaymentRequest, InterceptPaymentResponse, InvoiceDescription, LightningBuilder,
+    LightningRpcError, PayOfferRequest, PaymentAction,
 };
 use lightning_invoice::{Bolt11Invoice, RoutingFees};
 use rand::{thread_rng, Rng};
 use rpc::{
-    CloseChannelsWithPeerPayload, CreateInvoiceForOperatorPayload, FederationInfo,
-    GatewayFedConfig, GatewayInfo, LeaveFedPayload, MnemonicResponse, OpenChannelPayload,
-    PayInvoiceForOperatorPayload, ReceiveEcashPayload, ReceiveEcashResponse, SendOnchainPayload,
-    SetConfigurationPayload, SpendEcashPayload, SpendEcashResponse, WithdrawResponse,
-    V1_API_ENDPOINT,
+    CloseChannelsWithPeerPayload, CreateInvoiceForOperatorPayload, CreateOfferForOperatorPayload,
+    FederationInfo, GatewayFedConfig, GatewayInfo, LeaveFedPayload, MnemonicResponse,
+    OpenChannelPayload, PayInvoiceForOperatorPayload, PayOfferAsOperatorPayload,
+    ReceiveEcashPayload, ReceiveEcashResponse, SendOnchainPayload, SetConfigurationPayload,
+    SpendEcashPayload, SpendEcashResponse, WithdrawResponse, V1_API_ENDPOINT,
 };
 use state_machine::{GatewayClientModule, GatewayExtPayStates};
 use tokio::sync::RwLock;
@@ -1013,6 +1014,57 @@ impl Gateway {
             .pay(payload.invoice, MAX_DELAY, Amount::from_msats(max_fee))
             .await?;
         Ok(res.preimage)
+    }
+
+    /// Creates an offer that is directly payable to the gateway's lightning
+    /// node.
+    async fn handle_create_offer_for_operator_msg(
+        &self,
+        payload: CreateOfferForOperatorPayload,
+    ) -> AdminResult<Offer> {
+        let GatewayState::Running { lightning_context } = self.get_state().await else {
+            return Err(AdminGatewayError::Lightning(
+                LightningRpcError::FailedToConnect,
+            ));
+        };
+
+        Offer::from_str(
+            &lightning_context
+                .lnrpc
+                .create_offer(CreateOfferRequest {
+                    expiry_secs: payload.expiry_secs,
+                    description: payload.description,
+                })
+                .await?
+                .offer,
+        )
+        .map_err(|e| {
+            AdminGatewayError::Lightning(LightningRpcError::InvalidMetadata {
+                failure_reason: format!("{e:#?}"),
+            })
+        })
+    }
+
+    /// Pays an offer using the gateway's funds (i.e. no ecash swap).
+    async fn handle_pay_offer_as_operator_msg(
+        &self,
+        payload: PayOfferAsOperatorPayload,
+    ) -> AdminResult<Preimage> {
+        let GatewayState::Running { lightning_context } = self.get_state().await else {
+            return Err(AdminGatewayError::Lightning(
+                LightningRpcError::FailedToConnect,
+            ));
+        };
+
+        Ok(lightning_context
+            .lnrpc
+            .pay_offer(PayOfferRequest {
+                offer: payload.offer,
+                amount_msats: payload.amount_msats,
+                payer_note: payload.payer_note,
+            })
+            .await?
+            .preimage)
     }
 
     /// Requests the gateway to pay an outgoing LN invoice on behalf of a

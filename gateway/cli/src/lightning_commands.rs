@@ -22,6 +22,24 @@ pub enum LightningCommands {
     },
     /// Pay a lightning invoice as the gateway (i.e. no e-cash exchange).
     PayInvoice { invoice: Bolt11Invoice },
+    /// Create a BOLT-12 offer to receive lightning funds to the gateway.
+    CreateOffer {
+        #[clap(long)]
+        expiry_secs: Option<u32>,
+
+        #[clap(long)]
+        description: Option<String>,
+    },
+    /// Pay a BOLT-12 offer as the gateway (i.e. no e-cash exchange).
+    PayOffer {
+        offer: String,
+
+        #[clap(long)]
+        amount_msats: Option<u64>,
+
+        #[clap(long)]
+        payer_note: Option<String>,
+    },
     /// Open a channel with another lightning node.
     OpenChannel {
         /// The public key of the node to open a channel with
@@ -74,6 +92,32 @@ impl LightningCommands {
             Self::PayInvoice { invoice } => {
                 let response = create_client()
                     .pay_invoice(ln_gateway::rpc::PayInvoiceForOperatorPayload { invoice })
+                    .await?;
+                println!("{response}");
+            }
+            Self::CreateOffer {
+                expiry_secs,
+                description,
+            } => {
+                let response = create_client()
+                    .create_offer_for_self(ln_gateway::rpc::CreateOfferForOperatorPayload {
+                        expiry_secs,
+                        description,
+                    })
+                    .await?;
+                println!("{response}");
+            }
+            Self::PayOffer {
+                offer,
+                amount_msats,
+                payer_note,
+            } => {
+                let response = create_client()
+                    .pay_offer(ln_gateway::rpc::PayOfferAsOperatorPayload {
+                        offer,
+                        amount_msats,
+                        payer_note,
+                    })
                     .await?;
                 println!("{response}");
             }

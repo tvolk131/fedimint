@@ -1,6 +1,9 @@
+use std::str::FromStr;
+
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, Txid};
 use fedimint_core::util::SafeUrl;
+use lightning::offers::offer::Offer;
 use lightning_invoice::Bolt11Invoice;
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
@@ -9,15 +12,17 @@ use thiserror::Error;
 
 use super::{
     BackupPayload, CloseChannelsWithPeerPayload, ConfigPayload, ConnectFedPayload,
-    CreateInvoiceForOperatorPayload, DepositAddressPayload, FederationInfo, GatewayBalances,
-    GatewayFedConfig, GatewayInfo, LeaveFedPayload, MnemonicResponse, OpenChannelPayload,
-    PayInvoiceForOperatorPayload, ReceiveEcashPayload, ReceiveEcashResponse, SendOnchainPayload,
-    SetConfigurationPayload, SpendEcashPayload, SpendEcashResponse, WithdrawPayload,
-    WithdrawResponse, ADDRESS_ENDPOINT, BACKUP_ENDPOINT, CLOSE_CHANNELS_WITH_PEER_ENDPOINT,
-    CONFIGURATION_ENDPOINT, CONNECT_FED_ENDPOINT, CREATE_BOLT11_INVOICE_FOR_OPERATOR_ENDPOINT,
-    GATEWAY_INFO_ENDPOINT, GATEWAY_INFO_POST_ENDPOINT, GET_BALANCES_ENDPOINT,
-    GET_LN_ONCHAIN_ADDRESS_ENDPOINT, LEAVE_FED_ENDPOINT, LIST_ACTIVE_CHANNELS_ENDPOINT,
-    MNEMONIC_ENDPOINT, OPEN_CHANNEL_ENDPOINT, PAY_INVOICE_FOR_OPERATOR_ENDPOINT,
+    CreateInvoiceForOperatorPayload, CreateOfferForOperatorPayload, DepositAddressPayload,
+    FederationInfo, GatewayBalances, GatewayFedConfig, GatewayInfo, LeaveFedPayload,
+    MnemonicResponse, OpenChannelPayload, PayInvoiceForOperatorPayload, PayOfferAsOperatorPayload,
+    ReceiveEcashPayload, ReceiveEcashResponse, SendOnchainPayload, SetConfigurationPayload,
+    SpendEcashPayload, SpendEcashResponse, WithdrawPayload, WithdrawResponse, ADDRESS_ENDPOINT,
+    BACKUP_ENDPOINT, CLOSE_CHANNELS_WITH_PEER_ENDPOINT, CONFIGURATION_ENDPOINT,
+    CONNECT_FED_ENDPOINT, CREATE_BOLT11_INVOICE_FOR_OPERATOR_ENDPOINT,
+    CREATE_BOLT12_OFFER_FOR_OPERATOR_ENDPOINT, GATEWAY_INFO_ENDPOINT, GATEWAY_INFO_POST_ENDPOINT,
+    GET_BALANCES_ENDPOINT, GET_LN_ONCHAIN_ADDRESS_ENDPOINT, LEAVE_FED_ENDPOINT,
+    LIST_ACTIVE_CHANNELS_ENDPOINT, MNEMONIC_ENDPOINT, OPEN_CHANNEL_ENDPOINT,
+    PAY_BOLT12_OFFER_AS_OPERATOR_ENDPOINT, PAY_INVOICE_FOR_OPERATOR_ENDPOINT,
     RECEIVE_ECASH_ENDPOINT, SEND_ONCHAIN_ENDPOINT, SET_CONFIGURATION_ENDPOINT,
     SPEND_ECASH_ENDPOINT, STOP_ENDPOINT, WITHDRAW_ENDPOINT,
 };
@@ -149,6 +154,27 @@ impl GatewayRpcClient {
         let url = self
             .base_url
             .join(PAY_INVOICE_FOR_OPERATOR_ENDPOINT)
+            .expect("invalid base url");
+        self.call_post(url, payload).await
+    }
+
+    pub async fn create_offer_for_self(
+        &self,
+        payload: CreateOfferForOperatorPayload,
+    ) -> GatewayRpcResult<Offer> {
+        let url = self
+            .base_url
+            .join(CREATE_BOLT12_OFFER_FOR_OPERATOR_ENDPOINT)
+            .expect("invalid base url");
+        let offer_string: String = self.call_post(url, payload).await?;
+        Offer::from_str(&offer_string)
+            .map_err(|_| GatewayRpcError::BadStatus(StatusCode::PARTIAL_CONTENT))
+    }
+
+    pub async fn pay_offer(&self, payload: PayOfferAsOperatorPayload) -> GatewayRpcResult<String> {
+        let url = self
+            .base_url
+            .join(PAY_BOLT12_OFFER_AS_OPERATOR_ENDPOINT)
             .expect("invalid base url");
         self.call_post(url, payload).await
     }

@@ -17,13 +17,17 @@ use ldk_node::lightning::ln::PaymentHash;
 use ldk_node::lightning::routing::gossip::NodeAlias;
 use ldk_node::payment::{PaymentKind, PaymentStatus, SendingParameters};
 use lightning::ln::PaymentPreimage;
+use lightning::offers::offer::Offer;
 use lightning::util::scid_utils::scid_from_parts;
 use lightning_invoice::Bolt11Invoice;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info};
 
-use super::{ChannelInfo, ILnRpcClient, LightningRpcError, RouteHtlcStream};
+use super::{
+    ChannelInfo, CreateOfferRequest, CreateOfferResponse, ILnRpcClient, LightningRpcError,
+    PayOfferRequest, PayOfferResponse, RouteHtlcStream,
+};
 use crate::lightning::{
     CloseChannelsWithPeerResponse, CreateInvoiceRequest, CreateInvoiceResponse,
     GetBalancesResponse, GetLnOnchainAddressResponse, GetNodeInfoResponse, GetRouteHintsResponse,
@@ -431,6 +435,82 @@ impl ILnRpcClient for GatewayLdkClient {
         Ok(CreateInvoiceResponse {
             invoice: invoice.to_string(),
         })
+    }
+
+    async fn create_offer(
+        &self,
+        create_offer_request: CreateOfferRequest,
+    ) -> Result<CreateOfferResponse, LightningRpcError> {
+        let offer = self
+            .node
+            .bolt12_payment()
+            .receive_variable_amount(
+                &create_offer_request.description.unwrap_or_default(),
+                create_offer_request.expiry_secs,
+            )
+            .map_err(|e| LightningRpcError::FailedToGetOffer {
+                failure_reason: e.to_string(),
+            })?;
+
+        Ok(CreateOfferResponse {
+            offer: offer.to_string(),
+        })
+    }
+
+    async fn pay_offer(
+        &self,
+        pay_offer_request: PayOfferRequest,
+    ) -> Result<PayOfferResponse, LightningRpcError> {
+        let offer = Offer::from_str(&pay_offer_request.offer).map_err(|e| {
+            LightningRpcError::FailedToPayOffer {
+                failure_reason: format!("Failed to parse offer: {e:?}"),
+            }
+        })?;
+
+        let payment_id = if let Some(amount_msats) = pay_offer_request.amount_msats {
+            self.node.bolt12_payment().send_using_amount(
+                &offer,
+                amount_msats,
+                None,
+                pay_offer_request.payer_note,
+            )
+        } else {
+            self.node
+                .bolt12_payment()
+                .send(&offer, None, pay_offer_request.payer_note)
+        }
+        .map_err(|e| LightningRpcError::FailedToGetOffer {
+            failure_reason: format!("Failed to pay offer: {e:?}"),
+        })?;
+
+        let preimage = loop {
+            let payment_details = self
+                .node
+                .payment(&payment_id)
+                .expect("payment_id should map to the payment above");
+
+            match payment_details.status {
+                PaymentStatus::Pending => continue,
+                PaymentStatus::Failed => {
+                    return Err(LightningRpcError::FailedToPayOffer {
+                        failure_reason: "Payment failed".to_string(),
+                    });
+                }
+                PaymentStatus::Succeeded => {}
+            }
+
+            let PaymentKind::Bolt12Offer { preimage, .. } = payment_details.kind else {
+                panic!("Always BOLT12 payment details");
+            };
+
+            if let Some(preimage) = preimage {
+                break Preimage(preimage.0);
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+
+        Ok(PayOfferResponse { preimage })
     }
 
     async fn get_ln_onchain_address(

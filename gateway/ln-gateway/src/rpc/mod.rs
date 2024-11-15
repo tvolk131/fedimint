@@ -25,6 +25,7 @@ pub const BACKUP_ENDPOINT: &str = "/backup";
 pub const CONFIGURATION_ENDPOINT: &str = "/config";
 pub const CONNECT_FED_ENDPOINT: &str = "/connect_fed";
 pub const CREATE_BOLT11_INVOICE_FOR_OPERATOR_ENDPOINT: &str = "/create_bolt11_invoice_for_operator";
+pub const CREATE_BOLT12_OFFER_FOR_OPERATOR_ENDPOINT: &str = "/create_bolt12_offer_for_operator";
 pub const GATEWAY_INFO_ENDPOINT: &str = "/info";
 pub const GET_BALANCES_ENDPOINT: &str = "/balances";
 pub const GATEWAY_INFO_POST_ENDPOINT: &str = "/info";
@@ -35,6 +36,7 @@ pub const MNEMONIC_ENDPOINT: &str = "/mnemonic";
 pub const OPEN_CHANNEL_ENDPOINT: &str = "/open_channel";
 pub const CLOSE_CHANNELS_WITH_PEER_ENDPOINT: &str = "/close_channels_with_peer";
 pub const PAY_INVOICE_FOR_OPERATOR_ENDPOINT: &str = "/pay_invoice_for_operator";
+pub const PAY_BOLT12_OFFER_AS_OPERATOR_ENDPOINT: &str = "/pay_bolt12_offer_as_operator";
 pub const RECEIVE_ECASH_ENDPOINT: &str = "/receive_ecash";
 pub const SET_CONFIGURATION_ENDPOINT: &str = "/set_configuration";
 pub const STOP_ENDPOINT: &str = "/stop";
@@ -182,6 +184,19 @@ pub struct CreateInvoiceForOperatorPayload {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PayInvoiceForOperatorPayload {
     pub invoice: Bolt11Invoice,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CreateOfferForOperatorPayload {
+    pub expiry_secs: Option<u32>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PayOfferAsOperatorPayload {
+    pub offer: String,
+    pub amount_msats: Option<u64>,
+    pub payer_note: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

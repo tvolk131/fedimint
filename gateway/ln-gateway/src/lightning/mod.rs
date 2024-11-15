@@ -62,6 +62,10 @@ pub enum LightningRpcError {
     FailedToCloseChannelsWithPeer { failure_reason: String },
     #[error("Failed to get Invoice: {failure_reason}")]
     FailedToGetInvoice { failure_reason: String },
+    #[error("Failed to get Offer: {failure_reason}")]
+    FailedToGetOffer { failure_reason: String },
+    #[error("Failed to pay Offer: {failure_reason}")]
+    FailedToPayOffer { failure_reason: String },
     #[error("Failed to get funding address: {failure_reason}")]
     FailedToGetLnOnchainAddress { failure_reason: String },
     #[error("Failed to withdraw funds on-chain: {failure_reason}")]
@@ -193,6 +197,24 @@ pub trait ILnRpcClient: Debug + Send + Sync {
         &self,
         create_invoice_request: CreateInvoiceRequest,
     ) -> Result<CreateInvoiceResponse, LightningRpcError>;
+
+    async fn create_offer(
+        &self,
+        _create_offer_request: CreateOfferRequest,
+    ) -> Result<CreateOfferResponse, LightningRpcError> {
+        Err(LightningRpcError::FailedToGetOffer {
+            failure_reason: "Creating offers is not supported".to_string(),
+        })
+    }
+
+    async fn pay_offer(
+        &self,
+        _pay_offer_request: PayOfferRequest,
+    ) -> Result<PayOfferResponse, LightningRpcError> {
+        Err(LightningRpcError::FailedToPayOffer {
+            failure_reason: "Paying offers is not supported".to_string(),
+        })
+    }
 
     /// Gets a funding address belonging to the lightning node's on-chain
     /// wallet.
@@ -478,6 +500,29 @@ pub enum InvoiceDescription {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CreateInvoiceResponse {
     pub invoice: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CreateOfferRequest {
+    pub expiry_secs: Option<u32>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CreateOfferResponse {
+    pub offer: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PayOfferRequest {
+    pub offer: String,
+    pub amount_msats: Option<u64>,
+    pub payer_note: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PayOfferResponse {
+    pub preimage: Preimage,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
