@@ -264,27 +264,26 @@ impl Decodable for BigSize {
     }
 }
 
-macro_rules! impl_encode_decode_num_as_plain {
-    ($num_type:ty) => {
-        impl Encodable for $num_type {
-            fn consensus_encode<W: std::io::Write>(&self, writer: &mut W) -> Result<usize, Error> {
-                let bytes = self.to_be_bytes();
-                writer.write_all(&bytes[..])?;
-                Ok(bytes.len())
-            }
-        }
+impl<T> Encodable for std::ops::RangeInclusive<T>
+where
+    T: Encodable,
+{
+    fn consensus_encode<W: std::io::Write>(&self, writer: &mut W) -> Result<usize, Error> {
+        (self.start(), self.end()).consensus_encode(writer)
+    }
+}
 
-        impl Decodable for $num_type {
-            fn consensus_decode<D: std::io::Read>(
-                d: &mut D,
-                _modules: &ModuleDecoderRegistry,
-            ) -> Result<Self, crate::encoding::DecodeError> {
-                let mut bytes = [0u8; (<$num_type>::BITS / 8) as usize];
-                d.read_exact(&mut bytes).map_err(DecodeError::from_err)?;
-                Ok(<$num_type>::from_be_bytes(bytes))
-            }
-        }
-    };
+impl<T> Decodable for std::ops::RangeInclusive<T>
+where
+    T: Decodable,
+{
+    fn consensus_decode<D: std::io::Read>(
+        d: &mut D,
+        _modules: &ModuleDecoderRegistry,
+    ) -> Result<Self, crate::encoding::DecodeError> {
+        let r = <(T, T)>::consensus_decode(d, &ModuleRegistry::default())?;
+        Ok(Self::new(r.0, r.1))
+    }
 }
 
 macro_rules! impl_encode_decode_num_as_bigsize {
@@ -308,53 +307,33 @@ macro_rules! impl_encode_decode_num_as_bigsize {
     };
 }
 
-impl<T> Encodable for std::ops::RangeInclusive<T>
-where
-    T: Encodable,
-{
-    fn consensus_encode<W: std::io::Write>(&self, writer: &mut W) -> Result<usize, Error> {
-        (self.start(), self.end()).consensus_encode(writer)
-    }
-}
+macro_rules! impl_encode_decode_num_as_plain {
+    ($num_type:ty) => {
+        impl Encodable for $num_type {
+            fn consensus_encode<W: std::io::Write>(&self, writer: &mut W) -> Result<usize, Error> {
+                let bytes = self.to_be_bytes();
+                writer.write_all(&bytes[..])?;
+                Ok(bytes.len())
+            }
+        }
 
-impl<T> Decodable for std::ops::RangeInclusive<T>
-where
-    T: Decodable,
-{
-    fn consensus_decode<D: std::io::Read>(
-        d: &mut D,
-        _modules: &ModuleDecoderRegistry,
-    ) -> Result<Self, crate::encoding::DecodeError> {
-        let r = <(T, T)>::consensus_decode(d, &ModuleRegistry::default())?;
-        Ok(Self::new(r.0, r.1))
-    }
+        impl Decodable for $num_type {
+            fn consensus_decode<D: std::io::Read>(
+                d: &mut D,
+                _modules: &ModuleDecoderRegistry,
+            ) -> Result<Self, crate::encoding::DecodeError> {
+                let mut bytes = [0u8; (<$num_type>::BITS / 8) as usize];
+                d.read_exact(&mut bytes).map_err(DecodeError::from_err)?;
+                Ok(<$num_type>::from_be_bytes(bytes))
+            }
+        }
+    };
 }
 
 impl_encode_decode_num_as_bigsize!(u64);
 impl_encode_decode_num_as_bigsize!(u32);
 impl_encode_decode_num_as_bigsize!(u16);
 impl_encode_decode_num_as_plain!(u8);
-
-macro_rules! impl_encode_decode_tuple {
-    ($($x:ident),*) => (
-        #[allow(non_snake_case)]
-        impl <$($x: Encodable),*> Encodable for ($($x),*) {
-            fn consensus_encode<W: std::io::Write>(&self, s: &mut W) -> Result<usize, std::io::Error> {
-                let &($(ref $x),*) = self;
-                let mut len = 0;
-                $(len += $x.consensus_encode(s)?;)*
-                Ok(len)
-            }
-        }
-
-        #[allow(non_snake_case)]
-        impl<$($x: Decodable),*> Decodable for ($($x),*) {
-            fn consensus_decode<D: std::io::Read>(d: &mut D, modules: &ModuleDecoderRegistry) -> Result<Self, DecodeError> {
-                Ok(($({let $x = Decodable::consensus_decode(d, modules)?; $x }),*))
-            }
-        }
-    );
-}
 
 /// Specialized version of Encodable for bytes
 pub fn consensus_encode_bytes<W: std::io::Write>(
@@ -443,6 +422,27 @@ pub fn consensus_decode_bytes_static_from_finite_reader<const N: usize, D: std::
     r.read_exact(bytes.as_mut_slice())
         .map_err(DecodeError::from_err)?;
     Ok(bytes)
+}
+
+macro_rules! impl_encode_decode_tuple {
+    ($($x:ident),*) => (
+        #[allow(non_snake_case)]
+        impl <$($x: Encodable),*> Encodable for ($($x),*) {
+            fn consensus_encode<W: std::io::Write>(&self, s: &mut W) -> Result<usize, std::io::Error> {
+                let &($(ref $x),*) = self;
+                let mut len = 0;
+                $(len += $x.consensus_encode(s)?;)*
+                Ok(len)
+            }
+        }
+
+        #[allow(non_snake_case)]
+        impl<$($x: Decodable),*> Decodable for ($($x),*) {
+            fn consensus_decode<D: std::io::Read>(d: &mut D, modules: &ModuleDecoderRegistry) -> Result<Self, DecodeError> {
+                Ok(($({let $x = Decodable::consensus_decode(d, modules)?; $x }),*))
+            }
+        }
+    );
 }
 
 impl_encode_decode_tuple!(T1, T2);
