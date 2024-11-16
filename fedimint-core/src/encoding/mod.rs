@@ -65,12 +65,6 @@ where
     }
 }
 
-impl Encodable for Box<dyn DynEncodable> {
-    fn consensus_encode<W: std::io::Write>(&self, writer: &mut W) -> Result<usize, std::io::Error> {
-        (**self).consensus_encode_dyn(writer)
-    }
-}
-
 impl<T> Encodable for &T
 where
     T: Encodable,
