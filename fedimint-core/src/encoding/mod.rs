@@ -1,8 +1,7 @@
-//! Binary encoding interface suitable for
-//! consensus critical encoding.
+//! Binary encoding interface suitable for consensus critical encoding.
 //!
-//! Over time all structs that ! need to be encoded to binary will be migrated
-//! to this interface.
+//! Over time all structs that need to be encoded to binary will be migrated to
+//! this interface.
 //!
 //! This code is based on corresponding `rust-bitcoin` types.
 //!
@@ -29,7 +28,7 @@ use std::{cmp, mem};
 use anyhow::{format_err, Context};
 pub use fedimint_derive::{Decodable, Encodable};
 use hex::{FromHex, ToHex};
-use lightning::util::ser::{Readable, Writeable};
+use lightning::util::ser::{BigSize, Readable, Writeable};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -243,8 +242,6 @@ impl From<anyhow::Error> for DecodeError {
         Self(e)
     }
 }
-
-pub use lightning::util::ser::BigSize;
 
 impl Encodable for BigSize {
     fn consensus_encode<W: std::io::Write>(&self, writer: &mut W) -> Result<usize, std::io::Error> {
