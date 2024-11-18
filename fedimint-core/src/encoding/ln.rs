@@ -1,6 +1,8 @@
 use std::io::Error;
 
-use crate::encoding::{Decodable, DecodeError, Encodable};
+use lightning::util::ser::{BigSize, Readable, Writeable};
+
+use crate::encoding::{CountWrite, Decodable, DecodeError, Encodable, SimpleBitcoinRead};
 use crate::module::registry::ModuleDecoderRegistry;
 
 impl Encodable for lightning_invoice::Bolt11Invoice {
@@ -40,6 +42,24 @@ impl Decodable for lightning_invoice::RoutingFees {
             base_msat,
             proportional_millionths,
         })
+    }
+}
+
+impl Encodable for BigSize {
+    fn consensus_encode<W: std::io::Write>(&self, writer: &mut W) -> Result<usize, std::io::Error> {
+        let mut writer = CountWrite::from(writer);
+        self.write(&mut writer)?;
+        Ok(usize::try_from(writer.count()).expect("can't overflow"))
+    }
+}
+
+impl Decodable for BigSize {
+    fn consensus_decode<R: std::io::Read>(
+        r: &mut R,
+        _modules: &ModuleDecoderRegistry,
+    ) -> Result<Self, DecodeError> {
+        Self::read(&mut SimpleBitcoinRead(r))
+            .map_err(|e| DecodeError::new_custom(anyhow::anyhow!("BigSize decoding error: {e:?}")))
     }
 }
 

@@ -8,7 +8,7 @@ use hex::{FromHex, ToHex};
 use miniscript::{Descriptor, MiniscriptKey};
 use serde::{Deserialize, Serialize};
 
-use super::{BufBitcoinReader, CountWrite, SimpleBitcoinRead};
+use super::{CountWrite, SimpleBitcoinRead};
 use crate::encoding::{Decodable, DecodeError, Encodable};
 use crate::get_network_for_address;
 use crate::module::registry::ModuleDecoderRegistry;
@@ -166,6 +166,7 @@ impl Decodable for NetworkLegacyEncodingWrapper {
         Ok(Self(network))
     }
 }
+
 impl Encodable for bitcoin::Network {
     fn consensus_encode<W: Write>(&self, writer: &mut W) -> Result<usize, Error> {
         self.magic().to_bytes().consensus_encode(writer)
@@ -242,6 +243,83 @@ impl Decodable for bitcoin::hashes::sha256::Hash {
         Ok(Self::from_byte_array(Decodable::consensus_decode(
             d, modules,
         )?))
+    }
+}
+
+/// Wrap buffering support for implementations of Read.
+/// A reader which keeps an internal buffer to avoid hitting the underlying
+/// stream directly for every read.
+///
+/// In order to avoid reading bytes past the first object, and those bytes then
+/// ending up getting dropped, this BufBitcoinReader operates in
+/// one-byte-increments.
+///
+/// This code is vendored from the `lightning` crate:
+/// <https://github.com/lightningdevkit/rust-lightning/blob/5718baaed947fcaa9c60d80cdf309040c0c68489/lightning/src/util/ser.rs#L72-L138>
+struct BufBitcoinReader<'a, R: std::io::Read> {
+    inner: &'a mut R,
+    buf: [u8; 1],
+    is_consumed: bool,
+}
+
+impl<'a, R: std::io::Read> BufBitcoinReader<'a, R> {
+    /// Creates a [`BufBitcoinReader`] which will read from the given `inner`.
+    pub fn new(inner: &'a mut R) -> Self {
+        BufBitcoinReader {
+            inner,
+            buf: [0; 1],
+            is_consumed: true,
+        }
+    }
+}
+
+impl<'a, R: std::io::Read> bitcoin_io::Read for BufBitcoinReader<'a, R> {
+    #[inline]
+    fn read(&mut self, output: &mut [u8]) -> bitcoin_io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        #[allow(clippy::useless_let_if_seq)]
+        let mut offset = 0;
+        if !self.is_consumed {
+            output[0] = self.buf[0];
+            self.is_consumed = true;
+            offset = 1;
+        }
+        Ok(self
+            .inner
+            .read(&mut output[offset..])
+            .map(|len| len + offset)?)
+    }
+}
+
+impl<'a, R: std::io::Read> bitcoin_io::BufRead for BufBitcoinReader<'a, R> {
+    #[inline]
+    fn fill_buf(&mut self) -> bitcoin_io::Result<&[u8]> {
+        debug_assert!(false, "rust-bitcoin doesn't actually use this");
+        if self.is_consumed {
+            let count = self.inner.read(&mut self.buf[..])?;
+            debug_assert!(count <= 1, "read gave us a garbage length");
+
+            // upon hitting EOF, assume the byte is already consumed
+            self.is_consumed = count == 0;
+        }
+
+        if self.is_consumed {
+            Ok(&[])
+        } else {
+            Ok(&self.buf[..])
+        }
+    }
+
+    #[inline]
+    fn consume(&mut self, amount: usize) {
+        debug_assert!(false, "rust-bitcoin doesn't actually use this");
+        if amount >= 1 {
+            debug_assert_eq!(amount, 1, "Can only consume one byte");
+            debug_assert!(!self.is_consumed, "Cannot consume more than had been read");
+            self.is_consumed = true;
+        }
     }
 }
 
