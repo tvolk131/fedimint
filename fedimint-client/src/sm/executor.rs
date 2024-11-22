@@ -26,6 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, trace, warn, Instrument};
 
 use super::state::StateTransitionFunction;
+use crate::db::ClientDbtxNcExt;
 use crate::sm::notifier::Notifier;
 use crate::sm::state::{DynContext, DynState};
 use crate::sm::{ClientSMDatabaseTransaction, State, StateTransition};
@@ -208,16 +209,7 @@ impl Executor {
                 return Err(AddStateMachinesError::Other(anyhow!("Unknown module")));
             }
 
-            let is_active_state = dbtx
-                .get_value(&ActiveStateKey::from_state(state.clone()))
-                .await
-                .is_some();
-            let is_inactive_state = dbtx
-                .get_value(&InactiveStateKey::from_state(state.clone()))
-                .await
-                .is_some();
-
-            if is_active_state || is_inactive_state {
+            if dbtx.state_exists(state.clone()).await {
                 return Err(AddStateMachinesError::StateAlreadyExists);
             }
 
@@ -245,11 +237,7 @@ impl Executor {
                 }
             }
 
-            dbtx.insert_new_entry(
-                &ActiveStateKey::from_state(state.clone()),
-                &ActiveStateMeta::default(),
-            )
-            .await;
+            dbtx.add_new_active_state(state.clone()).await;
 
             let notify_sender = self.inner.notifier.sender();
             let sm_updates_tx = self.inner.sm_update_tx.clone();
@@ -322,20 +310,11 @@ impl Executor {
         Vec<(DynState, InactiveStateMeta)>,
     ) {
         let mut dbtx = self.inner.db.begin_transaction_nc().await;
-        let active_states: Vec<_> = dbtx
-            .find_by_prefix(&ActiveOperationStateKeyPrefix { operation_id })
-            .await
-            .map(|(active_key, active_meta)| (active_key.state, active_meta))
-            .collect()
-            .await;
-        let inactive_states: Vec<_> = dbtx
-            .find_by_prefix(&InactiveOperationStateKeyPrefix { operation_id })
-            .await
-            .map(|(active_key, inactive_meta)| (active_key.state, inactive_meta))
-            .collect()
-            .await;
 
-        (active_states, inactive_states)
+        (
+            dbtx.get_active_operation_states(operation_id).await,
+            dbtx.get_inactive_operation_states(operation_id).await,
+        )
     }
 
     /// Starts the background thread that runs the state machines. This cannot
@@ -479,6 +458,7 @@ impl ExecutorInner {
                 f
             })
             .collect::<Vec<_>>();
+
         if transitions.is_empty() {
             // In certain cases a terminal (no transitions) state could get here due to
             // module bug. Inactivate it to prevent accumulation of such states.
@@ -491,11 +471,11 @@ impl ExecutorInner {
                 .autocommit::<_, _, anyhow::Error>(
                     |dbtx, _| {
                         Box::pin(async {
-                            let k = InactiveStateKey::from_state(state.clone());
-                            let v = ActiveStateMeta::default().into_inactive();
-                            dbtx.remove_entry(&ActiveStateKey::from_state(state.clone()))
-                                .await;
-                            dbtx.insert_entry(&k, &v).await;
+                            dbtx.mark_state_inactive(
+                                state.clone(),
+                                &ActiveStateMeta::default().into_inactive(),
+                            )
+                            .await;
                             Ok(())
                         })
                     },
@@ -662,15 +642,7 @@ impl ExecutorInner {
                                                     state.clone(),
                                                 )
                                                 .await;
-                                                dbtx.remove_entry(&ActiveStateKey::from_state(
-                                                    state.clone(),
-                                                ))
-                                                .await;
-                                                dbtx.insert_entry(
-                                                    &InactiveStateKey::from_state(state.clone()),
-                                                    &meta.into_inactive(),
-                                                )
-                                                .await;
+                                                dbtx.mark_state_inactive(state.clone(), &meta.into_inactive()).await;
 
                                                 let context = &module_contexts
                                                     .get(&state.module_instance_id())
@@ -685,23 +657,18 @@ impl ExecutorInner {
                                                 let is_terminal = new_state.is_terminal(context, &global_context);
 
                                                 if is_terminal {
-                                                    let k = InactiveStateKey::from_state(
-                                                        new_state.clone(),
-                                                    );
-                                                    let v = ActiveStateMeta::default().into_inactive();
-                                                    dbtx.insert_entry(&k, &v).await;
+                                                    dbtx.insert_entry(
+                                                        &InactiveStateKey::from_state(new_state.clone()),
+                                                        &ActiveStateMeta::default().into_inactive()
+                                                    ).await;
                                                     Ok(ActiveOrInactiveState::Inactive {
                                                         dyn_state: new_state,
                                                     })
                                                 } else {
-                                                    let k = ActiveStateKey::from_state(
-                                                        new_state.clone(),
-                                                    );
-                                                    let v = ActiveStateMeta::default();
-                                                    dbtx.insert_entry(&k, &v).await;
+                                                    let meta = dbtx.add_new_active_state(new_state.clone()).await;
                                                     Ok(ActiveOrInactiveState::Active {
                                                         dyn_state: new_state,
-                                                        meta: v,
+                                                        meta,
                                                     })
                                                 }
                                             })

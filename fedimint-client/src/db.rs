@@ -25,10 +25,11 @@ use crate::backup::{ClientBackup, Metadata};
 use crate::module::recovery::RecoveryProgress;
 use crate::oplog::OperationLogEntry;
 use crate::sm::executor::{
-    ActiveStateKeyBytes, ActiveStateKeyPrefixBytes, InactiveStateKeyBytes,
+    ActiveOperationStateKeyPrefix, ActiveStateKey, ActiveStateKeyBytes, ActiveStateKeyPrefixBytes,
+    InactiveOperationStateKeyPrefix, InactiveStateKey, InactiveStateKeyBytes,
     InactiveStateKeyPrefixBytes,
 };
-use crate::sm::{ActiveStateMeta, InactiveStateMeta};
+use crate::sm::{ActiveStateMeta, DynState, InactiveStateMeta};
 
 #[repr(u8)]
 #[derive(Clone, EnumIter, Debug)]
@@ -526,10 +527,12 @@ pub async fn apply_migrations_client(
             kind,
             "Migrating client module database"
         );
-        let mut active_states =
-            get_active_states(&mut global_dbtx.to_ref_nc(), module_instance_id).await;
-        let mut inactive_states =
-            get_inactive_states(&mut global_dbtx.to_ref_nc(), module_instance_id).await;
+        let mut active_states = global_dbtx
+            .get_active_states_for_module(module_instance_id)
+            .await;
+        let mut inactive_states = global_dbtx
+            .get_inactive_states_for_module(module_instance_id)
+            .await;
 
         while current_version < target_version {
             let new_states = if let Some(migration) = migrations.get(&current_version) {
@@ -560,20 +563,20 @@ pub async fn apply_migrations_client(
             // If the client migration returned new states, a state machine migration has
             // occurred, and the new states need to be persisted to the database.
             if let Some((new_active_states, new_inactive_states)) = new_states {
-                remove_old_and_persist_new_active_states(
-                    &mut global_dbtx.to_ref_nc(),
-                    new_active_states.clone(),
-                    active_states.clone(),
-                    module_instance_id,
-                )
-                .await;
-                remove_old_and_persist_new_inactive_states(
-                    &mut global_dbtx.to_ref_nc(),
-                    new_inactive_states.clone(),
-                    inactive_states.clone(),
-                    module_instance_id,
-                )
-                .await;
+                global_dbtx
+                    .remove_old_and_persist_new_active_states(
+                        new_active_states.clone(),
+                        active_states.clone(),
+                        module_instance_id,
+                    )
+                    .await;
+                global_dbtx
+                    .remove_old_and_persist_new_inactive_states(
+                        new_inactive_states.clone(),
+                        inactive_states.clone(),
+                        module_instance_id,
+                    )
+                    .await;
 
                 // the new states become the old states for the next migration
                 active_states = new_active_states;
@@ -598,118 +601,220 @@ pub async fn apply_migrations_client(
     Ok(())
 }
 
-/// Reads all active states from the database and returns `Vec<DynState>`.
-/// TODO: It is unfortunate that we can't read states by the module's instance
-/// id so we are forced to return all active states. Once we do a db migration
-/// to add `module_instance_id` to `ActiveStateKey`, this can be improved to
-/// only read the module's relevant states.
-pub async fn get_active_states(
-    dbtx: &mut DatabaseTransaction<'_>,
-    module_instance_id: ModuleInstanceId,
-) -> Vec<(Vec<u8>, OperationId)> {
-    dbtx.find_by_prefix(&ActiveStateKeyPrefixBytes)
-        .await
-        .filter_map(|(state, _)| async move {
-            if module_instance_id == state.module_instance_id {
-                Some((state.state, state.operation_id))
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>()
-        .await
+pub trait ClientDbtxNcExt {
+    async fn get_active_states_for_module(
+        &mut self,
+        module_instance_id: ModuleInstanceId,
+    ) -> Vec<(Vec<u8>, OperationId)>;
+
+    async fn get_inactive_states_for_module(
+        &mut self,
+        module_instance_id: ModuleInstanceId,
+    ) -> Vec<(Vec<u8>, OperationId)>;
+
+    async fn remove_old_and_persist_new_active_states(
+        &mut self,
+        new_active_states: Vec<(Vec<u8>, OperationId)>,
+        states_to_remove: Vec<(Vec<u8>, OperationId)>,
+        module_instance_id: ModuleInstanceId,
+    );
+
+    async fn remove_old_and_persist_new_inactive_states(
+        &mut self,
+        new_inactive_states: Vec<(Vec<u8>, OperationId)>,
+        states_to_remove: Vec<(Vec<u8>, OperationId)>,
+        module_instance_id: ModuleInstanceId,
+    );
+
+    async fn get_active_operation_states(
+        &mut self,
+        operation_id: OperationId,
+    ) -> Vec<(DynState, ActiveStateMeta)>;
+
+    async fn get_inactive_operation_states(
+        &mut self,
+        operation_id: OperationId,
+    ) -> Vec<(DynState, InactiveStateMeta)>;
+
+    async fn mark_state_inactive(&mut self, state: DynState, meta: &InactiveStateMeta);
+
+    async fn state_exists(&mut self, state: DynState) -> bool;
+
+    async fn add_new_active_state(&mut self, state: DynState) -> ActiveStateMeta;
 }
 
-/// Reads all inactive states from the database and returns `Vec<DynState>`.
-/// TODO: It is unfortunate that we can't read states by the module's instance
-/// id so we are forced to return all inactive states. Once we do a db migration
-/// to add `module_instance_id` to `InactiveStateKey`, this can be improved to
-/// only read the module's relevant states.
-pub async fn get_inactive_states(
-    dbtx: &mut DatabaseTransaction<'_>,
-    module_instance_id: ModuleInstanceId,
-) -> Vec<(Vec<u8>, OperationId)> {
-    dbtx.find_by_prefix(&InactiveStateKeyPrefixBytes)
-        .await
-        .filter_map(|(state, _)| async move {
-            if module_instance_id == state.module_instance_id {
-                Some((state.state, state.operation_id))
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>()
-        .await
-}
-
-/// Persists new active states by first removing all current active states, and
-/// re-writing with the new set of active states. `new_active_states` is
-/// expected to contain all active states, not just the newly created states.
-pub async fn remove_old_and_persist_new_active_states(
-    dbtx: &mut DatabaseTransaction<'_>,
-    new_active_states: Vec<(Vec<u8>, OperationId)>,
-    states_to_remove: Vec<(Vec<u8>, OperationId)>,
-    module_instance_id: ModuleInstanceId,
-) {
-    // Remove all existing active states
-    for (bytes, operation_id) in states_to_remove {
-        dbtx.remove_entry(&ActiveStateKeyBytes {
-            operation_id,
-            module_instance_id,
-            state: bytes,
-        })
-        .await
-        .expect("Did not delete anything");
+impl<Cap: Send> ClientDbtxNcExt for DatabaseTransaction<'_, Cap> {
+    /// Reads all active states from the database and returns `Vec<DynState>`.
+    /// TODO: It is unfortunate that we can't read states by the module's
+    /// instance id so we are forced to return all active states. Once we do
+    /// a db migration to add `module_instance_id` to `ActiveStateKey`, this
+    /// can be improved to only read the module's relevant states.
+    async fn get_active_states_for_module(
+        &mut self,
+        module_instance_id: ModuleInstanceId,
+    ) -> Vec<(Vec<u8>, OperationId)> {
+        self.find_by_prefix(&ActiveStateKeyPrefixBytes)
+            .await
+            .filter_map(|(state, _)| async move {
+                if module_instance_id == state.module_instance_id {
+                    Some((state.state, state.operation_id))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .await
     }
 
-    // Insert new "migrated" active states
-    for (bytes, operation_id) in new_active_states {
-        dbtx.insert_new_entry(
-            &ActiveStateKeyBytes {
+    /// Reads all inactive states from the database and returns `Vec<DynState>`.
+    /// TODO: It is unfortunate that we can't read states by the module's
+    /// instance id so we are forced to return all inactive states. Once we
+    /// do a db migration to add `module_instance_id` to `InactiveStateKey`,
+    /// this can be improved to only read the module's relevant states.
+    async fn get_inactive_states_for_module(
+        &mut self,
+        module_instance_id: ModuleInstanceId,
+    ) -> Vec<(Vec<u8>, OperationId)> {
+        self.find_by_prefix(&InactiveStateKeyPrefixBytes)
+            .await
+            .filter_map(|(state, _)| async move {
+                if module_instance_id == state.module_instance_id {
+                    Some((state.state, state.operation_id))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .await
+    }
+
+    /// Persists new active states by first removing all current active states,
+    /// and re-writing with the new set of active states.
+    /// `new_active_states` is expected to contain all active states, not
+    /// just the newly created states.
+    async fn remove_old_and_persist_new_active_states(
+        &mut self,
+        new_active_states: Vec<(Vec<u8>, OperationId)>,
+        states_to_remove: Vec<(Vec<u8>, OperationId)>,
+        module_instance_id: ModuleInstanceId,
+    ) {
+        // Remove all existing active states
+        for (bytes, operation_id) in states_to_remove {
+            self.remove_entry(&ActiveStateKeyBytes {
                 operation_id,
                 module_instance_id,
                 state: bytes,
-            },
-            &ActiveStateMeta::default(),
-        )
-        .await;
-    }
-}
+            })
+            .await
+            .expect("Did not delete anything");
+        }
 
-/// Persists new inactive states by first removing all current inactive states,
-/// and re-writing with the new set of inactive states. `new_inactive_states` is
-/// expected to contain all inactive states, not just the newly created states.
-pub async fn remove_old_and_persist_new_inactive_states(
-    dbtx: &mut DatabaseTransaction<'_>,
-    new_inactive_states: Vec<(Vec<u8>, OperationId)>,
-    states_to_remove: Vec<(Vec<u8>, OperationId)>,
-    module_instance_id: ModuleInstanceId,
-) {
-    // Remove all existing active states
-    for (bytes, operation_id) in states_to_remove {
-        dbtx.remove_entry(&InactiveStateKeyBytes {
-            operation_id,
-            module_instance_id,
-            state: bytes,
-        })
-        .await
-        .expect("Did not delete anything");
+        // Insert new "migrated" active states
+        for (bytes, operation_id) in new_active_states {
+            self.insert_new_entry(
+                &ActiveStateKeyBytes {
+                    operation_id,
+                    module_instance_id,
+                    state: bytes,
+                },
+                &ActiveStateMeta::default(),
+            )
+            .await;
+        }
     }
 
-    // Insert new "migrated" inactive states
-    for (bytes, operation_id) in new_inactive_states {
-        dbtx.insert_new_entry(
-            &InactiveStateKeyBytes {
+    /// Persists new inactive states by first removing all current inactive
+    /// states, and re-writing with the new set of inactive states.
+    /// `new_inactive_states` is expected to contain all inactive states,
+    /// not just the newly created states.
+    async fn remove_old_and_persist_new_inactive_states(
+        &mut self,
+        new_inactive_states: Vec<(Vec<u8>, OperationId)>,
+        states_to_remove: Vec<(Vec<u8>, OperationId)>,
+        module_instance_id: ModuleInstanceId,
+    ) {
+        // Remove all existing active states
+        for (bytes, operation_id) in states_to_remove {
+            self.remove_entry(&InactiveStateKeyBytes {
                 operation_id,
                 module_instance_id,
                 state: bytes,
-            },
-            &InactiveStateMeta {
-                created_at: fedimint_core::time::now(),
-                exited_at: fedimint_core::time::now(),
-            },
-        )
-        .await;
+            })
+            .await
+            .expect("Did not delete anything");
+        }
+
+        // Insert new "migrated" inactive states
+        for (bytes, operation_id) in new_inactive_states {
+            self.insert_new_entry(
+                &InactiveStateKeyBytes {
+                    operation_id,
+                    module_instance_id,
+                    state: bytes,
+                },
+                &InactiveStateMeta {
+                    created_at: fedimint_core::time::now(),
+                    exited_at: fedimint_core::time::now(),
+                },
+            )
+            .await;
+        }
+    }
+
+    /// Returns all active states for the given operation id.
+    async fn get_active_operation_states(
+        &mut self,
+        operation_id: OperationId,
+    ) -> Vec<(DynState, ActiveStateMeta)> {
+        self.find_by_prefix(&ActiveOperationStateKeyPrefix { operation_id })
+            .await
+            .map(|(active_key, active_meta)| (active_key.state, active_meta))
+            .collect()
+            .await
+    }
+
+    /// Returns all inactive states for the given operation id.
+    async fn get_inactive_operation_states(
+        &mut self,
+        operation_id: OperationId,
+    ) -> Vec<(DynState, InactiveStateMeta)> {
+        self.find_by_prefix(&InactiveOperationStateKeyPrefix { operation_id })
+            .await
+            .map(|(active_key, inactive_meta)| (active_key.state, inactive_meta))
+            .collect()
+            .await
+    }
+
+    /// Removes the active state from the database and inserts it as an inactive
+    /// state.
+    async fn mark_state_inactive(&mut self, state: DynState, meta: &InactiveStateMeta) {
+        self.remove_entry(&ActiveStateKey::from_state(state.clone()))
+            .await;
+        self.insert_entry(&InactiveStateKey::from_state(state), meta)
+            .await;
+    }
+
+    /// Checks if the state exists in the database, whether it is active or
+    /// inactive.
+    async fn state_exists(&mut self, state: DynState) -> bool {
+        let is_active_state = self
+            .get_value(&ActiveStateKey::from_state(state.clone()))
+            .await
+            .is_some();
+        let is_inactive_state = self
+            .get_value(&InactiveStateKey::from_state(state))
+            .await
+            .is_some();
+
+        is_active_state || is_inactive_state
+    }
+
+    /// Adds a new active state to the database.
+    async fn add_new_active_state(&mut self, state: DynState) -> ActiveStateMeta {
+        let meta = ActiveStateMeta::default();
+        self.insert_new_entry(&ActiveStateKey::from_state(state), &meta)
+            .await;
+        meta
     }
 }
 
