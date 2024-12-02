@@ -8,9 +8,10 @@ use std::time::SystemTime;
 
 use anyhow::anyhow;
 use fedimint_core::core::{IntoDynInstance, ModuleInstanceId, OperationId};
+#[cfg(test)]
+use fedimint_core::db::AutocommitError;
 use fedimint_core::db::{
-    AutocommitError, Database, DatabaseKeyWithNotify, DatabaseTransaction,
-    IDatabaseTransactionOpsCoreTyped,
+    Database, DatabaseKeyWithNotify, DatabaseTransaction, IDatabaseTransactionOpsCoreTyped,
 };
 use fedimint_core::encoding::{Decodable, DecodeError, Encodable};
 use fedimint_core::fmt_utils::AbbreviateJson;
@@ -28,11 +29,10 @@ use tracing::{debug, error, info, trace, warn, Instrument};
 use super::state::StateTransitionFunction;
 use crate::sm::notifier::Notifier;
 use crate::sm::state::{DynContext, DynState};
-use crate::sm::{ClientSMDatabaseTransaction, State, StateTransition};
+#[cfg(test)]
+use crate::sm::State;
+use crate::sm::{ClientSMDatabaseTransaction, StateTransition};
 use crate::{AddStateMachinesError, AddStateMachinesResult, DynGlobalClientContext};
-
-/// After how many attempts a DB transaction is aborted with an error
-const MAX_DB_ATTEMPTS: Option<usize> = Some(100);
 
 pub type ContextGen =
     Arc<maybe_add_send_sync!(dyn Fn(ModuleInstanceId, OperationId) -> DynGlobalClientContext)>;
@@ -165,7 +165,11 @@ impl Executor {
     ///
     /// **Attention**: do not use before background task is started!
     // TODO: remove warning once finality is an inherent state attribute
-    pub async fn add_state_machines(&self, states: Vec<DynState>) -> anyhow::Result<()> {
+    #[cfg(test)]
+    async fn add_state_machines(&self, states: Vec<DynState>) -> anyhow::Result<()> {
+        /// After how many attempts a DB transaction is aborted with an error
+        const MAX_DB_ATTEMPTS: Option<usize> = Some(100);
+
         self.inner
             .db
             .autocommit(
@@ -262,15 +266,10 @@ impl Executor {
         Ok(())
     }
 
-    /// **Mostly used for testing**
-    ///
     /// Check if state exists in the database as part of an actively running
     /// state machine.
-    pub async fn contains_active_state<S: State>(
-        &self,
-        instance: ModuleInstanceId,
-        state: S,
-    ) -> bool {
+    #[cfg(test)]
+    async fn contains_active_state<S: State>(&self, instance: ModuleInstanceId, state: S) -> bool {
         let state = DynState::from_typed(instance, state);
         self.inner
             .get_active_states()
@@ -280,13 +279,13 @@ impl Executor {
     }
 
     // TODO: unify querying fns
-    /// **Mostly used for testing**
     ///
     /// Check if state exists in the database as inactive. If the state is
     /// terminal it means the corresponding state machine finished its
     /// execution. If the state is non-terminal it means the state machine was
     /// in that state at some point but moved on since then.
-    pub async fn contains_inactive_state<S: State>(
+    #[cfg(test)]
+    async fn contains_inactive_state<S: State>(
         &self,
         instance: ModuleInstanceId,
         state: S,
@@ -297,20 +296,6 @@ impl Executor {
             .await
             .into_iter()
             .any(|(s, _)| s == state)
-    }
-
-    pub async fn await_inactive_state(&self, state: DynState) -> InactiveStateMeta {
-        self.inner
-            .db
-            .wait_key_exists(&InactiveStateKey::from_state(state))
-            .await
-    }
-
-    pub async fn await_active_state(&self, state: DynState) -> ActiveStateMeta {
-        self.inner
-            .db
-            .wait_key_exists(&ActiveStateKey::from_state(state))
-            .await
     }
 
     /// Only meant for debug tooling
@@ -809,6 +794,7 @@ impl ExecutorInner {
             .await
     }
 
+    #[cfg(test)]
     async fn get_inactive_states(&self) -> Vec<(DynState, InactiveStateMeta)> {
         self.db
             .begin_transaction_nc()
@@ -903,13 +889,13 @@ impl ExecutorBuilder {
 #[derive(Debug)]
 pub struct ActiveStateKey {
     // TODO: remove redundant operation id from state trait
-    pub operation_id: OperationId,
+    operation_id: OperationId,
     // TODO: state being a key... seems ... risky?
     pub state: DynState,
 }
 
 impl ActiveStateKey {
-    pub fn from_state(state: DynState) -> ActiveStateKey {
+    fn from_state(state: DynState) -> ActiveStateKey {
         ActiveStateKey {
             operation_id: state.operation_id(),
             state,
@@ -1075,24 +1061,19 @@ impl ActiveStateMeta {
 /// A past or final state of a state machine
 #[derive(Debug, Clone)]
 pub struct InactiveStateKey {
-    // TODO: remove redundant operation id from state trait
-    pub operation_id: OperationId,
     pub state: DynState,
 }
 
 impl InactiveStateKey {
     pub fn from_state(state: DynState) -> InactiveStateKey {
-        InactiveStateKey {
-            operation_id: state.operation_id(),
-            state,
-        }
+        InactiveStateKey { state }
     }
 }
 
 impl Encodable for InactiveStateKey {
     fn consensus_encode<W: Write>(&self, writer: &mut W) -> Result<usize, Error> {
         let mut len = 0;
-        len += self.operation_id.consensus_encode(writer)?;
+        len += self.state.operation_id().consensus_encode(writer)?;
         len += self.state.consensus_encode(writer)?;
         Ok(len)
     }
@@ -1103,13 +1084,10 @@ impl Decodable for InactiveStateKey {
         reader: &mut R,
         modules: &ModuleDecoderRegistry,
     ) -> Result<Self, DecodeError> {
-        let operation_id = OperationId::consensus_decode(reader, modules)?;
+        let _operation_id = OperationId::consensus_decode(reader, modules)?;
         let state = DynState::consensus_decode(reader, modules)?;
 
-        Ok(InactiveStateKey {
-            operation_id,
-            state,
-        })
+        Ok(InactiveStateKey { state })
     }
 }
 
