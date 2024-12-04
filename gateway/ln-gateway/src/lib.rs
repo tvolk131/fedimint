@@ -1097,19 +1097,13 @@ impl Gateway {
     }
 
     /// Handles a connection request to join a new federation. The gateway will
-    /// download the federation's client configuration, construct a new
-    /// client, registers, the gateway with the federation, and persists the
-    /// necessary config to reconstruct the client when restarting the gateway.
+    /// download the federation's client configuration, construct a new client,
+    /// register the gateway with the federation, and persist the necessary
+    /// config to reconstruct the client when restarting the gateway.
     pub async fn handle_connect_federation(
         &self,
         payload: ConnectFedPayload,
     ) -> AdminResult<FederationInfo> {
-        let GatewayState::Running { lightning_context } = self.get_state().await else {
-            return Err(AdminGatewayError::Lightning(
-                LightningRpcError::FailedToConnect,
-            ));
-        };
-
         let invite_code = InviteCode::from_str(&payload.invite_code).map_err(|e| {
             AdminGatewayError::ClientCreationError(anyhow!(format!(
                 "Invalid federation member string {e:?}"
@@ -1188,16 +1182,19 @@ impl Gateway {
 
         if self.is_running_lnv1() {
             Self::check_lnv1_federation_network(&client, gateway_config.network.0).await?;
-            client
-                .get_first_module::<GatewayClientModule>()?
-                .try_register_with_federation(
-                    // Route hints will be updated in the background
-                    Vec::new(),
-                    GW_ANNOUNCEMENT_TTL,
-                    federation_config.fees,
-                    lightning_context,
-                )
-                .await;
+
+            if let GatewayState::Running { lightning_context } = self.get_state().await {
+                client
+                    .get_first_module::<GatewayClientModule>()?
+                    .try_register_with_federation(
+                        // Route hints will be updated in the background
+                        Vec::new(),
+                        GW_ANNOUNCEMENT_TTL,
+                        federation_config.fees,
+                        lightning_context,
+                    )
+                    .await;
+            };
         }
 
         if self.is_running_lnv2() {
