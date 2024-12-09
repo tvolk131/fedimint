@@ -52,6 +52,7 @@
         (import ./nix/overlays/darwin-compile-fixes.nix)
         (import ./nix/overlays/cargo-honggfuzz.nix)
         (import ./nix/overlays/trustedcoin.nix)
+        (import ./nix/overlays/vss-java.nix)
       ];
     in
     {
@@ -60,6 +61,7 @@
         wasm-bindgen = import ./nix/overlays/wasm-bindgen.nix;
         darwin-compile-fixes = import ./nix/overlays/darwin-compile-fixes.nix;
         cargo-honggfuzz = import ./nix/overlays/cargo-honggfuzz.nix;
+        vss-java = import ./nix/overlays/vss-java.nix;
       };
 
       bundlers = bundlers.bundlers;

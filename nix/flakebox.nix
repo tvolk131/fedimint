@@ -247,6 +247,7 @@ let
         moreutils-ts
         parallel
         time
+        vss-java
       ]
       ++ builtins.attrValues { inherit (pkgs) cargo-nextest; }
       ++ [
