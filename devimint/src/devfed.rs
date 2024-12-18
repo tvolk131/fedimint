@@ -11,7 +11,7 @@ use tracing::debug;
 
 use crate::external::{
     open_channel, open_channels_between_gateways, Bitcoind, Electrs, Esplora, Lightningd, Lnd,
-    NamedGateway,
+    NamedGateway, Vss,
 };
 use crate::federation::{Client, Federation};
 use crate::gatewayd::Gatewayd;
@@ -40,6 +40,7 @@ pub struct DevFed {
     pub gw_ldk: Option<Gatewayd>,
     pub electrs: Electrs,
     pub esplora: Esplora,
+    pub vss: Vss,
 }
 
 impl DevFed {
@@ -53,6 +54,7 @@ impl DevFed {
             gw_ldk,
             electrs,
             esplora,
+            vss,
         } = self;
 
         join!(
@@ -63,6 +65,7 @@ impl DevFed {
             spawn_drop(cln),
             spawn_drop(esplora),
             spawn_drop(electrs),
+            spawn_drop(vss),
             spawn_drop(bitcoind),
         );
     }
@@ -83,6 +86,7 @@ pub struct DevJitFed {
     fed: JitArc<Federation>,
     gw_lnd: JitArc<Gatewayd>,
     gw_ldk: JitArc<Option<Gatewayd>>,
+    vss: JitArc<Vss>,
     electrs: JitArc<Electrs>,
     esplora: JitArc<Esplora>,
     start_time: std::time::SystemTime,
@@ -223,6 +227,11 @@ impl DevJitFed {
             }
         });
 
+        let vss = JitTryAnyhow::new_try({
+            let process_mgr = process_mgr.to_owned();
+            || async move { Ok(Arc::new(Vss::new(&process_mgr).await?)) }
+        });
+
         let channel_opened = JitTryAnyhow::new_try({
             let process_mgr = process_mgr.to_owned();
             let lnd = lnd.clone();
@@ -288,6 +297,7 @@ impl DevJitFed {
             fed,
             gw_lnd,
             gw_ldk,
+            vss,
             electrs,
             esplora,
             start_time,
@@ -303,6 +313,9 @@ impl DevJitFed {
     }
     pub async fn esplora(&self) -> anyhow::Result<&Esplora> {
         Ok(self.esplora.get_try().await?.deref())
+    }
+    pub async fn vss(&self) -> anyhow::Result<&Vss> {
+        Ok(self.vss.get_try().await?.deref())
     }
     pub async fn cln(&self) -> anyhow::Result<&Lightningd> {
         Ok(self.cln.get_try().await?.deref())
@@ -381,6 +394,7 @@ impl DevJitFed {
             gw_ldk: self.gw_ldk().await?.to_owned(),
             esplora: self.esplora().await?.to_owned(),
             electrs: self.electrs().await?.to_owned(),
+            vss: self.vss().await?.to_owned(),
         })
     }
 
@@ -391,6 +405,7 @@ impl DevJitFed {
             lnd,
             fed,
             gw_lnd,
+            vss,
             electrs,
             esplora,
             ..
@@ -401,6 +416,7 @@ impl DevJitFed {
             spawn_drop(fed),
             spawn_drop(lnd),
             spawn_drop(cln),
+            spawn_drop(vss),
             spawn_drop(esplora),
             spawn_drop(electrs),
             spawn_drop(bitcoind),

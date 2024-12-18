@@ -109,6 +109,9 @@ pub const FM_ELECTRS_BASE_EXECUTABLE_ENV: &str = "FM_ELECTRS_BASE_EXECUTABLE";
 // Env variable to override esplora binary set:
 pub const FM_ESPLORA_BASE_EXECUTABLE_ENV: &str = "FM_ESPLORA_BASE_EXECUTABLE";
 
+// Env variable to override vss binary set:
+pub const FM_VSS_BASE_EXECUTABLE_ENV: &str = "FM_VSS_BASE_EXECUTABLE";
+
 // Env variable to override esplora binary set:
 pub const FM_RECOVERYTOOL_BASE_EXECUTABLE_ENV: &str = "FM_RECOVERYTOOL_BASE_EXECUTABLE";
 

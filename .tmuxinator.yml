@@ -32,6 +32,8 @@ windows:
           - tail -n +0 -F $FM_LOGS_DIR/gatewayd-lnd.log
         - ldk-gw:
           - tail -n +0 -F $FM_LOGS_DIR/gatewayd-ldk.log
+        - vss:
+          - tail -n +0 -F $FM_LOGS_DIR/vss.log
   - bitcoin:
       panes:
         - bitcoind:
@@ -44,4 +46,3 @@ windows:
       panes:
         - log:
           - tail -n +0 -F $FM_LOGS_DIR/devimint-outer.log
-

@@ -1232,6 +1232,24 @@ impl Esplora {
     }
 }
 
+#[derive(Clone)]
+pub struct Vss {
+    _process: ProcessHandle,
+}
+
+impl Vss {
+    pub async fn new(process_mgr: &ProcessManager) -> Result<Self> {
+        debug!("Starting VSS");
+
+        let cmd = cmd!(crate::util::Vss);
+        let process = process_mgr.spawn_daemon("vss", cmd).await?;
+
+        debug!(target: LOG_DEVIMINT, "VSS ready");
+
+        Ok(Self { _process: process })
+    }
+}
+
 #[allow(unused)]
 pub struct ExternalDaemons {
     pub bitcoind: Bitcoind,
@@ -1239,16 +1257,18 @@ pub struct ExternalDaemons {
     pub lnd: Lnd,
     pub electrs: Electrs,
     pub esplora: Esplora,
+    pub vss: Vss,
 }
 
 pub async fn external_daemons(process_mgr: &ProcessManager) -> Result<ExternalDaemons> {
     let start_time = fedimint_core::time::now();
     let bitcoind = Bitcoind::new(process_mgr, false).await?;
-    let (cln, lnd, electrs, esplora) = tokio::try_join!(
+    let (cln, lnd, electrs, esplora, vss) = tokio::try_join!(
         Lightningd::new(process_mgr, bitcoind.clone()),
         Lnd::new(process_mgr, bitcoind.clone()),
         Electrs::new(process_mgr, bitcoind.clone()),
         Esplora::new(process_mgr, bitcoind.clone()),
+        Vss::new(process_mgr),
     )?;
     open_channel(process_mgr, &bitcoind, &cln, &lnd).await?;
     // make sure the bitcoind wallet is ready
@@ -1264,5 +1284,6 @@ pub async fn external_daemons(process_mgr: &ProcessManager) -> Result<ExternalDa
         lnd,
         electrs,
         esplora,
+        vss,
     })
 }

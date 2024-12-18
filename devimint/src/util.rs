@@ -37,6 +37,7 @@ use crate::envs::{
     FM_LIGHTNING_CLI_BASE_EXECUTABLE_ENV, FM_LIGHTNING_CLI_ENV, FM_LNCLI_BASE_EXECUTABLE_ENV,
     FM_LNCLI_ENV, FM_LND_BASE_EXECUTABLE_ENV, FM_LOAD_TEST_TOOL_BASE_EXECUTABLE_ENV,
     FM_LOGS_DIR_ENV, FM_MINT_CLIENT_ENV, FM_RECOVERYTOOL_BASE_EXECUTABLE_ENV,
+    FM_VSS_BASE_EXECUTABLE_ENV,
 };
 
 // If a binary doesn't provide a clap version, default to the first stable
@@ -584,6 +585,8 @@ const ELECTRS_FALLBACK: &str = "electrs";
 
 const ESPLORA_FALLBACK: &str = "esplora";
 
+const VSS_FALLBACK: &str = "vss";
+
 const RECOVERYTOOL_FALLBACK: &str = "fedimint-recoverytool";
 
 const FAUCET_FALLBACK: &str = "devimint-faucet";
@@ -1021,6 +1024,16 @@ impl Esplora {
         to_command(get_command_str_for_alias(
             &[FM_ESPLORA_BASE_EXECUTABLE_ENV],
             &[ESPLORA_FALLBACK],
+        ))
+    }
+}
+
+pub struct Vss;
+impl Vss {
+    pub fn cmd(self) -> Command {
+        to_command(get_command_str_for_alias(
+            &[FM_VSS_BASE_EXECUTABLE_ENV],
+            &[VSS_FALLBACK],
         ))
     }
 }
