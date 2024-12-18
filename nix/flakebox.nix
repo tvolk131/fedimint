@@ -240,6 +240,7 @@ let
         netcat
         perl
         esplora-electrs
+        vss
         procps
         which
         cargo-nextest
