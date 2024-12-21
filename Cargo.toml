@@ -32,6 +32,10 @@ members = [
     "gateway/cli",
     "gateway/integration_tests",
     "gateway/ln-gateway",
+    "modules/fedimint-dlc-client",
+    "modules/fedimint-dlc-common",
+    "modules/fedimint-dlc-server",
+    "modules/fedimint-dlc-tests",
     "modules/fedimint-dummy-client",
     "modules/fedimint-dummy-common",
     "modules/fedimint-dummy-server",
@@ -61,7 +65,7 @@ members = [
     "modules/fedimint-wallet-common",
     "modules/fedimint-wallet-server",
     "modules/fedimint-wallet-tests",
-    "utils/portalloc"
+    "utils/portalloc",
 ]
 resolver = "2"
 
@@ -117,6 +121,9 @@ fedimint-client = { path = "./fedimint-client", version = "=0.6.0-alpha" }
 fedimint-core = { path = "./fedimint-core", version = "=0.6.0-alpha" }
 fedimint-derive = { path = "./fedimint-derive", version = "=0.6.0-alpha" }
 fedimint-derive-secret = { path = "./crypto/derive-secret", version = "=0.6.0-alpha" }
+fedimint-dlc-client = { path = "./modules/fedimint-dlc-client", version = "=0.6.0-alpha" }
+fedimint-dlc-common = { path = "./modules/fedimint-dlc-common", version = "=0.6.0-alpha" }
+fedimint-dlc-server = { path = "./modules/fedimint-dlc-server", version = "=0.6.0-alpha" }
 fedimint-dummy-client = { path = "./modules/fedimint-dummy-client", version = "=0.6.0-alpha" }
 fedimint-dummy-common = { path = "./modules/fedimint-dummy-common", version = "=0.6.0-alpha" }
 fedimint-dummy-server = { path = "./modules/fedimint-dummy-server", version = "=0.6.0-alpha" }

@@ -1,0 +1,28 @@
+[package]
+name = "fedimint-dlc-server"
+version = { workspace = true }
+authors = ["The Fedimint Developers"]
+edition = "2021"
+description = "fedimint-ln is a lightning payment service module."
+license = "MIT"
+
+[lib]
+name = "fedimint_dlc_server"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+bls12_381 = { workspace = true }
+erased-serde = { workspace = true }
+fedimint-bitcoind = { workspace = true }
+fedimint-core = { workspace = true }
+fedimint-dlc-common = { workspace = true }
+fedimint-server = { workspace = true }
+futures = { workspace = true }
+group = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+strum = { workspace = true }
+strum_macros = { workspace = true }
+tpe = { workspace = true }

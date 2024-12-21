@@ -1,0 +1,30 @@
+[package]
+name = "fedimint-dlc-common"
+version = { workspace = true }
+authors = ["The Fedimint Developers"]
+edition = "2021"
+description = "fedimint-ln-common is a lightning payment service module (common types)."
+license = "MIT"
+
+[package.metadata.cargo-udeps.ignore]
+# cargo udeps can't detect that one
+normal = ["aquamarine"]
+
+[lib]
+name = "fedimint_dlc_common"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+bitcoin = { workspace = true }
+fedimint-core = { workspace = true }
+fedimint-ln-common = { workspace = true }
+group = { workspace = true }
+lightning-invoice = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tpe = { workspace = true }

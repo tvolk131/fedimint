@@ -1,0 +1,42 @@
+[package]
+name = "fedimint-dlc-client"
+version = { workspace = true }
+authors = ["The Fedimint Developers"]
+edition = "2021"
+description = "fedimint-ln is a lightning payment service module."
+license = "MIT"
+
+[package.metadata.cargo-udeps.ignore]
+# cargo udeps can't detect that one
+normal = ["aquamarine"]
+
+[features]
+default = []
+cli = ["dep:clap"]
+
+[lib]
+name = "fedimint_dlc_client"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+aquamarine = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+bitcoin = { workspace = true }
+clap = { workspace = true, optional = true }
+erased-serde = { workspace = true }
+fedimint-api-client = { workspace = true }
+fedimint-client = { workspace = true }
+fedimint-core = { workspace = true }
+fedimint-dlc-common = { workspace = true }
+futures = { workspace = true }
+itertools = { workspace = true }
+lightning-invoice = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tpe = { workspace = true }
+tracing = { workspace = true }
