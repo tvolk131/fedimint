@@ -2,7 +2,7 @@ use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::util::SafeUrl;
 use fedimint_core::{impl_db_lookup, impl_db_record, OutPoint, PeerId};
 use fedimint_dlc_common::contracts::{IncomingContract, OutgoingContract};
-use fedimint_dlc_common::{ContractId, LightningOutputOutcome};
+use fedimint_dlc_common::{ContractId, DlcOutputOutcome};
 use serde::{Deserialize, Serialize};
 use strum_macros::EnumIter;
 
@@ -92,17 +92,17 @@ impl_db_lookup!(
 pub struct OutputOutcomeKey(pub OutPoint);
 
 #[derive(Clone, Debug, Encodable, Decodable)]
-pub struct LightningOutputOutcomePrefix;
+pub struct DlcOutputOutcomePrefix;
 
 impl_db_record!(
     key = OutputOutcomeKey,
-    value = LightningOutputOutcome,
+    value = DlcOutputOutcome,
     db_prefix = DbKeyPrefix::OutputOutcome
 );
 
 impl_db_lookup!(
     key = OutputOutcomeKey,
-    query_prefix = LightningOutputOutcomePrefix
+    query_prefix = DlcOutputOutcomePrefix
 );
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]

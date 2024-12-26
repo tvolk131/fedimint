@@ -8,14 +8,12 @@ use fedimint_core::core::{IntoDynInstance, OperationId};
 use fedimint_core::util::NextOrPending as _;
 use fedimint_core::{sats, Amount};
 use fedimint_dlc_client::{
-    LightningClientInit, LightningClientModule, LightningOperationMeta, ReceiveOperationState,
-    SendOperationState, SendPaymentError,
+    DlcClientInit, DlcClientModule, DlcOperationMeta, ReceiveOperationState, SendOperationState,
+    SendPaymentError,
 };
-use fedimint_dlc_common::config::LightningGenParams;
-use fedimint_dlc_common::{
-    Bolt11InvoiceDescription, LightningInput, LightningInputV0, OutgoingWitness,
-};
-use fedimint_dlc_server::LightningInit;
+use fedimint_dlc_common::config::DlcGenParams;
+use fedimint_dlc_common::{Bolt11InvoiceDescription, DlcInput, DlcInputV0, OutgoingWitness};
+use fedimint_dlc_server::DlcInit;
 use fedimint_dummy_client::{DummyClientInit, DummyClientModule};
 use fedimint_dummy_common::config::DummyGenParams;
 use fedimint_dummy_server::DummyInit;
@@ -30,11 +28,11 @@ fn fixtures() -> Fixtures {
     let bitcoin_server = fixtures.bitcoin_server();
 
     fixtures.with_module(
-        LightningClientInit {
+        DlcClientInit {
             gateway_conn: Arc::new(MockGatewayConnection::default()),
         },
-        LightningInit,
-        LightningGenParams::regtest(bitcoin_server.clone()),
+        DlcInit,
+        DlcGenParams::regtest(bitcoin_server.clone()),
     )
 }
 
@@ -56,20 +54,20 @@ async fn can_pay_external_invoice_exactly_once() -> anyhow::Result<()> {
     let invoice = mock::payable_invoice();
 
     let operation_id = client
-        .get_first_module::<LightningClientModule>()?
+        .get_first_module::<DlcClientModule>()?
         .send(invoice.clone(), Some(gateway_api.clone()), Value::Null)
         .await?;
 
     assert_eq!(
         client
-            .get_first_module::<LightningClientModule>()?
+            .get_first_module::<DlcClientModule>()?
             .send(invoice.clone(), Some(gateway_api.clone()), Value::Null)
             .await,
         Err(SendPaymentError::PendingPreviousPayment(operation_id)),
     );
 
     let mut sub = client
-        .get_first_module::<LightningClientModule>()?
+        .get_first_module::<DlcClientModule>()?
         .subscribe_send_operation_state_updates(operation_id)
         .await?
         .into_stream();
@@ -80,7 +78,7 @@ async fn can_pay_external_invoice_exactly_once() -> anyhow::Result<()> {
 
     assert_eq!(
         client
-            .get_first_module::<LightningClientModule>()?
+            .get_first_module::<DlcClientModule>()?
             .send(invoice, Some(gateway_api), Value::Null)
             .await,
         Err(SendPaymentError::SuccessfulPreviousPayment(operation_id)),
@@ -104,7 +102,7 @@ async fn refund_failed_payment() -> anyhow::Result<()> {
     client.await_primary_module_output(op, outpoint).await?;
 
     let operation_id = client
-        .get_first_module::<LightningClientModule>()?
+        .get_first_module::<DlcClientModule>()?
         .send(
             mock::unpayable_invoice(),
             Some(mock::gateway()),
@@ -113,7 +111,7 @@ async fn refund_failed_payment() -> anyhow::Result<()> {
         .await?;
 
     let mut sub = client
-        .get_first_module::<LightningClientModule>()?
+        .get_first_module::<DlcClientModule>()?
         .subscribe_send_operation_state_updates(operation_id)
         .await?
         .into_stream();
@@ -141,12 +139,12 @@ async fn unilateral_refund_of_outgoing_contracts() -> anyhow::Result<()> {
     client.await_primary_module_output(op, outpoint).await?;
 
     let operation_id = client
-        .get_first_module::<LightningClientModule>()?
+        .get_first_module::<DlcClientModule>()?
         .send(mock::crash_invoice(), Some(mock::gateway()), Value::Null)
         .await?;
 
     let mut sub = client
-        .get_first_module::<LightningClientModule>()?
+        .get_first_module::<DlcClientModule>()?
         .subscribe_send_operation_state_updates(operation_id)
         .await?
         .into_stream();
@@ -177,12 +175,12 @@ async fn claiming_outgoing_contract_triggers_success() -> anyhow::Result<()> {
     client.await_primary_module_output(op, outpoint).await?;
 
     let operation_id = client
-        .get_first_module::<LightningClientModule>()?
+        .get_first_module::<DlcClientModule>()?
         .send(mock::crash_invoice(), Some(mock::gateway()), Value::Null)
         .await?;
 
     let mut sub = client
-        .get_first_module::<LightningClientModule>()?
+        .get_first_module::<DlcClientModule>()?
         .subscribe_send_operation_state_updates(operation_id)
         .await?
         .into_stream();
@@ -196,13 +194,13 @@ async fn claiming_outgoing_contract_triggers_success() -> anyhow::Result<()> {
         .await
         .ok_or(anyhow::anyhow!("Operation not found"))?;
 
-    let contract = match operation.meta::<LightningOperationMeta>() {
-        LightningOperationMeta::Send(send_operation_meta) => send_operation_meta.contract,
-        LightningOperationMeta::Receive(..) => panic!("Operation Meta is a Receive variant"),
+    let contract = match operation.meta::<DlcOperationMeta>() {
+        DlcOperationMeta::Send(send_operation_meta) => send_operation_meta.contract,
+        DlcOperationMeta::Receive(..) => panic!("Operation Meta is a Receive variant"),
     };
 
-    let client_input = ClientInput::<LightningInput> {
-        input: LightningInput::V0(LightningInputV0::Outgoing(
+    let client_input = ClientInput::<DlcInput> {
+        input: DlcInput::V0(DlcInputV0::Outgoing(
             contract.contract_id(),
             OutgoingWitness::Claim(MOCK_INVOICE_PREIMAGE),
         )),
@@ -210,9 +208,7 @@ async fn claiming_outgoing_contract_triggers_success() -> anyhow::Result<()> {
         keys: vec![mock::gateway_keypair()],
     };
 
-    let lnv2_module_id = client
-        .get_first_instance(&LightningClientModule::kind())
-        .unwrap();
+    let lnv2_module_id = client.get_first_instance(&DlcClientModule::kind()).unwrap();
 
     client
         .finalize_and_submit_transaction(
@@ -238,7 +234,7 @@ async fn receive_operation_expires() -> anyhow::Result<()> {
     let client = fed.new_client().await;
 
     let op = client
-        .get_first_module::<LightningClientModule>()?
+        .get_first_module::<DlcClientModule>()?
         .receive(
             Amount::from_sats(1000),
             5, // receive operation expires in 5 seconds
@@ -250,7 +246,7 @@ async fn receive_operation_expires() -> anyhow::Result<()> {
         .1;
 
     let mut sub = client
-        .get_first_module::<LightningClientModule>()?
+        .get_first_module::<DlcClientModule>()?
         .subscribe_receive_operation_state_updates(op)
         .await?
         .into_stream();
@@ -269,7 +265,7 @@ async fn rejects_wrong_network_invoice() -> anyhow::Result<()> {
 
     assert_eq!(
         client
-            .get_first_module::<LightningClientModule>()?
+            .get_first_module::<DlcClientModule>()?
             .send(
                 mock::signet_bolt_11_invoice(),
                 Some(mock::gateway()),

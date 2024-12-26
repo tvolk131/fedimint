@@ -3,7 +3,7 @@ name = "fedimint-dlc-client"
 version = { workspace = true }
 authors = ["The Fedimint Developers"]
 edition = "2021"
-description = "fedimint-ln is a lightning payment service module."
+description = "fedimint-dlc is a module for Discreet Log Contracts."
 license = "MIT"
 
 [package.metadata.cargo-udeps.ignore]

@@ -16,7 +16,7 @@ use fedimint_dlc_common::ContractId;
 use rand::seq::SliceRandom;
 
 #[apply(async_trait_maybe_send!)]
-pub trait LightningFederationApi {
+pub trait DlcFederationApi {
     async fn consensus_block_count(&self) -> FederationResult<u64>;
 
     async fn await_incoming_contract(&self, contract_id: &ContractId, expiration: u64) -> bool;
@@ -33,7 +33,7 @@ pub trait LightningFederationApi {
 }
 
 #[apply(async_trait_maybe_send!)]
-impl<T: ?Sized> LightningFederationApi for T
+impl<T: ?Sized> DlcFederationApi for T
 where
     T: IModuleFederationApi + MaybeSend + MaybeSync + 'static,
 {

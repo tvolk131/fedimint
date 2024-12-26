@@ -2,7 +2,7 @@
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::must_use_candidate)]
 
-//! # Lightning Module
+//! # Discreet Log Contract Module
 //!
 //! This module allows to atomically and trustlessly (in the federated trust
 //! model) interact with the Lightning network through a Lightning gateway.
@@ -16,7 +16,7 @@ pub mod gateway_api;
 
 use bitcoin::hashes::sha256;
 use bitcoin::secp256k1::schnorr::Signature;
-use config::LightningClientConfig;
+use config::DlcClientConfig;
 use fedimint_core::core::{Decoder, ModuleInstanceId, ModuleKind};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::{CommonModuleInit, ModuleCommon, ModuleConsensusVersion};
@@ -39,20 +39,16 @@ pub enum LightningInvoice {
     Bolt11(Bolt11Invoice),
 }
 
-pub const KIND: ModuleKind = ModuleKind::from_static_str("lnv2");
+pub const KIND: ModuleKind = ModuleKind::from_static_str("dlc");
 pub const MODULE_CONSENSUS_VERSION: ModuleConsensusVersion = ModuleConsensusVersion::new(1, 0);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]
 pub struct ContractId(pub sha256::Hash);
 
-extensible_associated_module_type!(
-    LightningInput,
-    LightningInputV0,
-    UnknownLightningInputVariantError
-);
+extensible_associated_module_type!(DlcInput, DlcInputV0, UnknownDlcInputVariantError);
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]
-pub enum LightningInputV0 {
+pub enum DlcInputV0 {
     Outgoing(ContractId, OutgoingWitness),
     Incoming(ContractId, AggregateDecryptionKey),
 }
@@ -64,53 +60,49 @@ pub enum OutgoingWitness {
     Cancel(Signature),
 }
 
-impl std::fmt::Display for LightningInputV0 {
+impl std::fmt::Display for DlcInputV0 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "LightningInputV0",)
+        write!(f, "DlcInputV0",)
     }
 }
 
-extensible_associated_module_type!(
-    LightningOutput,
-    LightningOutputV0,
-    UnknownLightningOutputVariantError
-);
+extensible_associated_module_type!(DlcOutput, DlcOutputV0, UnknownDlcOutputVariantError);
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]
-pub enum LightningOutputV0 {
+pub enum DlcOutputV0 {
     Outgoing(OutgoingContract),
     Incoming(IncomingContract),
 }
 
-impl std::fmt::Display for LightningOutputV0 {
+impl std::fmt::Display for DlcOutputV0 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "LightningOutputV0")
+        write!(f, "DlcOutputV0")
     }
 }
 
 extensible_associated_module_type!(
-    LightningOutputOutcome,
-    LightningOutputOutcomeV0,
-    UnknownLightningOutputOutcomeVariantError
+    DlcOutputOutcome,
+    DlcOutputOutcomeV0,
+    UnknownDlcOutputOutcomeVariantError
 );
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]
-pub enum LightningOutputOutcomeV0 {
+pub enum DlcOutputOutcomeV0 {
     Outgoing,
     Incoming(DecryptionKeyShare),
 }
 
-impl std::fmt::Display for LightningOutputOutcomeV0 {
+impl std::fmt::Display for DlcOutputOutcomeV0 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "LightningOutputOutcomeV0")
+        write!(f, "DlcOutputOutcomeV0")
     }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Error, Encodable, Decodable)]
-pub enum LightningInputError {
-    #[error("The lightning input version is not supported by this federation")]
-    UnknownInputVariant(#[from] UnknownLightningInputVariantError),
+pub enum DlcInputError {
+    #[error("The dlc input version is not supported by this federation")]
+    UnknownInputVariant(#[from] UnknownDlcInputVariantError),
     #[error("No contract found for given ContractId")]
     UnknownContract,
     #[error("The preimage is invalid")]
@@ -126,9 +118,9 @@ pub enum LightningInputError {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Error, Encodable, Decodable)]
-pub enum LightningOutputError {
-    #[error("The lightning input version is not supported by this federation")]
-    UnknownOutputVariant(#[from] UnknownLightningOutputVariantError),
+pub enum DlcOutputError {
+    #[error("The dlc output version is not supported by this federation")]
+    UnknownOutputVariant(#[from] UnknownDlcOutputVariantError),
     #[error("The contract is invalid")]
     InvalidContract,
     #[error("The contract is expired")]
@@ -138,7 +130,7 @@ pub enum LightningOutputError {
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Encodable, Decodable, Serialize, Deserialize)]
-pub enum LightningConsensusItem {
+pub enum DlcConsensusItem {
     BlockCountVote(u64),
     UnixTimeVote(u64),
     #[encodable_default]
@@ -148,36 +140,36 @@ pub enum LightningConsensusItem {
     },
 }
 
-impl std::fmt::Display for LightningConsensusItem {
+impl std::fmt::Display for DlcConsensusItem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "LightningConsensusItem")
+        write!(f, "DlcConsensusItem")
     }
 }
 
 #[derive(Debug)]
-pub struct LightningCommonInit;
+pub struct DlcCommonInit;
 
-impl CommonModuleInit for LightningCommonInit {
+impl CommonModuleInit for DlcCommonInit {
     const CONSENSUS_VERSION: ModuleConsensusVersion = MODULE_CONSENSUS_VERSION;
     const KIND: ModuleKind = KIND;
 
-    type ClientConfig = LightningClientConfig;
+    type ClientConfig = DlcClientConfig;
 
     fn decoder() -> Decoder {
-        LightningModuleTypes::decoder()
+        DlcModuleTypes::decoder()
     }
 }
 
-pub struct LightningModuleTypes;
+pub struct DlcModuleTypes;
 
 plugin_types_trait_impl_common!(
     KIND,
-    LightningModuleTypes,
-    LightningClientConfig,
-    LightningInput,
-    LightningOutput,
-    LightningOutputOutcome,
-    LightningConsensusItem,
-    LightningInputError,
-    LightningOutputError
+    DlcModuleTypes,
+    DlcClientConfig,
+    DlcInput,
+    DlcOutput,
+    DlcOutputOutcome,
+    DlcConsensusItem,
+    DlcInputError,
+    DlcOutputError
 );

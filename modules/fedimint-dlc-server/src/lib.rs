@@ -30,8 +30,7 @@ use fedimint_core::{
     apply, async_trait_maybe_send, push_db_pair_items, NumPeersExt, OutPoint, PeerId, ServerModule,
 };
 use fedimint_dlc_common::config::{
-    LightningClientConfig, LightningConfig, LightningConfigConsensus, LightningConfigLocal,
-    LightningConfigPrivate, LightningGenParams,
+    DlcClientConfig, DlcConfig, DlcConfigConsensus, DlcConfigLocal, DlcConfigPrivate, DlcGenParams,
 };
 use fedimint_dlc_common::contracts::{IncomingContract, OutgoingContract};
 use fedimint_dlc_common::endpoint_constants::{
@@ -40,10 +39,9 @@ use fedimint_dlc_common::endpoint_constants::{
     REMOVE_GATEWAY_ENDPOINT,
 };
 use fedimint_dlc_common::{
-    ContractId, LightningCommonInit, LightningConsensusItem, LightningInput, LightningInputError,
-    LightningInputV0, LightningModuleTypes, LightningOutput, LightningOutputError,
-    LightningOutputOutcome, LightningOutputOutcomeV0, LightningOutputV0, OutgoingWitness,
-    MODULE_CONSENSUS_VERSION,
+    ContractId, DlcCommonInit, DlcConsensusItem, DlcInput, DlcInputError, DlcInputV0,
+    DlcModuleTypes, DlcOutput, DlcOutputError, DlcOutputOutcome, DlcOutputOutcomeV0, DlcOutputV0,
+    OutgoingWitness, MODULE_CONSENSUS_VERSION,
 };
 use fedimint_server::config::distributedgen::{evaluate_polynomial_g1, PeerHandleOps};
 use fedimint_server::net::api::check_auth;
@@ -55,25 +53,24 @@ use strum::IntoEnumIterator;
 use tpe::{AggregatePublicKey, PublicKeyShare, SecretKeyShare};
 
 use crate::db::{
-    BlockCountVoteKey, BlockCountVotePrefix, DbKeyPrefix, GatewayKey, GatewayPrefix,
-    IncomingContractKey, IncomingContractPrefix, LightningOutputOutcomePrefix, OutgoingContractKey,
+    BlockCountVoteKey, BlockCountVotePrefix, DbKeyPrefix, DlcOutputOutcomePrefix, GatewayKey,
+    GatewayPrefix, IncomingContractKey, IncomingContractPrefix, OutgoingContractKey,
     OutgoingContractPrefix, OutputOutcomeKey, PreimageKey, PreimagePrefix, UnixTimeVoteKey,
     UnixTimeVotePrefix,
 };
 
 #[derive(Debug, Clone)]
-pub struct LightningInit;
+pub struct DlcInit;
 
-impl ModuleInit for LightningInit {
-    type Common = LightningCommonInit;
+impl ModuleInit for DlcInit {
+    type Common = DlcCommonInit;
 
     async fn dump_database(
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
         prefix_names: Vec<String>,
     ) -> Box<dyn Iterator<Item = (String, Box<dyn erased_serde::Serialize + Send>)> + '_> {
-        let mut lightning: BTreeMap<String, Box<dyn erased_serde::Serialize + Send>> =
-            BTreeMap::new();
+        let mut dlc: BTreeMap<String, Box<dyn erased_serde::Serialize + Send>> = BTreeMap::new();
 
         let filtered_prefixes = DbKeyPrefix::iter().filter(|f| {
             prefix_names.is_empty() || prefix_names.contains(&f.to_string().to_lowercase())
@@ -87,8 +84,8 @@ impl ModuleInit for LightningInit {
                         BlockCountVotePrefix,
                         BlockCountVoteKey,
                         u64,
-                        lightning,
-                        "Lightning Block Count Votes"
+                        dlc,
+                        "Dlc Block Count Votes"
                     );
                 }
                 DbKeyPrefix::UnixTimeVote => {
@@ -97,70 +94,63 @@ impl ModuleInit for LightningInit {
                         UnixTimeVotePrefix,
                         UnixTimeVoteKey,
                         u64,
-                        lightning,
-                        "Lightning Unix Time Votes"
+                        dlc,
+                        "Dlc Unix Time Votes"
                     );
                 }
                 DbKeyPrefix::OutgoingContract => {
                     push_db_pair_items!(
                         dbtx,
                         OutgoingContractPrefix,
-                        LightningOutgoingContractKey,
+                        DlcOutgoingContractKey,
                         OutgoingContract,
-                        lightning,
-                        "Lightning Outgoing Contracts"
+                        dlc,
+                        "Dlc Outgoing Contracts"
                     );
                 }
                 DbKeyPrefix::IncomingContract => {
                     push_db_pair_items!(
                         dbtx,
                         IncomingContractPrefix,
-                        LightningIncomingContractKey,
+                        DlcIncomingContractKey,
                         IncomingContract,
-                        lightning,
-                        "Lightning Incoming Contracts"
+                        dlc,
+                        "Dlc Incoming Contracts"
                     );
                 }
                 DbKeyPrefix::OutputOutcome => {
                     push_db_pair_items!(
                         dbtx,
-                        LightningOutputOutcomePrefix,
-                        LightningOutputOutcomeKey,
-                        LightningOutputOutcome,
-                        lightning,
-                        "Lightning Output Outcomes"
+                        DlcOutputOutcomePrefix,
+                        DlcOutputOutcomeKey,
+                        DlcOutputOutcome,
+                        dlc,
+                        "Dlc Output Outcomes"
                     );
                 }
                 DbKeyPrefix::Preimage => {
                     push_db_pair_items!(
                         dbtx,
                         PreimagePrefix,
-                        LightningPreimageKey,
+                        DlcPreimageKey,
                         [u8; 32],
-                        lightning,
-                        "Lightning Preimages"
+                        dlc,
+                        "Dlc Preimages"
                     );
                 }
                 DbKeyPrefix::Gateway => {
-                    push_db_pair_items!(
-                        dbtx,
-                        GatewayPrefix,
-                        GatewayKey,
-                        (),
-                        lightning,
-                        "Lightning Gateways"
-                    );
+                    push_db_pair_items!(dbtx, GatewayPrefix, GatewayKey, (), dlc, "Dlc Gateways");
                 }
             }
         }
 
-        Box::new(lightning.into_iter())
+        Box::new(dlc.into_iter())
     }
 }
 
 #[apply(async_trait_maybe_send!)]
-impl ServerModuleInit for LightningInit {
-    type Params = LightningGenParams;
+impl ServerModuleInit for DlcInit {
+    type Params = DlcGenParams;
 
     fn versions(&self, _core: CoreConsensusVersion) -> &[ModuleConsensusVersion] {
         &[MODULE_CONSENSUS_VERSION]
@@ -178,7 +168,7 @@ impl ServerModuleInit for LightningInit {
     }
 
     async fn init(&self, args: &ServerModuleInitArgs<Self>) -> anyhow::Result<DynServerModule> {
-        Ok(Lightning::new(args.cfg().to_typed()?)?.into())
+        Ok(Dlc::new(args.cfg().to_typed()?)?.into())
     }
 
     fn trusted_dealer_gen(
@@ -197,17 +187,17 @@ impl ServerModuleInit for LightningInit {
             .map(|&peer| {
                 (
                     peer,
-                    LightningConfig {
-                        local: LightningConfigLocal {
+                    DlcConfig {
+                        local: DlcConfigLocal {
                             bitcoin_rpc: params.local.bitcoin_rpc.clone(),
                         },
-                        consensus: LightningConfigConsensus {
+                        consensus: DlcConfigConsensus {
                             tpe_agg_pk,
                             tpe_pks: tpe_pks.clone(),
                             fee_consensus: params.consensus.fee_consensus.clone(),
                             network: params.consensus.network,
                         },
-                        private: LightningConfigPrivate {
+                        private: DlcConfigPrivate {
                             sk: sks[peer.to_usize()],
                         },
                     }
@@ -228,11 +218,11 @@ impl ServerModuleInit for LightningInit {
         let g1 = peers.run_dkg_g1(()).await?;
         let (poly_g1, sk) = g1[&()].clone().tpe();
 
-        let server = LightningConfig {
-            local: LightningConfigLocal {
+        let server = DlcConfig {
+            local: DlcConfigLocal {
                 bitcoin_rpc: params.local.bitcoin_rpc.clone(),
             },
-            consensus: LightningConfigConsensus {
+            consensus: DlcConfigConsensus {
                 tpe_agg_pk: tpe::AggregatePublicKey(poly_g1[0].to_affine()),
                 tpe_pks: peers
                     .peer_ids()
@@ -249,7 +239,7 @@ impl ServerModuleInit for LightningInit {
                 fee_consensus: params.consensus.fee_consensus.clone(),
                 network: params.consensus.network,
             },
-            private: LightningConfigPrivate {
+            private: DlcConfigPrivate {
                 sk: SecretKeyShare(sk),
             },
         };
@@ -258,7 +248,7 @@ impl ServerModuleInit for LightningInit {
     }
 
     fn validate_config(&self, identity: &PeerId, config: ServerModuleConfig) -> anyhow::Result<()> {
-        let config = config.to_typed::<LightningConfig>()?;
+        let config = config.to_typed::<DlcConfig>()?;
 
         ensure!(
             tpe::derive_public_key_share(&config.private.sk)
@@ -276,9 +266,9 @@ impl ServerModuleInit for LightningInit {
     fn get_client_config(
         &self,
         config: &ServerModuleConsensusConfig,
-    ) -> anyhow::Result<LightningClientConfig> {
-        let config = LightningConfigConsensus::from_erased(config)?;
-        Ok(LightningClientConfig {
+    ) -> anyhow::Result<DlcClientConfig> {
+        let config = DlcConfigConsensus::from_erased(config)?;
+        Ok(DlcClientConfig {
             tpe_agg_pk: config.tpe_agg_pk,
             tpe_pks: config.tpe_pks,
             fee_consensus: config.fee_consensus,
@@ -318,26 +308,26 @@ fn eval_polynomial(coefficients: &[Scalar], x: &Scalar) -> Scalar {
 }
 
 #[derive(Debug)]
-pub struct Lightning {
-    cfg: LightningConfig,
+pub struct Dlc {
+    cfg: DlcConfig,
     btc_rpc: DynBitcoindRpc,
 }
 
 #[apply(async_trait_maybe_send!)]
-impl ServerModule for Lightning {
-    type Common = LightningModuleTypes;
-    type Init = LightningInit;
+impl ServerModule for Dlc {
+    type Common = DlcModuleTypes;
+    type Init = DlcInit;
 
     async fn consensus_proposal(
         &self,
         _dbtx: &mut DatabaseTransaction<'_>,
-    ) -> Vec<LightningConsensusItem> {
-        let mut items = vec![LightningConsensusItem::UnixTimeVote(
+    ) -> Vec<DlcConsensusItem> {
+        let mut items = vec![DlcConsensusItem::UnixTimeVote(
             duration_since_epoch().as_secs(),
         )];
 
         if let Ok(block_count) = self.btc_rpc.get_block_count().await {
-            items.push(LightningConsensusItem::BlockCountVote(block_count));
+            items.push(DlcConsensusItem::BlockCountVote(block_count));
         }
 
         items
@@ -346,11 +336,11 @@ impl ServerModule for Lightning {
     async fn process_consensus_item<'a, 'b>(
         &'a self,
         dbtx: &mut DatabaseTransaction<'b>,
-        consensus_item: LightningConsensusItem,
+        consensus_item: DlcConsensusItem,
         peer: PeerId,
     ) -> anyhow::Result<()> {
         match consensus_item {
-            LightningConsensusItem::BlockCountVote(vote) => {
+            DlcConsensusItem::BlockCountVote(vote) => {
                 let current_vote = dbtx
                     .insert_entry(&BlockCountVoteKey(peer), &vote)
                     .await
@@ -360,7 +350,7 @@ impl ServerModule for Lightning {
 
                 Ok(())
             }
-            LightningConsensusItem::UnixTimeVote(vote) => {
+            DlcConsensusItem::UnixTimeVote(vote) => {
                 let current_vote = dbtx
                     .insert_entry(&UnixTimeVoteKey(peer), &vote)
                     .await
@@ -370,8 +360,8 @@ impl ServerModule for Lightning {
 
                 Ok(())
             }
-            LightningConsensusItem::Default { variant, .. } => Err(anyhow!(
-                "Received lnv2 consensus item with unknown variant {variant}"
+            DlcConsensusItem::Default { variant, .. } => Err(anyhow!(
+                "Received dlc consensus item with unknown variant {variant}"
             )),
         }
     }
@@ -379,25 +369,25 @@ impl ServerModule for Lightning {
     async fn process_input<'a, 'b, 'c>(
         &'a self,
         dbtx: &mut DatabaseTransaction<'c>,
-        input: &'b LightningInput,
-    ) -> Result<InputMeta, LightningInputError> {
+        input: &'b DlcInput,
+    ) -> Result<InputMeta, DlcInputError> {
         let input = input.ensure_v0_ref()?;
 
         let (pub_key, amount) = match &input {
-            LightningInputV0::Outgoing(contract_id, outgoing_witness) => {
+            DlcInputV0::Outgoing(contract_id, outgoing_witness) => {
                 let contract = dbtx
                     .remove_entry(&OutgoingContractKey(*contract_id))
                     .await
-                    .ok_or(LightningInputError::UnknownContract)?;
+                    .ok_or(DlcInputError::UnknownContract)?;
 
                 let pub_key = match outgoing_witness {
                     OutgoingWitness::Claim(preimage) => {
                         if contract.expiration <= self.consensus_block_count(dbtx).await {
-                            return Err(LightningInputError::Expired);
+                            return Err(DlcInputError::Expired);
                         }
 
                         if !contract.verify_preimage(preimage) {
-                            return Err(LightningInputError::InvalidPreimage);
+                            return Err(DlcInputError::InvalidPreimage);
                         }
 
                         dbtx.insert_entry(&PreimageKey(*contract_id), preimage)
@@ -407,14 +397,14 @@ impl ServerModule for Lightning {
                     }
                     OutgoingWitness::Refund => {
                         if contract.expiration > self.consensus_block_count(dbtx).await {
-                            return Err(LightningInputError::NotExpired);
+                            return Err(DlcInputError::NotExpired);
                         }
 
                         contract.refund_pk
                     }
                     OutgoingWitness::Cancel(forfeit_signature) => {
                         if !contract.verify_forfeit_signature(forfeit_signature) {
-                            return Err(LightningInputError::InvalidForfeitSignature);
+                            return Err(DlcInputError::InvalidForfeitSignature);
                         }
 
                         contract.refund_pk
@@ -423,16 +413,16 @@ impl ServerModule for Lightning {
 
                 (pub_key, contract.amount)
             }
-            LightningInputV0::Incoming(contract_id, agg_decryption_key) => {
+            DlcInputV0::Incoming(contract_id, agg_decryption_key) => {
                 let contract = dbtx
                     .remove_entry(&IncomingContractKey(*contract_id))
                     .await
-                    .ok_or(LightningInputError::UnknownContract)?;
+                    .ok_or(DlcInputError::UnknownContract)?;
 
                 if !contract
                     .verify_agg_decryption_key(&self.cfg.consensus.tpe_agg_pk, agg_decryption_key)
                 {
-                    return Err(LightningInputError::InvalidDecryptionKey);
+                    return Err(DlcInputError::InvalidDecryptionKey);
                 }
 
                 let pub_key = match contract.decrypt_preimage(agg_decryption_key) {
@@ -456,30 +446,30 @@ impl ServerModule for Lightning {
     async fn process_output<'a, 'b>(
         &'a self,
         dbtx: &mut DatabaseTransaction<'b>,
-        output: &'a LightningOutput,
+        output: &'a DlcOutput,
         out_point: OutPoint,
-    ) -> Result<TransactionItemAmount, LightningOutputError> {
+    ) -> Result<TransactionItemAmount, DlcOutputError> {
         let output = output.ensure_v0_ref()?;
 
         let outcome = match output {
-            LightningOutputV0::Outgoing(contract) => {
+            DlcOutputV0::Outgoing(contract) => {
                 if dbtx
                     .insert_entry(&OutgoingContractKey(contract.contract_id()), contract)
                     .await
                     .is_some()
                 {
-                    return Err(LightningOutputError::ContractAlreadyExists);
+                    return Err(DlcOutputError::ContractAlreadyExists);
                 }
 
-                LightningOutputOutcomeV0::Outgoing
+                DlcOutputOutcomeV0::Outgoing
             }
-            LightningOutputV0::Incoming(contract) => {
+            DlcOutputV0::Incoming(contract) => {
                 if !contract.verify() {
-                    return Err(LightningOutputError::InvalidContract);
+                    return Err(DlcOutputError::InvalidContract);
                 }
 
                 if contract.commitment.expiration <= self.consensus_unix_time(dbtx).await {
-                    return Err(LightningOutputError::ContractExpired);
+                    return Err(DlcOutputError::ContractExpired);
                 }
 
                 if dbtx
@@ -487,20 +477,17 @@ impl ServerModule for Lightning {
                     .await
                     .is_some()
                 {
-                    return Err(LightningOutputError::ContractAlreadyExists);
+                    return Err(DlcOutputError::ContractAlreadyExists);
                 }
 
                 let dk_share = contract.create_decryption_key_share(&self.cfg.private.sk);
 
-                LightningOutputOutcomeV0::Incoming(dk_share)
+                DlcOutputOutcomeV0::Incoming(dk_share)
             }
         };
 
         if dbtx
-            .insert_entry(
-                &OutputOutcomeKey(out_point),
-                &LightningOutputOutcome::V0(outcome),
-            )
+            .insert_entry(&OutputOutcomeKey(out_point), &DlcOutputOutcome::V0(outcome))
             .await
             .is_some()
         {
@@ -508,8 +495,8 @@ impl ServerModule for Lightning {
         }
 
         let amount = match output {
-            LightningOutputV0::Outgoing(contract) => contract.amount,
-            LightningOutputV0::Incoming(contract) => contract.commitment.amount,
+            DlcOutputV0::Outgoing(contract) => contract.amount,
+            DlcOutputV0::Incoming(contract) => contract.commitment.amount,
         };
 
         Ok(TransactionItemAmount {
@@ -522,7 +509,7 @@ impl ServerModule for Lightning {
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
         out_point: OutPoint,
-    ) -> Option<LightningOutputOutcome> {
+    ) -> Option<DlcOutputOutcome> {
         dbtx.get_value(&OutputOutcomeKey(out_point)).await
     }
 
@@ -558,7 +545,7 @@ impl ServerModule for Lightning {
             api_endpoint! {
                 CONSENSUS_BLOCK_COUNT_ENDPOINT,
                 ApiVersion::new(0, 0),
-                async |module: &Lightning, context, _params : () | -> u64 {
+                async |module: &Dlc, context, _params : () | -> u64 {
                     let db = context.db();
                     let mut dbtx = db.begin_transaction_nc().await;
 
@@ -568,7 +555,7 @@ impl ServerModule for Lightning {
             api_endpoint! {
                 AWAIT_INCOMING_CONTRACT_ENDPOINT,
                 ApiVersion::new(0, 0),
-                async |module: &Lightning, context, params: (ContractId, u64) | -> Option<ContractId> {
+                async |module: &Dlc, context, params: (ContractId, u64) | -> Option<ContractId> {
                     let db = context.db();
 
                     Ok(module.await_incoming_contract(db, params.0, params.1).await)
@@ -577,7 +564,7 @@ impl ServerModule for Lightning {
             api_endpoint! {
                 AWAIT_PREIMAGE_ENDPOINT,
                 ApiVersion::new(0, 0),
-                async |module: &Lightning, context, params: (ContractId, u64)| -> Option<[u8; 32]> {
+                async |module: &Dlc, context, params: (ContractId, u64)| -> Option<[u8; 32]> {
                     let db = context.db();
 
                     Ok(module.await_preimage(db, params.0, params.1).await)
@@ -586,7 +573,7 @@ impl ServerModule for Lightning {
             api_endpoint! {
                 OUTGOING_CONTRACT_EXPIRATION_ENDPOINT,
                 ApiVersion::new(0, 0),
-                async |module: &Lightning, context, contract_id: ContractId| -> Option<u64> {
+                async |module: &Dlc, context, contract_id: ContractId| -> Option<u64> {
                     let db = context.db();
 
                     Ok(module.outgoing_contract_expiration(db, contract_id).await)
@@ -595,43 +582,43 @@ impl ServerModule for Lightning {
             api_endpoint! {
                 ADD_GATEWAY_ENDPOINT,
                 ApiVersion::new(0, 0),
-                async |_module: &Lightning, context, gateway: SafeUrl| -> bool {
+                async |_module: &Dlc, context, gateway: SafeUrl| -> bool {
                     check_auth(context)?;
 
                     let db = context.db();
 
-                    Ok(Lightning::add_gateway(db, gateway).await)
+                    Ok(Dlc::add_gateway(db, gateway).await)
                 }
             },
             api_endpoint! {
                 REMOVE_GATEWAY_ENDPOINT,
                 ApiVersion::new(0, 0),
-                async |_module: &Lightning, context, gateway: SafeUrl| -> bool {
+                async |_module: &Dlc, context, gateway: SafeUrl| -> bool {
                     check_auth(context)?;
 
                     let db = context.db();
 
-                    Ok(Lightning::remove_gateway(db, gateway).await)
+                    Ok(Dlc::remove_gateway(db, gateway).await)
                 }
             },
             api_endpoint! {
                 GATEWAYS_ENDPOINT,
                 ApiVersion::new(0, 0),
-                async |_module: &Lightning, context, _params : () | -> Vec<SafeUrl> {
+                async |_module: &Dlc, context, _params : () | -> Vec<SafeUrl> {
                     let db = context.db();
 
-                    Ok(Lightning::gateways(db).await)
+                    Ok(Dlc::gateways(db).await)
                 }
             },
         ]
     }
 }
 
-impl Lightning {
-    fn new(cfg: LightningConfig) -> anyhow::Result<Self> {
+impl Dlc {
+    fn new(cfg: DlcConfig) -> anyhow::Result<Self> {
         let btc_rpc = create_bitcoind(&cfg.local.bitcoin_rpc)?;
 
-        Ok(Lightning { cfg, btc_rpc })
+        Ok(Dlc { cfg, btc_rpc })
     }
 
     async fn consensus_block_count(&self, dbtx: &mut DatabaseTransaction<'_>) -> u64 {

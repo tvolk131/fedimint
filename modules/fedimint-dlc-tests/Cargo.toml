@@ -3,7 +3,7 @@ name = "fedimint-dlc-tests"
 version = { workspace = true }
 authors = ["The Fedimint Developers"]
 edition = "2021"
-description = "fedimint-dlc-tests contains integration tests for the lnv2 module"
+description = "fedimint-dlc-tests contains integration tests for the dlc module"
 license = "MIT"
 publish = false
 

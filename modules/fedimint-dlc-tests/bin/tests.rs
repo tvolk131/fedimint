@@ -20,22 +20,22 @@ async fn main() -> anyhow::Result<()> {
         let gatewayd_version = util::Gatewayd::version_or_default().await;
 
         if fedimint_cli_version < *VERSION_0_5_0_ALPHA {
-            info!(%fedimint_cli_version, "Version did not support lnv2 module, skipping");
+            info!(%fedimint_cli_version, "Version did not support dlc module, skipping");
             return Ok(());
         }
 
         if fedimintd_version < *VERSION_0_5_0_ALPHA {
-            info!(%fedimintd_version, "Version did not support lnv2 module, skipping");
+            info!(%fedimintd_version, "Version did not support dlc module, skipping");
             return Ok(());
         }
 
         if gatewayd_version < *VERSION_0_5_0_ALPHA {
-            info!(%gatewayd_version, "Version did not support lnv2 module, skipping");
+            info!(%gatewayd_version, "Version did not support dlc module, skipping");
             return Ok(());
         }
 
         if is_env_var_set(FM_DEVIMINT_DISABLE_MODULE_LNV2_ENV) {
-            info!("lnv2 is disabled, skipping");
+            info!("dlc is disabled, skipping");
             return Ok(());
         }
 
@@ -51,7 +51,7 @@ async fn test_gateway_registration(dev_fed: &DevJitFed) -> anyhow::Result<()> {
     let client = dev_fed
         .fed()
         .await?
-        .new_joined_client("lnv2-test-gateway-registration-client")
+        .new_joined_client("dlc-test-gateway-registration-client")
         .await?;
 
     let gw_lnd = dev_fed.gw_lnd().await?;
@@ -72,7 +72,7 @@ async fn test_gateway_registration(dev_fed: &DevJitFed) -> anyhow::Result<()> {
     }
 
     assert_eq!(
-        cmd!(client, "module", "lnv2", "gateways", "list")
+        cmd!(client, "module", "dlc", "gateways", "list")
             .out_json()
             .await?
             .as_array()
@@ -82,7 +82,7 @@ async fn test_gateway_registration(dev_fed: &DevJitFed) -> anyhow::Result<()> {
     );
 
     assert_eq!(
-        cmd!(client, "module", "lnv2", "gateways", "list", "--peer", "0")
+        cmd!(client, "module", "dlc", "gateways", "list", "--peer", "0")
             .out_json()
             .await?
             .as_array()
@@ -94,7 +94,7 @@ async fn test_gateway_registration(dev_fed: &DevJitFed) -> anyhow::Result<()> {
     info!("Testing selection of gateways...");
 
     assert!(gateways.contains(
-        &cmd!(client, "module", "lnv2", "gateways", "select")
+        &cmd!(client, "module", "dlc", "gateways", "select")
             .out_json()
             .await?
             .as_str()
@@ -102,7 +102,7 @@ async fn test_gateway_registration(dev_fed: &DevJitFed) -> anyhow::Result<()> {
             .to_string()
     ));
 
-    cmd!(client, "module", "lnv2", "gateways", "map")
+    cmd!(client, "module", "dlc", "gateways", "map")
         .out_json()
         .await?;
 
@@ -114,7 +114,7 @@ async fn test_gateway_registration(dev_fed: &DevJitFed) -> anyhow::Result<()> {
                 cmd!(
                     client,
                     "module",
-                    "lnv2",
+                    "dlc",
                     "gateways",
                     "select",
                     "--invoice",
@@ -137,7 +137,7 @@ async fn test_gateway_registration(dev_fed: &DevJitFed) -> anyhow::Result<()> {
         }
     }
 
-    assert!(cmd!(client, "module", "lnv2", "gateways", "list")
+    assert!(cmd!(client, "module", "dlc", "gateways", "list")
         .out_json()
         .await?
         .as_array()
@@ -145,7 +145,7 @@ async fn test_gateway_registration(dev_fed: &DevJitFed) -> anyhow::Result<()> {
         .is_empty(),);
 
     assert!(
-        cmd!(client, "module", "lnv2", "gateways", "list", "--peer", "0")
+        cmd!(client, "module", "dlc", "gateways", "list", "--peer", "0")
             .out_json()
             .await?
             .as_array()
@@ -160,7 +160,7 @@ async fn test_payments(dev_fed: &DevJitFed) -> anyhow::Result<()> {
     let federation = dev_fed.fed().await?;
 
     let client = federation
-        .new_joined_client("lnv2-test-payments-client")
+        .new_joined_client("dlc-test-payments-client")
         .await?;
 
     federation.pegin_client(10_000, &client).await?;
@@ -293,7 +293,7 @@ async fn test_payments(dev_fed: &DevJitFed) -> anyhow::Result<()> {
         lnd.settle_hold_invoice(hold_preimage, hold_payment_hash),
     )?;
 
-    info!("Testing LNv2 lightning fees");
+    info!("Testing LNv2 dlc fees");
     let fed_id = federation.calculate_federation_id();
     gw_lnd
         .set_federation_routing_fee(fed_id.clone(), 0, 0)
@@ -339,7 +339,7 @@ async fn add_gateway(client: &Client, peer: usize, gateway: &String) -> anyhow::
         "--password",
         "pass",
         "module",
-        "lnv2",
+        "dlc",
         "gateways",
         "add",
         gateway
@@ -358,7 +358,7 @@ async fn remove_gateway(client: &Client, peer: usize, gateway: &String) -> anyho
         "--password",
         "pass",
         "module",
-        "lnv2",
+        "dlc",
         "gateways",
         "remove",
         gateway
@@ -378,7 +378,7 @@ async fn receive(
         cmd!(
             client,
             "module",
-            "lnv2",
+            "dlc",
             "receive",
             amount,
             "--gateway",
@@ -399,7 +399,7 @@ async fn test_send(
         cmd!(
             client,
             "module",
-            "lnv2",
+            "dlc",
             "send",
             invoice,
             "--gateway",
@@ -413,7 +413,7 @@ async fn test_send(
         cmd!(
             client,
             "module",
-            "lnv2",
+            "dlc",
             "await-send",
             serde_json::to_string(&send_op)?.substring(1, 65)
         )
@@ -430,7 +430,7 @@ async fn await_receive_claimed(client: &Client, operation_id: OperationId) -> an
         cmd!(
             client,
             "module",
-            "lnv2",
+            "dlc",
             "await-receive",
             serde_json::to_string(&operation_id)?.substring(1, 65)
         )

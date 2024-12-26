@@ -41,14 +41,14 @@ use fedimint_core::task::TaskGroup;
 use fedimint_core::time::duration_since_epoch;
 use fedimint_core::util::SafeUrl;
 use fedimint_core::{apply, async_trait_maybe_send, Amount, OutPoint, TransactionId};
-use fedimint_dlc_common::config::LightningClientConfig;
+use fedimint_dlc_common::config::DlcClientConfig;
 use fedimint_dlc_common::contracts::{IncomingContract, OutgoingContract, PaymentImage};
 use fedimint_dlc_common::gateway_api::{
     GatewayConnection, GatewayConnectionError, PaymentFee, RealGatewayConnection, RoutingInfo,
 };
 use fedimint_dlc_common::{
-    Bolt11InvoiceDescription, LightningCommonInit, LightningInvoice, LightningModuleTypes,
-    LightningOutput, LightningOutputV0, KIND,
+    Bolt11InvoiceDescription, DlcCommonInit, DlcModuleTypes, DlcOutput, DlcOutputV0,
+    LightningInvoice, KIND,
 };
 use futures::StreamExt;
 use lightning_invoice::{Bolt11Invoice, Currency};
@@ -59,7 +59,7 @@ use thiserror::Error;
 use tpe::{derive_agg_decryption_key, AggregateDecryptionKey};
 use tracing::warn;
 
-use crate::api::LightningFederationApi;
+use crate::api::DlcFederationApi;
 use crate::receive_sm::{ReceiveSMCommon, ReceiveSMState, ReceiveStateMachine};
 use crate::send_sm::{SendSMCommon, SendSMState, SendStateMachine};
 
@@ -71,7 +71,7 @@ const EXPIRATION_DELTA_LIMIT: u64 = 1440;
 const CONTRACT_CONFIRMATION_BUFFER: u64 = 12;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum LightningOperationMeta {
+pub enum DlcOperationMeta {
     Send(SendOperationMeta),
     Receive(ReceiveOperationMeta),
 }
@@ -204,20 +204,20 @@ pub enum FinalReceiveOperationState {
 pub type ReceiveResult = Result<(Bolt11Invoice, OperationId), ReceiveError>;
 
 #[derive(Debug, Clone)]
-pub struct LightningClientInit {
+pub struct DlcClientInit {
     pub gateway_conn: Arc<dyn GatewayConnection + Send + Sync>,
 }
 
-impl Default for LightningClientInit {
+impl Default for DlcClientInit {
     fn default() -> Self {
-        LightningClientInit {
+        DlcClientInit {
             gateway_conn: Arc::new(RealGatewayConnection),
         }
     }
 }
 
-impl ModuleInit for LightningClientInit {
-    type Common = LightningCommonInit;
+impl ModuleInit for DlcClientInit {
+    type Common = DlcCommonInit;
 
     async fn dump_database(
         &self,
@@ -229,8 +229,8 @@ impl ModuleInit for LightningClientInit {
 }
 
 #[apply(async_trait_maybe_send!)]
-impl ClientModuleInit for LightningClientInit {
-    type Module = LightningClientModule;
+impl ClientModuleInit for DlcClientInit {
+    type Module = DlcClientModule;
 
     fn supported_api_versions(&self) -> MultiApiVersion {
         MultiApiVersion::try_from_iter([ApiVersion { major: 0, minor: 0 }])
@@ -238,7 +238,7 @@ impl ClientModuleInit for LightningClientInit {
     }
 
     async fn init(&self, args: &ClientModuleInitArgs<Self>) -> anyhow::Result<Self::Module> {
-        Ok(LightningClientModule::new(
+        Ok(DlcClientModule::new(
             *args.federation_id(),
             args.cfg().clone(),
             args.notifier().clone(),
@@ -255,20 +255,20 @@ impl ClientModuleInit for LightningClientInit {
 }
 
 #[derive(Debug, Clone)]
-pub struct LightningClientContext {
+pub struct DlcClientContext {
     federation_id: FederationId,
     gateway_conn: Arc<dyn GatewayConnection + Send + Sync>,
 }
 
-impl Context for LightningClientContext {
+impl Context for DlcClientContext {
     const KIND: Option<ModuleKind> = Some(KIND);
 }
 
 #[derive(Debug)]
-pub struct LightningClientModule {
+pub struct DlcClientModule {
     federation_id: FederationId,
-    cfg: LightningClientConfig,
-    notifier: ModuleNotifier<LightningClientStateMachines>,
+    cfg: DlcClientConfig,
+    notifier: ModuleNotifier<DlcClientStateMachines>,
     client_ctx: ClientContext<Self>,
     module_api: DynModuleApi,
     keypair: Keypair,
@@ -278,15 +278,15 @@ pub struct LightningClientModule {
 }
 
 #[apply(async_trait_maybe_send!)]
-impl ClientModule for LightningClientModule {
-    type Init = LightningClientInit;
-    type Common = LightningModuleTypes;
+impl ClientModule for DlcClientModule {
+    type Init = DlcClientInit;
+    type Common = DlcModuleTypes;
     type Backup = NoModuleBackup;
-    type ModuleStateMachineContext = LightningClientContext;
-    type States = LightningClientStateMachines;
+    type ModuleStateMachineContext = DlcClientContext;
+    type States = DlcClientStateMachines;
 
     fn context(&self) -> Self::ModuleStateMachineContext {
-        LightningClientContext {
+        DlcClientContext {
             federation_id: self.federation_id,
             gateway_conn: self.gateway_conn.clone(),
         }
@@ -325,12 +325,12 @@ fn generate_ephemeral_tweak(static_pk: PublicKey) -> ([u8; 32], PublicKey) {
     (tweak.secret_bytes(), keypair.public_key())
 }
 
-impl LightningClientModule {
+impl DlcClientModule {
     #[allow(clippy::too_many_arguments)]
     fn new(
         federation_id: FederationId,
-        cfg: LightningClientConfig,
-        notifier: ModuleNotifier<LightningClientStateMachines>,
+        cfg: DlcClientConfig,
+        notifier: ModuleNotifier<DlcClientStateMachines>,
         client_ctx: ClientContext<Self>,
         module_api: DynModuleApi,
         keypair: Keypair,
@@ -552,13 +552,13 @@ impl LightningClientModule {
         let gateway_api_clone = gateway_api.clone();
         let invoice_clone = invoice.clone();
 
-        let client_output = ClientOutput::<LightningOutput> {
-            output: LightningOutput::V0(LightningOutputV0::Outgoing(contract.clone())),
+        let client_output = ClientOutput::<DlcOutput> {
+            output: DlcOutput::V0(DlcOutputV0::Outgoing(contract.clone())),
             amount: contract.amount,
         };
-        let client_output_sm = ClientOutputSM::<LightningClientStateMachines> {
+        let client_output_sm = ClientOutputSM::<DlcClientStateMachines> {
             state_machines: Arc::new(move |out_point_range: OutPointRange| {
-                vec![LightningClientStateMachines::Send(SendStateMachine {
+                vec![DlcClientStateMachines::Send(SendStateMachine {
                     common: SendSMCommon {
                         operation_id,
                         funding_txid: out_point_range.txid(),
@@ -581,9 +581,9 @@ impl LightningClientModule {
         self.client_ctx
             .finalize_and_submit_transaction(
                 operation_id,
-                LightningCommonInit::KIND.as_str(),
+                DlcCommonInit::KIND.as_str(),
                 |change_range| {
-                    LightningOperationMeta::Send(SendOperationMeta {
+                    DlcOperationMeta::Send(SendOperationMeta {
                         funding_txid: change_range.txid(),
                         funding_change_outpoints: change_range.into_iter().collect(),
                         gateway: gateway_api.clone(),
@@ -646,7 +646,7 @@ impl LightningClientModule {
         Ok(self.client_ctx.outcome_or_updates(&operation, operation_id, || {
             stream! {
                 loop {
-                    if let Some(LightningClientStateMachines::Send(state)) = stream.next().await {
+                    if let Some(DlcClientStateMachines::Send(state)) = stream.next().await {
                         match state.state {
                             SendSMState::Funding => yield SendOperationState::Funding,
                             SendSMState::Funded => yield SendOperationState::Funded,
@@ -860,7 +860,7 @@ impl LightningClientModule {
 
         let (claim_keypair, agg_decryption_key) = self.recover_contract_keys(&contract)?;
 
-        let receive_sm = LightningClientStateMachines::Receive(ReceiveStateMachine {
+        let receive_sm = DlcClientStateMachines::Receive(ReceiveStateMachine {
             common: ReceiveSMCommon {
                 operation_id,
                 contract: contract.clone(),
@@ -875,8 +875,8 @@ impl LightningClientModule {
         self.client_ctx
             .manual_operation_start(
                 operation_id,
-                LightningCommonInit::KIND.as_str(),
-                LightningOperationMeta::Receive(ReceiveOperationMeta {
+                DlcCommonInit::KIND.as_str(),
+                DlcOperationMeta::Receive(ReceiveOperationMeta {
                     gateway,
                     contract,
                     invoice: LightningInvoice::Bolt11(invoice),
@@ -938,7 +938,7 @@ impl LightningClientModule {
         Ok(self.client_ctx.outcome_or_updates(&operation, operation_id, || {
             stream! {
                 loop {
-                    if let Some(LightningClientStateMachines::Receive(state)) = stream.next().await {
+                    if let Some(DlcClientStateMachines::Receive(state)) = stream.next().await {
                         match state.state {
                             ReceiveSMState::Pending => yield ReceiveOperationState::Pending,
                             ReceiveSMState::Claiming(out_points) => {
@@ -1047,12 +1047,12 @@ pub enum ReceiveError {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Decodable, Encodable)]
-pub enum LightningClientStateMachines {
+pub enum DlcClientStateMachines {
     Send(SendStateMachine),
     Receive(ReceiveStateMachine),
 }
 
-impl IntoDynInstance for LightningClientStateMachines {
+impl IntoDynInstance for DlcClientStateMachines {
     type DynType = DynState;
 
     fn into_dyn(self, instance_id: ModuleInstanceId) -> Self::DynType {
@@ -1060,8 +1060,8 @@ impl IntoDynInstance for LightningClientStateMachines {
     }
 }
 
-impl State for LightningClientStateMachines {
-    type ModuleContext = LightningClientContext;
+impl State for DlcClientStateMachines {
+    type ModuleContext = DlcClientContext;
 
     fn transitions(
         &self,
@@ -1069,16 +1069,16 @@ impl State for LightningClientStateMachines {
         global_context: &DynGlobalClientContext,
     ) -> Vec<StateTransition<Self>> {
         match self {
-            LightningClientStateMachines::Send(state) => {
+            DlcClientStateMachines::Send(state) => {
                 sm_enum_variant_translation!(
                     state.transitions(context, global_context),
-                    LightningClientStateMachines::Send
+                    DlcClientStateMachines::Send
                 )
             }
-            LightningClientStateMachines::Receive(state) => {
+            DlcClientStateMachines::Receive(state) => {
                 sm_enum_variant_translation!(
                     state.transitions(context, global_context),
-                    LightningClientStateMachines::Receive
+                    DlcClientStateMachines::Receive
                 )
             }
         }
@@ -1086,8 +1086,8 @@ impl State for LightningClientStateMachines {
 
     fn operation_id(&self) -> OperationId {
         match self {
-            LightningClientStateMachines::Send(state) => state.operation_id(),
-            LightningClientStateMachines::Receive(state) => state.operation_id(),
+            DlcClientStateMachines::Send(state) => state.operation_id(),
+            DlcClientStateMachines::Receive(state) => state.operation_id(),
         }
     }
 }

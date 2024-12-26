@@ -6,12 +6,12 @@ use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::secp256k1::Keypair;
 use fedimint_core::OutPoint;
 use fedimint_dlc_common::contracts::IncomingContract;
-use fedimint_dlc_common::{LightningInput, LightningInputV0};
+use fedimint_dlc_common::{DlcInput, DlcInputV0};
 use tpe::AggregateDecryptionKey;
 use tracing::instrument;
 
-use crate::api::LightningFederationApi;
-use crate::LightningClientContext;
+use crate::api::DlcFederationApi;
+use crate::DlcClientContext;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Decodable, Encodable)]
 pub struct ReceiveStateMachine {
@@ -54,7 +54,7 @@ pub enum ReceiveSMState {
 ///     Pending -- decryption contract expires --> Expired
 /// ```
 impl State for ReceiveStateMachine {
-    type ModuleContext = LightningClientContext;
+    type ModuleContext = DlcClientContext;
 
     fn transitions(
         &self,
@@ -110,8 +110,8 @@ impl ReceiveStateMachine {
             return old_state.update(ReceiveSMState::Expired);
         }
 
-        let client_input = ClientInput::<LightningInput> {
-            input: LightningInput::V0(LightningInputV0::Incoming(
+        let client_input = ClientInput::<DlcInput> {
+            input: DlcInput::V0(DlcInputV0::Incoming(
                 old_state.common.contract.contract_id(),
                 old_state.common.agg_decryption_key,
             )),

@@ -10,14 +10,14 @@ use fedimint_core::util::backoff_util::api_networking_backoff;
 use fedimint_core::util::SafeUrl;
 use fedimint_core::{secp256k1, util, OutPoint, TransactionId};
 use fedimint_dlc_common::contracts::OutgoingContract;
-use fedimint_dlc_common::{LightningInput, LightningInputV0, OutgoingWitness};
+use fedimint_dlc_common::{DlcInput, DlcInputV0, OutgoingWitness};
 use futures::future::pending;
 use secp256k1::schnorr::Signature;
 use secp256k1::Keypair;
 use tracing::{error, instrument};
 
-use crate::api::LightningFederationApi;
-use crate::{LightningClientContext, LightningInvoice};
+use crate::api::DlcFederationApi;
+use crate::{DlcClientContext, LightningInvoice};
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Decodable, Encodable)]
 pub struct SendStateMachine {
@@ -69,7 +69,7 @@ pub enum SendSMState {
 ///     Funded -- await_preimage expires --> Refunding
 /// ```
 impl State for SendStateMachine {
-    type ModuleContext = LightningClientContext;
+    type ModuleContext = DlcClientContext;
 
     fn transitions(
         &self,
@@ -157,7 +157,7 @@ impl SendStateMachine {
         contract: OutgoingContract,
         invoice: LightningInvoice,
         refund_keypair: Keypair,
-        context: LightningClientContext,
+        context: DlcClientContext,
     ) -> Result<[u8; 32], Signature> {
         util::retry("gateway-send-payment", api_networking_backoff(), || async {
             let payment_result = context
@@ -193,8 +193,8 @@ impl SendStateMachine {
         match gateway_response {
             Ok(preimage) => old_state.update(SendSMState::Success(preimage)),
             Err(signature) => {
-                let client_input = ClientInput::<LightningInput> {
-                    input: LightningInput::V0(LightningInputV0::Outgoing(
+                let client_input = ClientInput::<DlcInput> {
+                    input: DlcInput::V0(DlcInputV0::Outgoing(
                         old_state.common.contract.contract_id(),
                         OutgoingWitness::Cancel(signature),
                     )),
@@ -245,8 +245,8 @@ impl SendStateMachine {
             return old_state.update(SendSMState::Success(preimage));
         }
 
-        let client_input = ClientInput::<LightningInput> {
-            input: LightningInput::V0(LightningInputV0::Outgoing(
+        let client_input = ClientInput::<DlcInput> {
+            input: DlcInput::V0(DlcInputV0::Outgoing(
                 old_state.common.contract.contract_id(),
                 OutgoingWitness::Refund,
             )),

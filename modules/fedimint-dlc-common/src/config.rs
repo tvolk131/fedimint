@@ -9,20 +9,20 @@ use group::Curve;
 use serde::{Deserialize, Serialize};
 use tpe::{AggregatePublicKey, PublicKeyShare, SecretKeyShare};
 
-use crate::LightningCommonInit;
+use crate::DlcCommonInit;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LightningGenParams {
-    pub local: LightningGenParamsLocal,
-    pub consensus: LightningGenParamsConsensus,
+pub struct DlcGenParams {
+    pub local: DlcGenParamsLocal,
+    pub consensus: DlcGenParamsConsensus,
 }
 
-impl LightningGenParams {
+impl DlcGenParams {
     #[allow(clippy::missing_panics_doc)]
     pub fn regtest(bitcoin_rpc: BitcoinRpcConfig) -> Self {
         Self {
-            local: LightningGenParamsLocal { bitcoin_rpc },
-            consensus: LightningGenParamsConsensus {
+            local: DlcGenParamsLocal { bitcoin_rpc },
+            consensus: DlcGenParamsConsensus {
                 fee_consensus: FeeConsensus::new(1000).expect("Relative fee is within range"),
                 network: Network::Regtest,
             },
@@ -31,30 +31,30 @@ impl LightningGenParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LightningGenParamsConsensus {
+pub struct DlcGenParamsConsensus {
     pub fee_consensus: FeeConsensus,
     pub network: Network,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LightningGenParamsLocal {
+pub struct DlcGenParamsLocal {
     pub bitcoin_rpc: BitcoinRpcConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LightningConfig {
-    pub local: LightningConfigLocal,
-    pub private: LightningConfigPrivate,
-    pub consensus: LightningConfigConsensus,
+pub struct DlcConfig {
+    pub local: DlcConfigLocal,
+    pub private: DlcConfigPrivate,
+    pub consensus: DlcConfigConsensus,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Decodable, Encodable)]
-pub struct LightningConfigLocal {
+pub struct DlcConfigLocal {
     pub bitcoin_rpc: BitcoinRpcConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encodable, Decodable)]
-pub struct LightningConfigConsensus {
+pub struct DlcConfigConsensus {
     pub tpe_agg_pk: AggregatePublicKey,
     pub tpe_pks: BTreeMap<PeerId, PublicKeyShare>,
     pub fee_consensus: FeeConsensus,
@@ -62,35 +62,35 @@ pub struct LightningConfigConsensus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LightningConfigPrivate {
+pub struct DlcConfigPrivate {
     pub sk: SecretKeyShare,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
-pub struct LightningClientConfig {
+pub struct DlcClientConfig {
     pub tpe_agg_pk: AggregatePublicKey,
     pub tpe_pks: BTreeMap<PeerId, PublicKeyShare>,
     pub fee_consensus: FeeConsensus,
     pub network: Network,
 }
 
-impl std::fmt::Display for LightningClientConfig {
+impl std::fmt::Display for DlcClientConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "LightningClientConfig {self:?}")
+        write!(f, "DlcClientConfig {self:?}")
     }
 }
 
 // Wire together the configs for this module
 plugin_types_trait_impl_config!(
-    LightningCommonInit,
-    LightningGenParams,
-    LightningGenParamsLocal,
-    LightningGenParamsConsensus,
-    LightningConfig,
-    LightningConfigLocal,
-    LightningConfigPrivate,
-    LightningConfigConsensus,
-    LightningClientConfig
+    DlcCommonInit,
+    DlcGenParams,
+    DlcGenParamsLocal,
+    DlcGenParamsConsensus,
+    DlcConfig,
+    DlcConfigLocal,
+    DlcConfigPrivate,
+    DlcConfigConsensus,
+    DlcClientConfig
 );
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
@@ -163,49 +163,4 @@ fn test_fee_consensus() {
         fee_consensus.fee(Amount::from_bitcoins(100_000)),
         Amount::from_bitcoins(100) + Amount::from_sats(1)
     );
-}
-
-#[allow(dead_code)]
-fn migrate_config_consensus(
-    config: &fedimint_ln_common::config::LightningConfigConsensus,
-    peer_count: u16,
-) -> LightningConfigConsensus {
-    LightningConfigConsensus {
-        tpe_agg_pk: AggregatePublicKey(config.threshold_pub_keys.public_key().0.to_affine()),
-        tpe_pks: (0..peer_count)
-            .map(|peer| {
-                (
-                    PeerId::from(peer),
-                    PublicKeyShare(
-                        config
-                            .threshold_pub_keys
-                            .public_key_share(peer as usize)
-                            .0
-                             .0
-                            .to_affine(),
-                    ),
-                )
-            })
-            .collect(),
-        fee_consensus: FeeConsensus::new(1000).expect("Relative fee is within range"),
-        network: config.network.0,
-    }
-}
-
-#[allow(dead_code)]
-fn migrate_config_private(
-    config: &fedimint_ln_common::config::LightningConfigPrivate,
-) -> LightningConfigPrivate {
-    LightningConfigPrivate {
-        sk: SecretKeyShare(config.threshold_sec_key.0 .0 .0),
-    }
-}
-
-#[allow(dead_code)]
-fn migrate_config_local(
-    config: fedimint_ln_common::config::LightningConfigLocal,
-) -> LightningConfigLocal {
-    LightningConfigLocal {
-        bitcoin_rpc: config.bitcoin_rpc,
-    }
 }

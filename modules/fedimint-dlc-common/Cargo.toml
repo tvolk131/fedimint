@@ -3,7 +3,7 @@ name = "fedimint-dlc-common"
 version = { workspace = true }
 authors = ["The Fedimint Developers"]
 edition = "2021"
-description = "fedimint-ln-common is a lightning payment service module (common types)."
+description = "fedimint-dlc-common is a Discreet Log Contract service module (common types)."
 license = "MIT"
 
 [package.metadata.cargo-udeps.ignore]

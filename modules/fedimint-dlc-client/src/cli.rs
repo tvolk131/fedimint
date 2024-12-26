@@ -63,7 +63,7 @@ pub(crate) async fn handle_cli_command(
     lightning: &LightningClientModule,
     args: &[ffi::OsString],
 ) -> anyhow::Result<serde_json::Value> {
-    let opts = Opts::parse_from(iter::once(&ffi::OsString::from("lnv2")).chain(args.iter()));
+    let opts = Opts::parse_from(iter::once(&ffi::OsString::from("dlc")).chain(args.iter()));
 
     let value = match opts {
         Opts::Send { gateway, invoice } => {
