@@ -46,6 +46,8 @@ use crate::version_constants::{
 };
 use crate::{DevFed, Gatewayd, LightningNode, Lnd, cmd, dev_fed};
 
+mod consensus_recovery;
+
 pub struct Stats {
     pub min: Duration,
     pub avg: Duration,
@@ -2829,6 +2831,9 @@ pub enum TestCmd {
     /// `devfed` then kills and restarts most of the Guardian nodes in a 4 node
     /// fedimint
     ReconnectTest,
+    /// Tests watchdog recovery after all four guardians lose Bitcoin block
+    /// access.
+    ConsensusRecoveryTest(consensus_recovery::Options),
     /// `devfed` then tests a bunch of the fedimint-cli commands
     CliTests,
     /// `devfed` then tests guardian metadata functionality
@@ -2928,6 +2933,9 @@ pub async fn handle_command(cmd: TestCmd, common_args: CommonArgs) -> Result<()>
             let (process_mgr, _) = setup(common_args).await?;
             let dev_fed = dev_fed(&process_mgr).await?;
             reconnect_test(dev_fed, &process_mgr).await?;
+        }
+        TestCmd::ConsensusRecoveryTest(options) => {
+            consensus_recovery::run(common_args, options).await?;
         }
         TestCmd::CliTests => {
             let (process_mgr, _) = setup(common_args).await?;

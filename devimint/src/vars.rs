@@ -318,5 +318,8 @@ declare_vars! {
         // rpc settings over command-line etc. so always will use the right ones.
         FM_FORCE_BITCOIN_RPC_URL: String = f!("http://bitcoin:bitcoin@127.0.0.1:{}", globals.FM_PORT_BTC_RPC); env: FM_FORCE_BITCOIN_RPC_URL_ENV;
         FM_FORCE_BITCOIN_RPC_KIND: String = "bitcoind"; env: FM_FORCE_BITCOIN_RPC_KIND_ENV;
+        // Current guardians configure the shared server Bitcoin RPC directly.
+        FM_BITCOIND_URL: String = f!("http://127.0.0.1:{}", globals.FM_PORT_BTC_RPC); env: "FM_BITCOIND_URL";
+        FM_SESSION_TIMEOUT_SECS: Option<String> = None; env: "FM_SESSION_TIMEOUT_SECS";
     }
 }

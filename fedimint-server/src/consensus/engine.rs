@@ -16,7 +16,7 @@ use fedimint_core::db::{
 };
 use fedimint_core::encoding::Decodable;
 use fedimint_core::endpoint_constants::AWAIT_SIGNED_SESSION_OUTCOME_ENDPOINT;
-use fedimint_core::envs::is_running_in_test_env;
+use fedimint_core::envs::{is_env_var_set, is_running_in_test_env};
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::module::{ApiRequestErased, SerdeModuleEncoding};
@@ -67,6 +67,14 @@ const DB_CHECKPOINTS_DIR: &str = "db_checkpoints";
 /// costs an attempt, and reprocessing takes a fresh snapshot, so needing more
 /// than a couple of these means something is wrong beyond a stale snapshot.
 const MAX_ITEM_PROCESSING_ATTEMPTS: usize = 10;
+
+/// Opt-in devimint hook for reproducing watchdog/backoff interactions without
+/// waiting for the exponential delay to grow naturally. Ignored outside tests.
+pub const FM_TEST_FAST_CONSENSUS_BACKOFF: &str = "FM_TEST_FAST_CONSENSUS_BACKOFF";
+/// Leave enough rounds after ordering stops for healthy sessions to sign.
+pub const TEST_BACKOFF_EXTRA_ROUNDS: usize = 50;
+/// The minimum delay with test jitter is 15 seconds, exceeding a 12s watchdog.
+pub const TEST_BACKOFF_DELAY_MS: u64 = 30_000;
 
 /// Runs the main server consensus loop
 pub struct ConsensusEngine {
@@ -243,6 +251,8 @@ impl ConsensusEngine {
 
         let rounds_per_session = self.cfg.consensus.broadcast_rounds_per_session;
         let round_delay = f64::from(self.cfg.local.broadcast_round_delay_ms);
+        let fast_test_backoff =
+            is_running_in_test_env() && is_env_var_set(FM_TEST_FAST_CONSENSUS_BACKOFF);
 
         let mut delay_config = aleph_bft::default_delay_config();
 
@@ -256,13 +266,21 @@ impl ConsensusEngine {
                 1.0
             };
 
-            let delay = if round_index == 0 {
+            let mut delay = if round_index == 0 {
                 0.0
             } else {
                 round_delay
                     * BASE.powf(round_index.saturating_sub(rounds_per_session as usize) as f64)
                     * jitter
             };
+
+            // Only raise delays: retain the exponential tail and its ten-year
+            // bound on exhausting the session's maximum number of rounds.
+            if fast_test_backoff
+                && round_index >= usize::from(rounds_per_session) + TEST_BACKOFF_EXTRA_ROUNDS
+            {
+                delay = delay.max(TEST_BACKOFF_DELAY_MS as f64 * jitter);
+            }
 
             Duration::from_millis(delay.round() as u64)
         });
