@@ -127,3 +127,29 @@ cannot overwrite a newer logical attempt, and advertised TTL uses monotonic
 elapsed time. Status assembly holds the federation-manager read lock only while
 capturing one coherent snapshot; do not clone the client solely for this public
 query because that would interfere with concurrent leave.
+
+## Experimental Simplicity Contracts
+
+The `experimental-simplicity` daemon feature adds an opt-in contract module that
+is disabled by default. It is an unaudited prototype for development, with no
+production fund-safety claim. Guardians execute untrusted redemption bytecode
+through a pinned Simplicity runtime and custom C-frame jet adapters. Decoder,
+type-expansion, static execution, and transaction limits are part of this trust
+boundary; production use requires adversarial review of these limits and the
+unsafe adapters, consensus test vectors, and measured fee/cost calibration.
+
+Contract authorization binds the federation, module instance, spending references,
+claim keys, nonce, and all outer outputs. Core funding checks and transaction
+rollback enforce native bitcoin conservation. Bitcoin timelocks trust the
+configured guardians' threshold-agreed backend observations, subject to the
+backend trust model above. Session timelocks use core consensus ordering, not
+wall time.
+
+Contract values, states, revealed programs/witnesses, and recovery annotations
+are public to guardians and retained transaction history. The unauthenticated
+point-query API returns current contract records, including recovery bytes.
+Wallets must encrypt sensitive annotations; deleting a spent live record cannot
+erase its historical ciphertext. This module adds neither ecash-like transfer
+privacy nor mnemonic recovery. See the
+[prototype documentation](modules/fedimint-simplicity-common/README.md) for exact
+API, retention, and implementation limits.

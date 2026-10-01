@@ -31,6 +31,23 @@ use fedimint_core::module::{
 use fedimint_core::{InPoint, OutPoint, PeerId, apply, async_trait_maybe_send, dyn_newtype_define};
 pub use init::*;
 
+/// Consensus-owned context shared by every module processing a transaction.
+/// During history replay, `session_index` must be the original session index.
+#[derive(Debug, Clone, Copy)]
+pub struct TransactionConsensusContext {
+    pub federation_id: fedimint_core::config::FederationId,
+    pub session_index: u64,
+}
+
+/// Authenticated transaction view. This is constructed by the core, never
+/// decoded from a module input. Existing modules may ignore it.
+#[derive(Debug)]
+pub struct ModuleTransactionContext<'a> {
+    pub transaction: &'a fedimint_core::transaction::Transaction,
+    pub consensus: TransactionConsensusContext,
+    pub module_instance_id: ModuleInstanceId,
+}
+
 #[apply(async_trait_maybe_send!)]
 pub trait ServerModule: Debug + Sized {
     type Common: ModuleCommon;
@@ -109,6 +126,18 @@ pub trait ServerModule: Debug + Sized {
         in_point: InPoint,
     ) -> Result<InputMeta, <Self::Common as ModuleCommon>::InputError>;
 
+    /// Process an input with the full transaction and consensus context.
+    /// The default preserves the behavior of existing modules.
+    async fn process_input_with_context<'a, 'b, 'c>(
+        &'a self,
+        dbtx: &mut DatabaseTransaction<'c>,
+        input: &'b <Self::Common as ModuleCommon>::Input,
+        in_point: InPoint,
+        _context: &ModuleTransactionContext<'_>,
+    ) -> Result<InputMeta, <Self::Common as ModuleCommon>::InputError> {
+        self.process_input(dbtx, input, in_point).await
+    }
+
     /// Try to create an output (e.g. issue notes, peg-out BTC, …). On success
     /// all necessary updates to the database will be part of the database
     /// transaction. On failure (e.g. double spend) the database transaction
@@ -123,6 +152,17 @@ pub trait ServerModule: Debug + Sized {
         output: &'a <Self::Common as ModuleCommon>::Output,
         out_point: OutPoint,
     ) -> Result<TransactionItemAmounts, <Self::Common as ModuleCommon>::OutputError>;
+
+    /// Process an output with the same authenticated context as the inputs.
+    async fn process_output_with_context<'a, 'b>(
+        &'a self,
+        dbtx: &mut DatabaseTransaction<'b>,
+        output: &'a <Self::Common as ModuleCommon>::Output,
+        out_point: OutPoint,
+        _context: &ModuleTransactionContext<'_>,
+    ) -> Result<TransactionItemAmounts, <Self::Common as ModuleCommon>::OutputError> {
+        self.process_output(dbtx, output, out_point).await
+    }
 
     /// **Deprecated**: Modules should not be using it. Instead, they should
     /// implement their own custom endpoints with semantics, versioning,
@@ -253,6 +293,14 @@ pub trait IServerModule: Debug {
         in_point: InPoint,
     ) -> Result<InputMeta, DynInputError>;
 
+    async fn process_input_with_context<'a, 'b, 'c>(
+        &'a self,
+        dbtx: &mut DatabaseTransaction<'c>,
+        input: &'b DynInput,
+        in_point: InPoint,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<InputMeta, DynInputError>;
+
     /// Try to create an output (e.g. issue notes, peg-out BTC, …). On success
     /// all necessary updates to the database will be part of the database
     /// transaction. On failure (e.g. double spend) the database transaction
@@ -266,6 +314,14 @@ pub trait IServerModule: Debug {
         dbtx: &mut DatabaseTransaction<'a>,
         output: &DynOutput,
         out_point: OutPoint,
+    ) -> Result<TransactionItemAmounts, DynOutputError>;
+
+    async fn process_output_with_context<'a>(
+        &self,
+        dbtx: &mut DatabaseTransaction<'a>,
+        output: &DynOutput,
+        out_point: OutPoint,
+        context: &ModuleTransactionContext<'_>,
     ) -> Result<TransactionItemAmounts, DynOutputError>;
 
     /// See [`ServerModule::verify_input_submission`]
@@ -410,6 +466,27 @@ where
         .map_err(|v| DynInputError::from_typed(input.module_instance_id(), v))
     }
 
+    async fn process_input_with_context<'a, 'b, 'c>(
+        &'a self,
+        dbtx: &mut DatabaseTransaction<'c>,
+        input: &'b DynInput,
+        in_point: InPoint,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<InputMeta, DynInputError> {
+        <Self as ServerModule>::process_input_with_context(
+            self,
+            dbtx,
+            input
+                .as_any()
+                .downcast_ref::<<<Self as ServerModule>::Common as ModuleCommon>::Input>()
+                .expect("incorrect input type passed to module plugin"),
+            in_point,
+            context,
+        )
+        .await
+        .map_err(|v| DynInputError::from_typed(input.module_instance_id(), v))
+    }
+
     /// Try to create an output (e.g. issue notes, peg-out BTC, …). On success
     /// all necessary updates to the database will be part of the database
     /// transaction. On failure (e.g. double spend) the database transaction
@@ -432,6 +509,27 @@ where
                 .downcast_ref::<<<Self as ServerModule>::Common as ModuleCommon>::Output>()
                 .expect("incorrect output type passed to module plugin"),
             out_point,
+        )
+        .await
+        .map_err(|v| DynOutputError::from_typed(output.module_instance_id(), v))
+    }
+
+    async fn process_output_with_context<'a>(
+        &self,
+        dbtx: &mut DatabaseTransaction<'a>,
+        output: &DynOutput,
+        out_point: OutPoint,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<TransactionItemAmounts, DynOutputError> {
+        <Self as ServerModule>::process_output_with_context(
+            self,
+            dbtx,
+            output
+                .as_any()
+                .downcast_ref::<<<Self as ServerModule>::Common as ModuleCommon>::Output>()
+                .expect("incorrect output type passed to module plugin"),
+            out_point,
+            context,
         )
         .await
         .map_err(|v| DynOutputError::from_typed(output.module_instance_id(), v))

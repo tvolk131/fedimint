@@ -168,10 +168,7 @@ impl ServerModuleInit for MintInit {
         MINT_REDEEMED_ECASH_SATS.get_sample_count();
         MINT_REDEEMED_ECASH_FEES_SATS.get_sample_count();
 
-        Ok(args.cfg().to_typed().map(|cfg| Mint {
-            cfg,
-            db: args.db().clone(),
-        })?)
+        Ok(Mint::new(args.cfg().to_typed()?, args.db().clone()))
     }
 
     fn trusted_dealer_gen(
@@ -345,6 +342,11 @@ pub struct Mint {
 }
 
 impl Mint {
+    /// Construct a mint with its module-scoped database and generated keys.
+    pub fn new(cfg: MintConfig, db: Database) -> Self {
+        Self { cfg, db }
+    }
+
     pub async fn note_distribution_ui(&self) -> BTreeMap<Denomination, u64> {
         self.db
             .begin_transaction_nc()

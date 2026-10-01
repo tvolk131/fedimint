@@ -1,0 +1,18 @@
+[package]
+authors = { workspace = true }
+description = "Experimental Simplicity contract module: client"
+edition = { workspace = true }
+license = { workspace = true }
+name = "fedimint-simplicity-client"
+readme = { workspace = true }
+repository = { workspace = true }
+version = { workspace = true }
+
+[dependencies]
+anyhow = { workspace = true }
+bitcoin = { workspace = true }
+fedimint-core = { workspace = true }
+fedimint-simplicity-common = { workspace = true, features = ["compiler"] }
+
+[lints]
+workspace = true

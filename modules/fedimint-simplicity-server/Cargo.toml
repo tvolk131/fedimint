@@ -1,0 +1,34 @@
+[package]
+authors = { workspace = true }
+description = "Experimental Simplicity contract module: server"
+edition = { workspace = true }
+license = { workspace = true }
+name = "fedimint-simplicity-server"
+readme = { workspace = true }
+repository = { workspace = true }
+version = { workspace = true }
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+erased-serde = { workspace = true }
+fedimint-core = { workspace = true }
+fedimint-server-core = { workspace = true }
+fedimint-simplicity-common = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+bitcoin = { workspace = true }
+fedimint-dummy-common = { workspace = true }
+fedimint-dummy-server = { workspace = true }
+fedimint-mintv2-common = { workspace = true }
+fedimint-mintv2-server = { workspace = true }
+fedimint-server = { workspace = true }
+fedimint-simplicity-client = { workspace = true }
+rand = { workspace = true }
+tbs = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

@@ -2,7 +2,9 @@ use fedimint_core::db::DatabaseTransaction;
 use fedimint_core::module::{Amounts, CoreConsensusVersion, TransactionItemAmounts};
 use fedimint_core::transaction::{TRANSACTION_OVERFLOW_ERROR, Transaction, TransactionError};
 use fedimint_core::{InPoint, OutPoint};
-use fedimint_server_core::ServerModuleRegistry;
+use fedimint_server_core::{
+    ModuleTransactionContext, ServerModuleRegistry, TransactionConsensusContext,
+};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::metrics::{CONSENSUS_TX_PROCESSED_INPUTS, CONSENSUS_TX_PROCESSED_OUTPUTS};
@@ -19,6 +21,7 @@ pub async fn process_transaction_with_dbtx(
     transaction: &Transaction,
     version: CoreConsensusVersion,
     mode: TxProcessingMode,
+    consensus: TransactionConsensusContext,
 ) -> Result<(), TransactionError> {
     let in_count = transaction.inputs.len();
     let out_count = transaction.outputs.len();
@@ -65,12 +68,17 @@ pub async fn process_transaction_with_dbtx(
         }
         let meta = modules
             .get_expect(input.module_instance_id())
-            .process_input(
+            .process_input_with_context(
                 &mut dbtx
                     .to_ref_with_prefix_module_id(input.module_instance_id())
                     .0,
                 input,
                 InPoint { txid, in_idx },
+                &ModuleTransactionContext {
+                    transaction,
+                    consensus,
+                    module_instance_id: input.module_instance_id(),
+                },
             )
             .await
             .map_err(TransactionError::Input)?;
@@ -100,12 +108,17 @@ pub async fn process_transaction_with_dbtx(
 
         let amount = modules
             .get_expect(output.module_instance_id())
-            .process_output(
+            .process_output_with_context(
                 &mut dbtx
                     .to_ref_with_prefix_module_id(output.module_instance_id())
                     .0,
                 output,
                 OutPoint { txid, out_idx },
+                &ModuleTransactionContext {
+                    transaction,
+                    consensus,
+                    module_instance_id: output.module_instance_id(),
+                },
             )
             .await
             .map_err(TransactionError::Output)?;
