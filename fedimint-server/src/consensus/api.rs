@@ -214,12 +214,17 @@ impl ConsensusApi {
         // We ignore any writes, as we only verify if the transaction is valid here
         dbtx.ignore_uncommitted();
 
+        let validation_session = get_finished_session_count_static(&mut dbtx).await;
         process_transaction_with_dbtx(
             self.modules.clone(),
             &mut dbtx,
             &transaction,
             self.cfg.consensus.version,
             TxProcessingMode::Submission,
+            fedimint_server_core::TransactionConsensusContext {
+                federation_id: self.cfg.calculate_federation_id(),
+                session_index: validation_session,
+            },
         )
         .await
         .inspect_err(|err| {
@@ -263,12 +268,17 @@ impl ConsensusApi {
 
             dbtx.ignore_uncommitted();
 
+            let validation_session = get_finished_session_count_static(&mut dbtx).await;
             process_transaction_with_dbtx(
                 self.modules.clone(),
                 &mut dbtx,
                 &transaction,
                 self.cfg.consensus.version,
                 TxProcessingMode::Submission,
+            fedimint_server_core::TransactionConsensusContext {
+                federation_id: self.cfg.calculate_federation_id(),
+                session_index: validation_session,
+            },
             )
             .await
             .inspect_err(|err| {
