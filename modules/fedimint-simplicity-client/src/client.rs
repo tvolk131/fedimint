@@ -249,6 +249,34 @@ impl SimplicityClientModule {
         outputs: Vec<ContractOutput>,
         creations: Vec<Keypair>,
     ) -> anyhow::Result<(OperationId, TransactionId)> {
+        self.submit_inner(spends, outputs, creations, None).await
+    }
+
+    /// Include an encrypted sender receipt even when owned contracts already
+    /// identify this transaction. Context is application-defined and versioned.
+    pub async fn submit_with_receipt(
+        &self,
+        spends: Vec<SpendIntent>,
+        outputs: Vec<ContractOutput>,
+        creations: Vec<Keypair>,
+        context: Option<crate::receipt::ReceiptContext>,
+    ) -> anyhow::Result<(OperationId, TransactionId)> {
+        self.submit_inner(
+            spends,
+            outputs,
+            creations,
+            Some(crate::receipt::SenderReceipt { context }),
+        )
+        .await
+    }
+
+    async fn submit_inner(
+        &self,
+        spends: Vec<SpendIntent>,
+        mut outputs: Vec<ContractOutput>,
+        creations: Vec<Keypair>,
+        requested_receipt: Option<crate::receipt::SenderReceipt>,
+    ) -> anyhow::Result<(OperationId, TransactionId)> {
         ensure!(
             !spends.is_empty() || !outputs.is_empty(),
             "empty contract operation"
@@ -321,10 +349,37 @@ impl SimplicityClientModule {
                 tracked |= version == output.version && program.cmr() == output.cmr;
             }
         }
-        ensure!(
-            tracked,
-            "operation has no recoverable wallet input or output; first deposit into a wallet contract before sending to another wallet"
-        );
+        let receipt = if requested_receipt.is_some() || !tracked {
+            let action_indices = outputs
+                .iter()
+                .enumerate()
+                .filter(|(_, output)| output.actions().is_some())
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>();
+            ensure!(action_indices.len() <= 1, "multiple action outputs");
+            let output_index = if let Some(index) = action_indices.first() {
+                *index
+            } else {
+                outputs.push(ContractOutput::action_output(Default::default()));
+                outputs.len() - 1
+            };
+            ensure!(
+                outputs[output_index].recovery.is_empty(),
+                "action output already contains recovery metadata"
+            );
+            let plan = crate::receipt::ReceiptPlan {
+                keys: self.store.keys.clone(),
+                federation: self.store.federation,
+                module: self.store.module,
+                output_index,
+                receipt: requested_receipt
+                    .unwrap_or(crate::receipt::SenderReceipt { context: None }),
+            };
+            outputs[output_index].recovery = plan.placeholder()?;
+            Some(plan)
+        } else {
+            None
+        };
         let state_gen: StateGenerator<SimplicityState> = Arc::new(move |range| {
             vec![SimplicityState {
                 operation_id,
@@ -370,6 +425,7 @@ impl SimplicityClientModule {
                 module: self.store.module,
                 spends: prepared,
                 creations,
+                receipt,
             }),
         );
         let range = self

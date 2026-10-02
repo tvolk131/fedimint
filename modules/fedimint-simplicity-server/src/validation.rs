@@ -183,11 +183,7 @@ fn validate_output(output: &ContractOutput) -> Result<(), ContractError> {
         }
     }
     if let Some(actions) = output.actions() {
-        if output.amount.msats != 0
-            || output.cmr != [0; 32]
-            || output.state != [0; 32]
-            || !output.recovery.is_empty()
-        {
+        if output.amount.msats != 0 || output.cmr != [0; 32] || output.state != [0; 32] {
             return Err(ContractError::Assets);
         }
         validate_amounts(&actions.issuance)?;

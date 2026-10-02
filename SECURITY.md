@@ -167,6 +167,15 @@ link outputs, so receive requests should be fresh. See the
 [prototype documentation](modules/fedimint-simplicity-common/README.md) for exact
 API, retention, and implementation limits.
 
+Direct sends without an owned Simplicity input or output use bounded encrypted
+sender receipts in non-spendable action outputs. Receipts identify confirmed
+activity, not ownership. Their separate mnemonic-derived key and transaction
+commitment bind funding inputs, nonce and outputs; copies on unrelated intents
+are ignored. Receipt ciphertext and creation signatures are normalized across
+instances to avoid circularity. Client finalization checks the commitment again
+after authorization. Guardians interpret none of the receipt plaintext and
+retain only the ordinary transaction history, with no receipt UTXO or index.
+
 
 Execution version one adds public assets with guardian-enforced conservation and
 unique issuance capabilities. Creation starts at zero supply; first issuance must

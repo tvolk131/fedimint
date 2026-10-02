@@ -42,6 +42,8 @@ pub struct HistoryEntry {
     pub session: u64,
     pub consumed: Vec<OutPoint>,
     pub received: Vec<OutPoint>,
+    /// Authenticated sent activity; never implies owning recipient outputs.
+    pub sent: Option<crate::receipt::SenderReceipt>,
 }
 
 impl Decodable for HistoryEntry {
@@ -57,6 +59,7 @@ impl Decodable for HistoryEntry {
             session: Decodable::consensus_decode_partial_from_finite_reader(reader, modules)?,
             consumed: Decodable::consensus_decode_partial_from_finite_reader(reader, modules)?,
             received: Decodable::consensus_decode_partial_from_finite_reader(reader, modules)?,
+            sent: Decodable::consensus_decode_partial_from_finite_reader(reader, modules)?,
         })
     }
 }
@@ -276,6 +279,7 @@ impl WalletStore {
                 }
             }
             let mut received = vec![];
+            let mut sent = None;
             for (out_idx, output) in tx.outputs.iter().enumerate() {
                 if output.module_instance_id() != self.module {
                     continue;
@@ -285,6 +289,16 @@ impl WalletStore {
                     .downcast_ref::<ContractOutput>()
                     .ok_or_else(|| anyhow::anyhow!("wrong Simplicity output decoder"))?;
                 if output.actions().is_some() {
+                    if let Some(receipt) = crate::receipt::read(
+                        &self.keys,
+                        self.federation,
+                        self.module,
+                        tx,
+                        &output.recovery,
+                    )? {
+                        ensure!(sent.is_none(), "multiple owned sender receipts");
+                        sent = Some(receipt);
+                    }
                     continue;
                 }
                 let descriptor = self.keys.decrypt(&output.recovery)?;
@@ -336,7 +350,7 @@ impl WalletStore {
                 .await;
                 received.push(outpoint);
             }
-            if !consumed.is_empty() || !received.is_empty() {
+            if !consumed.is_empty() || !received.is_empty() || sent.is_some() {
                 dbtx.insert_new_entry(&db::ObservedTransactionKey(txid), &())
                     .await;
                 dbtx.insert_new_entry(
@@ -346,6 +360,7 @@ impl WalletStore {
                         session: index,
                         consumed,
                         received,
+                        sent,
                     },
                 )
                 .await;

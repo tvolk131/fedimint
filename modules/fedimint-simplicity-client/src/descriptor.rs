@@ -181,6 +181,14 @@ impl WalletKeys {
         fedimint_aead::LessSafeKey::new(self.secret.tweak(b"recovery").to_chacha20_poly1305_key())
     }
 
+    pub(crate) fn receipt_key(&self) -> fedimint_aead::LessSafeKey {
+        fedimint_aead::LessSafeKey::new(
+            self.secret
+                .tweak(b"sender receipts")
+                .to_chacha20_poly1305_key(),
+        )
+    }
+
     /// Receivers produce this annotation and hand it to senders along with the
     /// destination policy. Senders need neither a wallet identifier nor a view
     /// key. Reusing an annotation would link outputs; generate a fresh one for

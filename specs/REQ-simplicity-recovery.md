@@ -72,3 +72,9 @@ ownership, historical descriptor versions, and a wallet that has spent all its
 Simplicity contracts but must recover its confirmed interaction history.
 Recovered holdings must exclude spent outputs, and confirmed interactions must
 not disappear or duplicate when recovery is interrupted and resumed.
+
+Direct sends funded only by another module must restore sender activity without
+requiring an intermediate owned contract. A sender receipt must not turn recipient
+outputs into sender holdings, and copying its public ciphertext into a different
+transaction must not manufacture wallet history. Explicit receipt application
+context must survive mnemonic recovery within the bounded annotation size.
