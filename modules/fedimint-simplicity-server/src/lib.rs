@@ -83,8 +83,7 @@ impl ServerModuleInit for SimplicityInit {
         &[MODULE_CONSENSUS_VERSION]
     }
     async fn init(&self, args: &ServerModuleInitArgs<Self>) -> anyhow::Result<Simplicity> {
-        let cfg: SimplicityConfig = args.cfg().to_typed()?;
-        validate_peers(&cfg.consensus.peers)?;
+        let cfg = load_config(args.cfg())?;
         Ok(Simplicity {
             cfg,
             monitor: Some(args.server_bitcoin_rpc_monitor()),
@@ -111,18 +110,35 @@ impl ServerModuleInit for SimplicityInit {
         &self,
         cfg: &ServerModuleConsensusConfig,
     ) -> anyhow::Result<SimplicityClientConfig> {
+        validate_consensus_version(cfg.version)?;
         validate_peers(&SimplicityConfigConsensus::from_erased(cfg)?.peers)?;
         Ok(SimplicityClientConfig)
     }
     fn validate_config(&self, identity: &PeerId, cfg: ServerModuleConfig) -> anyhow::Result<()> {
-        let cfg: SimplicityConfig = cfg.to_typed()?;
-        validate_peers(&cfg.consensus.peers)?;
+        let cfg = load_config(&cfg)?;
         ensure!(
             cfg.consensus.peers.contains(identity),
             "guardian missing from configured peers"
         );
         Ok(())
     }
+}
+
+/// Check the envelope before decoding its payload: loading a familiar payload
+/// must not silently activate rules different from the federation's version.
+fn validate_consensus_version(version: ModuleConsensusVersion) -> anyhow::Result<()> {
+    ensure!(
+        version == MODULE_CONSENSUS_VERSION,
+        "unsupported Simplicity module consensus version {version}; this binary supports {MODULE_CONSENSUS_VERSION}"
+    );
+    Ok(())
+}
+
+fn load_config(cfg: &ServerModuleConfig) -> anyhow::Result<SimplicityConfig> {
+    validate_consensus_version(cfg.consensus.version)?;
+    let cfg: SimplicityConfig = cfg.to_typed()?;
+    validate_peers(&cfg.consensus.peers)?;
+    Ok(cfg)
 }
 
 fn config(peers: Vec<PeerId>) -> SimplicityConfig {

@@ -42,6 +42,11 @@ federations and default builds do not enable it. Wallet applications register
 `SimplicityClientInit::default()` in their client module registry. There is no
 CLI wallet integration yet.
 
+Guardian initialization, configuration validation, and client-config export reject
+module consensus versions other than `0.1` before decoding the configuration.
+This prototype does not silently activate new rules from an older configuration
+or provide a migration/rolling-upgrade path for earlier experimental deployments.
+
 ## Guardian and client API
 
 `fedimint-simplicity-common` owns consensus types, the jet encoding, execution
