@@ -13,7 +13,8 @@ use crate::{ContractError, ContractInput, runtime};
 fn small_encoding_cannot_request_unbounded_intermediate_values() {
     let program = simplicity::types::Context::with_context(|ctx| {
         let mut wide: Arc<ConstructNode> = Arc::jet(&ctx, &FedimintJet::Core(Core::Sha256Iv));
-        // The shared DAG is tiny but its inferred intermediate value is 2^40 bits.
+        // The shared DAG is tiny but its inferred intermediate value is 2^40
+        // bits.
         for _ in 0..32 {
             wide = Arc::pair(&wide, &wide).unwrap();
         }
@@ -42,11 +43,41 @@ fn small_encoding_cannot_request_unbounded_intermediate_values() {
 
 #[test]
 fn unknown_context_and_disallowed_core_jets_are_rejected() {
-    // Family bit 1, then unassigned opcode 16.
-    assert!(FedimintJet::decode(&mut BitIter::from([0x88, 0x00].into_iter())).is_err());
-    assert!(FedimintJet::parse("multiply_64").is_err());
+    // Family bit 1, then unassigned opcode 255.
+    assert!(FedimintJet::decode(&mut BitIter::from([0xff, 0x80].into_iter())).is_err());
+    assert!(FedimintJet::parse("divide_64").is_err());
     assert_eq!(
         FedimintJet::decode(&mut BitIter::from([0x80, 0x00].into_iter())).unwrap(),
         FedimintJet::Context(ContextJet::SigHashAll)
     );
+}
+
+#[test]
+fn legacy_output_encoding_is_preserved_and_asset_outputs_round_trip() {
+    use fedimint_core::encoding::{Decodable, Encodable};
+    use fedimint_core::module::registry::ModuleDecoderRegistry;
+
+    use crate::assets::{ASSET_VERSION, AssetBundle, AssetExtension};
+    let legacy = (
+        0u32,
+        fedimint_core::Amount::from_msats(42),
+        [1u8; 32],
+        [2u8; 32],
+        vec![3u8],
+    );
+    let bytes = legacy.consensus_encode_to_vec();
+    let decoded =
+        crate::ContractOutput::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
+            .unwrap();
+    assert_eq!(decoded.extension, None);
+    assert_eq!(decoded.consensus_encode_to_vec(), bytes);
+    let mut asset = decoded;
+    asset.version = ASSET_VERSION;
+    asset.extension = Some(AssetExtension::Bundle(AssetBundle::default()));
+    let round_trip = crate::ContractOutput::consensus_decode_whole(
+        &asset.consensus_encode_to_vec(),
+        &ModuleDecoderRegistry::default(),
+    )
+    .unwrap();
+    assert_eq!(asset, round_trip);
 }

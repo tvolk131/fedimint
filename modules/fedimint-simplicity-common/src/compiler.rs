@@ -36,6 +36,24 @@ impl JetHL for FedimintJet {
     fn source_jet_classification(&self) -> SourceJetClassification {
         match self {
             Self::Core(core) => core.source_jet_classification(),
+            Self::Context(
+                ContextJet::InputAssetQuantity
+                | ContextJet::OutputAssetQuantity
+                | ContextJet::InputAuthority
+                | ContextJet::OutputAuthority,
+            ) => {
+                use simplicityhl::types::UIntType::{U32, U256};
+                SourceJetClassification::Custom(vec![simplicityhl::jet::tuple([U32, U256])])
+            }
+            Self::Context(
+                ContextJet::InputAssetId
+                | ContextJet::OutputAssetId
+                | ContextJet::InputAuthorityId
+                | ContextJet::OutputAuthorityId,
+            ) => {
+                use simplicityhl::types::UIntType::U32;
+                SourceJetClassification::Custom(vec![simplicityhl::jet::tuple([U32, U32])])
+            }
             Self::Context(_) => SourceJetClassification::Unary,
         }
     }
@@ -44,6 +62,9 @@ impl JetHL for FedimintJet {
             Self::Core(core) => core.target_jet_classification(),
             Self::Context(ContextJet::SigHashAll) => {
                 TargetJetClassification::Custom(simplicityhl::types::BuiltinAlias::Message.into())
+            }
+            Self::Context(ContextJet::InputAuthority | ContextJet::OutputAuthority) => {
+                TargetJetClassification::Custom(simplicityhl::jet::bool())
             }
             Self::Context(_) => TargetJetClassification::Unary,
         }

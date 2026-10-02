@@ -1,3 +1,5 @@
+mod assets;
+
 use std::collections::BTreeMap;
 
 use bitcoin::hashes::{Hash, sha256};
@@ -218,6 +220,23 @@ impl Harness {
                 Err(anyhow::anyhow!(error))
             }
         }
+    }
+    async fn check_submission(&self, tx: &Transaction, session: u64) -> anyhow::Result<()> {
+        let mut dbtx = self.db.begin_transaction().await;
+        let result = process_transaction_with_dbtx(
+            self.modules.clone(),
+            &mut dbtx.to_ref_nc(),
+            tx,
+            CoreConsensusVersion::new(2, 1),
+            TxProcessingMode::Submission,
+            TransactionConsensusContext {
+                federation_id: federation_id(),
+                session_index: session,
+            },
+        )
+        .await;
+        dbtx.ignore_uncommitted();
+        result.map_err(anyhow::Error::from)
     }
     async fn fund(&self, outputs: Vec<DynOutput>) -> Transaction {
         let key = key();

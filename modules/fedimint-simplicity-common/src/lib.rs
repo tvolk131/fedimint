@@ -1,6 +1,7 @@
 //! Experimental, explicit Bitcoin contract outputs controlled by Simplicity.
 //! Execution version zero is a prototype, not a production consensus format.
 
+pub mod assets;
 #[cfg(feature = "compiler")]
 pub mod compiler;
 pub mod config;
@@ -24,15 +25,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const KIND: ModuleKind = ModuleKind::from_static_str("simplicity");
-pub const MODULE_CONSENSUS_VERSION: ModuleConsensusVersion = ModuleConsensusVersion::new(0, 0);
+pub const MODULE_CONSENSUS_VERSION: ModuleConsensusVersion = ModuleConsensusVersion::new(0, 1);
 pub const EXECUTION_VERSION: u32 = 0;
 pub const MAX_CONTRACTS: usize = 32;
 pub const MAX_PROGRAM_BYTES: usize = 8_192;
 pub const MAX_WITNESS_BYTES: usize = 8_192;
 pub const MAX_RECOVERY_BYTES: usize = 1_024;
 
-/// All amounts are Bitcoin millisatoshis in this first prototype.
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
+/// Bitcoin amounts remain millisatoshis; v1 adds explicit asset extensions.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ContractOutput {
     pub version: u32,
     pub amount: Amount,
@@ -40,6 +41,7 @@ pub struct ContractOutput {
     pub state: [u8; 32],
     /// Opaque client data. Removing the live output does not erase history.
     pub recovery: Vec<u8>,
+    pub extension: Option<assets::AssetExtension>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
@@ -77,6 +79,12 @@ pub enum ContractError {
     Commitment,
     #[error("Simplicity program rejected the transition")]
     Rejected,
+    #[error("invalid asset transition or conservation failure")]
+    Assets,
+    #[error("asset creation namespace has already been used")]
+    NamespaceUsed,
+    #[error("invalid asset creation authorization")]
+    CreationSignature,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Error, Encodable, Decodable)]
@@ -169,5 +177,69 @@ pub fn signature_hash(
 }
 
 pub fn output_fee(output: &ContractOutput) -> Amount {
-    Amount::from_msats(100 + output.recovery.len() as u64)
+    let extra = output
+        .extension
+        .as_ref()
+        .map(|extension| extension.consensus_encode_to_vec().len() as u64)
+        .unwrap_or(0);
+    let creation = output
+        .actions()
+        .map(|actions| {
+            actions
+                .creations
+                .iter()
+                .map(|creation| creation.authority_outputs.len() as u64)
+                .sum::<u64>()
+                * assets::CREATION_FEE_MSAT
+        })
+        .unwrap_or(0);
+    Amount::from_msats(100 + output.recovery.len() as u64 + extra + creation)
+}
+
+// Preserve the exact v0 wire/database encoding. New fields are present only in
+// version one, and unknown versions fail decoding rather than being
+// reinterpreted.
+impl Encodable for ContractOutput {
+    fn consensus_encode<W: std::io::Write>(&self, writer: &mut W) -> Result<(), std::io::Error> {
+        (
+            self.version,
+            self.amount,
+            self.cmr,
+            self.state,
+            &self.recovery,
+        )
+            .consensus_encode(writer)?;
+        if self.version == assets::ASSET_VERSION {
+            self.extension.consensus_encode(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl Decodable for ContractOutput {
+    fn consensus_decode_partial_from_finite_reader<R: std::io::Read>(
+        reader: &mut R,
+        modules: &fedimint_core::module::registry::ModuleDecoderRegistry,
+    ) -> Result<Self, fedimint_core::encoding::DecodeError> {
+        let (version, amount, cmr, state, recovery) =
+            Decodable::consensus_decode_partial_from_finite_reader(reader, modules)?;
+        if version != EXECUTION_VERSION && version != assets::ASSET_VERSION {
+            return Err(fedimint_core::encoding::DecodeError::from_str(
+                "unknown Simplicity output version",
+            ));
+        }
+        let extension = if version == assets::ASSET_VERSION {
+            Decodable::consensus_decode_partial_from_finite_reader(reader, modules)?
+        } else {
+            None
+        };
+        Ok(Self {
+            version,
+            amount,
+            cmr,
+            state,
+            recovery,
+            extension,
+        })
+    }
 }

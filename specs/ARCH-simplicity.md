@@ -1,7 +1,19 @@
 # ARCH-simplicity: Experimental Simplicity contracts
 
+## Status
+
+The guardian contract ledger, execution environments, explicit assets, and
+low-level client builders described below are implemented as an experimental
+prototype. The wallet recovery design is agreed but not implemented: clients
+currently supply opaque recovery bytes without a descriptor, encryption, or
+scanning protocol. The persistent wallet must satisfy
+[REQ-simplicity-recovery](REQ-simplicity-recovery.md).
+
+## Module and transaction boundaries
+
 The opt-in Simplicity module extends the module topology in
-[ARCH-fedimint](ARCH-fedimint.md) with a bitcoin-denominated contract UTXO ledger.
+[ARCH-fedimint](ARCH-fedimint.md) with a contract UTXO ledger for bitcoin and
+explicit assets.
 It depends on Fedimint transaction funding and consensus ordering; the mint does
 not depend on it. [Prototype usage and limits](../modules/fedimint-simplicity-common/README.md)
 belong with the implementation.
@@ -12,6 +24,12 @@ Admission and ordered execution use the same context-aware validation hooks;
 replay uses the session being replayed. Existing modules retain their original
 validation behavior through default hook implementations. No new core transaction
 wire format is introduced.
+
+Core invokes a module validation hook against the unmodified transaction snapshot
+before processing inputs or outputs. A transaction-local, type-erased result is
+passed only to that module's processing hooks. Simplicity resolves every consumed
+contract, validates asset accounting, and executes programs in that phase; it
+applies the validated changes during ordinary input/output processing.
 
 Each contract input consumes one module UTXO and reports its gross bitcoin value
 to core funding. Each contract output separately reports the value it locks.
@@ -36,9 +54,74 @@ successors is an application policy obligation.
 
 Live contract records, including opaque recovery annotations, disappear on spend.
 Core history can retain their original transactions. The current module provides
-no transfer privacy or mnemonic recovery protocol. Separate assets and private
-transfers are not part of the prototype's current responsibilities.
+no transfer privacy or mnemonic recovery protocol.
+
+## Execution versions and explicit assets
 
 Execution version zero pins its runtime, permitted jets, commitments, and cost
 semantics. Future versions must preserve the interpretation of existing outputs;
 contract-authorized spending is the migration boundary.
+
+Execution version one adds bounded multi-asset balances and unique, indivisible
+issuance authorities to contract outputs. A separate module action output carries
+creation, issuance, and destruction declarations without creating a UTXO. Asset
+conservation is module-owned; core bitcoin accounting and the mint remain unaware
+of asset quantities. Issuance requires consuming the relevant authority and
+satisfying its program. Authorities cannot be copied and may be destroyed.
+
+Creation namespaces derive from fresh client signing keys, federation identity,
+and module instance; ordinal-derived asset IDs are independent of funding inputs.
+Creation is authorized over the version-one intent and starts with zero supply.
+Permanent namespace markers prevent replay after destruction. Immutable asset
+records identify the initial authority policy so clients can verify provenance.
+Creation keys confer no ongoing authority. Creation signatures across Simplicity
+module instances are excluded from the v1 intent to avoid self-reference and
+cross-instance signing cycles; v0 encoding and signing remain unchanged.
+
+The expanded execution environment exposes all resolved module inputs, successor
+asset balances and authorities, and issuance/destruction quantities. The client
+SDK constructs these transitions. Its binary-market example encodes collateral,
+oracle resolution, and redemption policy entirely in Simplicity, without guardian
+market-specific rules. A unique shared vault serializes collateral operations;
+independent position transfers do not consume it. Clients verify immutable asset
+origins as well as current holdings before trusting the market policy.
+
+## Wallet recovery design
+
+The initial persistent wallet reconstructs current contracts and confirmed wallet
+interaction history in one ordered scan of existing federation session history.
+It uses Fedimint's history-recovery infrastructure and persists progress so an
+interruption can resume. The Simplicity wallet cannot submit new transactions
+until recovery completes; other modules follow their own recovery rules. There
+is no separate live-contract scan or concurrent history backfill in this design.
+No new guardian recovery endpoint is required for the initial history scan.
+
+Wallet software owns versioned contract templates, descriptors, key derivation,
+annotation encryption, recognition of its historical activity, and reconstruction
+of usable state. Wallet-specific information that cannot be derived must be
+preserved in federation records. A program commitment alone cannot recover an
+arbitrary program or its secrets. Older template and descriptor versions must
+remain interpretable by compatible wallet releases.
+
+Guardians continue treating annotations as opaque, bounded transaction data;
+they do not identify wallets or validate the meaning of encrypted descriptors.
+Wallets must verify recovered descriptors against the actual contract and use
+authenticated federation history. Recovery requires retention of the historical
+records, even after the corresponding live contracts are deleted. The scan must
+recognize terminal spends with no Simplicity successor and preserve their
+confirmed activity rather than only the remaining holdings.
+
+The recovery contract does not depend on Fedimint's deprecated encrypted-backup
+service. Record encoding and placement, including any additional metadata needed
+for terminal spends, remain to be designed within the module's size and fee
+constraints; the current opaque field is not itself a recovery implementation.
+
+## Alternatives
+
+Compact module-specific recovery history remains a possible download
+optimization. It must retain enough information to reconstruct confirmed
+activity as well as current holdings. A live-contract scan alone cannot recover
+fully spent activity. Combining it with historical backfill would add scan
+consistency and concurrent-operation complexity; it is deferred until recovery
+measurements justify it. Neither optimization is required by
+[REQ-simplicity-recovery](REQ-simplicity-recovery.md).

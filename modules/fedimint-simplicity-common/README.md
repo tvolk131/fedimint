@@ -1,26 +1,31 @@
 # Simplicity contract prototype
 
-This experimental module locks bitcoin balances to real Simplicity programs. The
+This experimental module locks bitcoin and explicit asset balances to real Simplicity programs. The
 client compiles SimplicityHL with Fedimint context jets; guardians execute the
 resulting bytecode with `rust-simplicity`. It is opt-in and disabled by default.
 The [architecture record](../../specs/ARCH-simplicity.md) explains its boundary
 with Fedimint consensus and other modules.
+The agreed wallet recovery contract is recorded in
+[REQ-simplicity-recovery](../../specs/REQ-simplicity-recovery.md); it is not yet
+implemented by this prototype.
 
 ## Run the prototype
 
 From the repository root, inside `nix develop`:
 
 ```sh
-cargo test -p fedimint-simplicity-common -p fedimint-simplicity-server --lib
+cargo test -p fedimint-simplicity-common -p fedimint-simplicity-client -p fedimint-simplicity-server --lib
 ```
 
-The integration test uses Fedimint's actual transaction processor and Mint v2
+The transaction integration tests use Fedimint's actual transaction processor and Mint v2
 blind signatures with an in-memory database. It issues real test notes, deposits
 one into a contract, adds a second note to increase the contract's balance,
 spends the contract back into notes for the entire balance minus the execution
 fee, and spends those notes to verify their signatures. A dummy module provides
-only the initial test funding and final accounting sink. This is not a running
-multi-guardian network test.
+only the initial test funding and final accounting sink. A separate market test starts four guardians with TLS P2P, WebSocket APIs,
+Aleph consensus, and RocksDB; it needs permission to bind local ports. Bitcoin
+RPC and funding are simulated. It takes one guardian offline during
+settlement, reopens its database, and checks catch-up before redemption.
 
 The tests also exercise consensus timelocks, authorization of foreign blinded
 outputs, covenant state preservation, funding failures, invalid outer signatures,
@@ -48,7 +53,8 @@ A `ContractOutput` contains the execution version, bitcoin amount in msats,
 program commitment (CMR), 32-byte application state, and bounded recovery bytes.
 A `ContractInput` references its outpoint and supplies the redemption program,
 witness, and a claim key used by the outer Fedimint transaction signature.
-An input consumes one UTXO; an output creates one. A transaction can include many
+An input consumes one UTXO; a contract output creates one. Version-one action
+outputs describe asset operations and do not create spendable UTXOs. A transaction can include many
 of both and combine them with other modules' ordinary inputs and outputs.
 
 The client flow is:
@@ -125,7 +131,7 @@ not be processed at the same point.
 
 ## Limits, fees, and retention
 
-Version 0 allows at most 32 contract inputs and 32 contract outputs for this
+Both execution versions allow at most 32 contract inputs and 32 contract outputs for this
 module instance, within at most 128 total outputs. Each program and witness is
 limited to 8 KiB, each recovery annotation to 1 KiB. Inferred type sizes are
 checked before decoding padded witnesses. Execution is capped by static cost,
@@ -144,12 +150,22 @@ erase historical ciphertext. Recovery bytes are opaque public data to this modul
 wallets must encrypt them before use. No wallet identifier, scanning API, recovery
 encryption scheme, or mnemonic recovery implementation is provided yet.
 
+The agreed persistent-wallet design scans existing federation session history
+to restore both current contracts and confirmed interactions, including those
+whose outputs have all been spent. It requires only compatible wallet software,
+the mnemonic, and the federation; it does not use the deprecated backup API or
+require a separate backup file. Recovery progress is resumable, and the
+Simplicity wallet becomes available for transactions only after the scan
+completes. See [ARCH-simplicity](../../specs/ARCH-simplicity.md#wallet-recovery-design)
+for the design and [REQ-simplicity-recovery](../../specs/REQ-simplicity-recovery.md)
+for its requirements and history boundary.
+
 ## Prototype boundary
 
-Only native bitcoin contracts are implemented. Asset issuance/reissuance,
-prediction-market application contracts, private transfers, durable wallet state
-machines, recovery scanning, and a complete indexed input environment are later
-work. This prototype validates the execution and accounting foundation first.
+Native bitcoin contracts, public asset issuance/transfers/destruction, and a
+binary-market example are implemented. Private transfers, durable wallet state
+machines, recovery scanning, market indexing, and a production trading UI remain
+later work. The SDK does not discover holdings or retry conflicting vault spends.
 
 The runtime, compiler revision, core jet allowlist, custom jet identifiers and
 CMRs, types, and costs are consensus-critical. Custom environment jets currently
@@ -159,3 +175,151 @@ Liquid programs must be ported to this environment. Do not reinterpret existing
 v0 outputs when adding versions: migration requires an authorized spend.
 
 This is a development prototype, not an audited module for holding real funds.
+
+
+## Explicit assets and execution version one
+
+Module consensus version 0.1 adds execution version 1. Existing v0 outputs keep
+exactly their previous binary encoding, digest, jet allowlist, and fee behavior;
+v0 database records need no migration. New asset jets and `multiply_64` are
+rejected when spending a v0 output. Moving bitcoin into v1 requires an authorized
+transaction. All guardians must agree on the upgraded module consensus version;
+this is not automatic activation in an existing federation.
+
+`program.asset_output(bitcoin, state, recovery, AssetBundle { balances,
+authorities })` creates a v1 UTXO. Balances have strictly sorted unique asset IDs
+and positive u64 quantities; authorities are strictly sorted unique IDs. Bitcoin
+remains a separate msat field. One output may bundle several assets under one
+program/state, but spending any part consumes the whole output. Owners can split
+or merge balances through ordinary successors. Authority-bearing contracts are
+excluded from the SDK's `assets::select_assets` helper; applications spend those
+explicitly. Selection handles asset change; native funding and fees are separate.
+
+One `assets::action_output(AssetActions)` may accompany a transaction. It carries
+creation batches, issuance quantities, and explicit burns. It has no value, CMR,
+state, or recovery annotation and creates no UTXO. The core's validation hook
+resolves all consumed contracts before any inputs or outputs are processed. The
+module checks each asset with u128 accumulation:
+
+`consumed + authorized issuance = created + explicit burns`.
+
+Unknown assets, duplicate inputs, duplicate authorities, implicit burning, and
+unauthorized issuance are rejected. An authority can have at most one successor;
+omitting it permanently destroys it. Issuance requires consuming that asset's
+authority and satisfying its program. Bitcoin conservation remains core-owned,
+and token quantities do not enter the bitcoin liability audit. Failed funding,
+signatures, or module validation roll back the entire transaction.
+
+`assets::creation(federation, module, fresh_key, authority_output_indices)` returns
+an unsigned creation batch and precomputable IDs. Its namespace hashes a versioned
+domain, federation, module instance, and fresh public key; asset IDs hash a separate
+domain, namespace, and ordinal. One key can create many assets with any funding
+input structure. Creation has zero supply and exactly one authority per asset,
+placed in the designated outer output. The first issuance is a second transaction
+spending that authority. No initial-issuance bypass exists.
+
+After assembling outputs, call `assets::sign_creation` for every creation key.
+V1 programs use `assets::signature_value` rather than the v0 helper. The v1 digest
+covers all module spend references/claim keys, nonce, and outer outputs, including
+asset operations, but substitutes zeroes for creation signatures in v1 action outputs across all
+decoded Simplicity instances, preserving their module IDs. This avoids circular
+commitments when several instances create assets together. Other foreign output
+bytes remain opaque and unchanged. Sign creations before any v0 program signatures in
+a mixed transaction, then apply outer signatures after all witnesses are final.
+Foreign funding inputs remain excluded from inner signatures for sponsorship.
+
+Namespace reuse is rejected forever, including after all authorities and tokens
+are destroyed. Immutable `AssetRecord`s retain the original authority outpoint,
+CMR, state, creation key, and ordinal. API version 0.1 adds
+`asset(AssetId) -> Option<AssetRecord>`; use federation consensus query mechanisms
+to authenticate its response. The creation key has no later issuance privilege.
+Records are public; fresh keys avoid creating a stable wallet identifier.
+
+V1 adds these jets (input indices remain module-local, output indices outer):
+
+| Jet family | Arguments and result |
+| --- | --- |
+| `fm_input_amount/cmr/state/version(i)` | Resolved consumed contract fields |
+| `fm_input_outpoint_hash(i)` | Hash of the canonical consumed outpoint |
+| `fm_output_version(i)` | Successor execution version |
+| `fm_input_asset_quantity((i, id))`, `fm_output_asset_quantity((i, id))` | u64 quantity, zero for an absent ID |
+| `fm_input_authority((i, id))`, `fm_output_authority((i, id))` | Authority membership as bool |
+| `fm_input_asset_count(i)`, `fm_output_asset_count(i)` | Number of balances |
+| `fm_input_authority_count(i)`, `fm_output_authority_count(i)` | Number of authorities |
+| `fm_input_asset_id((i, entry))`, `fm_output_asset_id((i, entry))` | Balance ID at sorted entry index |
+| `fm_input_authority_id((i, entry))`, `fm_output_authority_id((i, entry))` | Authority ID at sorted entry index |
+| `fm_issued_quantity(id)`, `fm_burned_quantity(id)` | Aggregate transaction quantity, zero if absent |
+
+Invalid contract/entry indices and foreign output inspection fail; asset output
+jets also reject action outputs. Foreign outputs remain opaque to programs.
+There are at most 32 distinct asset IDs per transition, 32 entries of either kind
+per bundle, and 32 created assets per transaction. V1 output fees add one msat per
+encoded extension byte and 10,000 msat per newly registered asset to cover permanent
+records. These fees and context-jet costs still require production calibration.
+
+## Binary prediction-market example
+
+The client `market::BinaryMarket` compiles
+[binary_market.simf](../fedimint-simplicity-client/contracts/binary_market.simf).
+One vault owns both unique issuance authorities and the bitcoin collateral. It
+must be module input 0 and recreate itself at outer output 0. `ACTION` witnesses:
+
+| Action | Rule |
+| --- | --- |
+| 0: issue | Before the deadline, deposit q sats and issue q YES plus q NO |
+| 1: recombine | While unresolved, burn q of each and release q sats |
+| 2: resolve | During the resolution window, verify an oracle signature for YES=1, NO=2, or INVALID=3; at/after the deadline only INVALID timeout is allowed |
+| 3: redeem | Burn winners for 1000 msat/unit, or either side for 500 msat/unit when INVALID |
+
+State 0 means unresolved. Resolution permanently commits state 1, 2, or 3 in the
+vault lineage. Authorities remain in the resolved vault but its program forbids
+further issuance. Even an empty vault retains its recorded outcome. Concurrent
+collateral operations contend for that output and must be rebuilt after a
+conflict. Ordinary position transfers do not touch it.
+
+Oracle messages commit the federation, module, both asset IDs, event identifier,
+resolution-rules hash, oracle key, window, and outcome. Guardians never contact the
+oracle. Clocks constrain transaction acceptance, not when the oracle published a
+signature. If the oracle equivocates before resolution, the first accepted
+resolution wins; the prototype assumes the configured oracle reports honestly.
+
+Call `BinaryMarket::validate_genesis` with authenticated asset records before
+accepting assets as positions. Checking only the current vault is insufficient:
+an issuer could mint elsewhere and later move authority into the market program.
+The helper verifies derived IDs, a shared original vault, the expected CMR, and
+unresolved initial state. Transfer recipients must additionally check their actual
+output quantities and ownership policy.
+
+The vault enforces collateral reduction and matching burns. Position-owner
+signatures authorize the payout destinations; an oracle signature authorizes only
+resolution, never an unrestricted release. The examples use external fee
+sponsorship. Owners can instead pay fees from an authorized redemption payout;
+the vault must still preserve all collateral backing the remaining positions. The generic ledger grants no bitcoin entitlement merely
+for burning a token. Multi-vault policies must prevent reusing the same burn to
+satisfy multiple obligations; this example uses one unique authority-bearing vault.
+
+[Asset integration tests](../fedimint-simplicity-server/src/tests/assets.rs) cover
+creation, collateral funding from real Mint v2 notes, split holdings, independent
+YES trading for ecash, recombination, all outcomes, timeout, redemption into ecash,
+and spending the resulting note. Negative cases cover forgery, inflation,
+namespace replay, authority copying/destruction, overflow, invalid signatures,
+provenance, legacy compatibility, and transaction rollback.
+
+[Market hardening tests](../fedimint-simplicity-server/src/tests/assets/market_hardening.rs)
+exercise oracle domain binding, exact resolution/timeout boundaries, altered
+successor policies, unequal pairs, forbidden state transitions, repeated issuance,
+independent transfers of both sides, and partial redemptions until every outcome's
+vault is empty. Distinct competing redemptions must rebuild against the accepted
+successor. Transactions admitted before a deadline must fail if consensus
+executes them after expiry. Most policy cases sponsor fees with the dummy module; a separate
+exact-funding lifecycle uses real Mint v2 notes and authorized change, checks a
+one-msat shortfall rolls back, and reconciles all Simplicity fees. That fixture
+configures zero mint fees; it is not a production fee-calibration test.
+
+The [network test](../fedimint-simplicity-server/src/tests/assets/network.rs)
+submits market transactions through the federation API, verifies all guardians'
+contract and origin records, and kills a guardian process while the remaining quorum settles the market.
+Restarting it from the same RocksDB exercises recovery of committed state and
+catch-up of missed consensus history. It does not test a persistent client wallet
+or inject crashes at every database-write boundary. No test
+claims exhaustive bytecode fuzzing or production security assurance.

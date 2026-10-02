@@ -1,4 +1,10 @@
 //! Low-level prototype contract builder. This is not yet a persistent wallet.
+pub mod assets;
+pub mod market;
+
+#[cfg(test)]
+mod tests;
+
 use anyhow::{anyhow, ensure};
 use bitcoin::hashes::Hash;
 pub use common::compiler;
@@ -44,6 +50,7 @@ impl ContractProgram {
             cmr: self.cmr(),
             state,
             recovery,
+            extension: None,
         })
     }
 

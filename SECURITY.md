@@ -153,3 +153,25 @@ erase its historical ciphertext. This module adds neither ecash-like transfer
 privacy nor mnemonic recovery. See the
 [prototype documentation](modules/fedimint-simplicity-common/README.md) for exact
 API, retention, and implementation limits.
+
+
+Execution version one adds public assets with guardian-enforced conservation and
+unique issuance capabilities. Creation starts at zero supply; first issuance must
+execute the authority contract. Fresh client creation keys authenticate immutable
+asset origins but have no continuing issuance power. Namespace-use markers and
+origin records are retained permanently to prevent resurrection after destruction.
+The v1 intent excludes creation signatures across Simplicity instances to avoid
+circularity, while committing
+the creation parameters and all issuance/destruction operations. Contract programs
+execute against one pre-mutation snapshot; final outer authorization and core
+funding checks still gate database commitment.
+
+The `asset` point-query endpoint exposes immutable origin records without
+credentials; it adds no listing or wallet identifier. As with contract queries,
+clients need normal federation consensus queries rather than trusting one server.
+The binary-market SDK verifies both assets originated in the expected unresolved
+vault; current-vault inspection alone cannot establish backing. Its oracle fixes
+the market outcome, while position-owner programs authorize payout destinations.
+Collateral operations share one vault and serialize; ordinary position transfers
+remain public, independent UTXO spends. Oracle honesty, client descriptor retention,
+and safe application covenant construction remain explicit trust boundaries.
