@@ -28,6 +28,10 @@ pub enum InputSMState {
     Pending,
     Success,
     Refunding(OutPointRange),
+    // Append-only: keep legacy persisted state encodings unchanged.
+    Reserved,
+    AwaitingRelease,
+    Released,
 }
 
 impl State for InputStateMachine {
@@ -35,7 +39,7 @@ impl State for InputStateMachine {
 
     fn transitions(
         &self,
-        _context: &Self::ModuleContext,
+        context: &Self::ModuleContext,
         global_context: &DynGlobalClientContext,
     ) -> Vec<StateTransition<Self>> {
         let gc = global_context.clone();
@@ -54,7 +58,59 @@ impl State for InputStateMachine {
                     },
                 )]
             }
-            InputSMState::Success | InputSMState::Refunding(..) => {
+            InputSMState::Reserved => {
+                let txid = self.common.txid;
+                vec![StateTransition::new(
+                    async move { gc.await_tx_accepted(txid).await },
+                    |dbtx, result: Result<(), String>, mut old: Self| {
+                        Box::pin(async move {
+                            old.state = crate::reservation::record_outcome(
+                                &mut dbtx.module_tx(),
+                                &old.common,
+                                result.is_ok(),
+                            )
+                            .await;
+                            old
+                        })
+                    },
+                )]
+            }
+            InputSMState::AwaitingRelease => {
+                let db = context.client_ctx.module_db().clone();
+                let common = self.common.clone();
+                let balance = context.balance_update_sender.clone();
+                vec![StateTransition::new(
+                    async move {
+                        db.wait_key_check(
+                            &crate::client_db::FundingReservationKey(common.operation_id),
+                            |record| {
+                                (record
+                                    == Some(
+                                        crate::reservation::FundingReservation::ReleaseRequested(
+                                            common.txid,
+                                        ),
+                                    ))
+                                .then_some(())
+                            },
+                        )
+                        .await;
+                    },
+                    move |dbtx, (), mut old: Self| {
+                        let balance = balance.clone();
+                        Box::pin(async move {
+                            crate::reservation::restore_notes(
+                                &mut dbtx.module_tx(),
+                                &old.common,
+                                balance,
+                            )
+                            .await;
+                            old.state = InputSMState::Released;
+                            old
+                        })
+                    },
+                )]
+            }
+            InputSMState::Success | InputSMState::Refunding(..) | InputSMState::Released => {
                 vec![]
             }
         }
