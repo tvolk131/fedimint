@@ -105,6 +105,10 @@ pub enum OperationLookupError {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum TransactionSubmitError {
+    /// A module could not authorize the final funded transaction.
+    #[error("Transaction authorization failed")]
+    Finalization(#[source] ClientModuleError),
+
     /// The operation the transaction would be recorded under already exists.
     #[error("The operation already exists")]
     OperationAlreadyExists(#[from] OperationAlreadyExistsError),

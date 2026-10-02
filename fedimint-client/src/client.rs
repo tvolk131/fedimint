@@ -845,7 +845,33 @@ impl Client {
                 .expect("Inputs >= outputs for own transactions")
         };
 
-        let (transaction, states) = partial_transaction.build(&self.secp_ctx, thread_rng());
+        let original_inputs = partial_transaction.inputs().cloned().collect::<Vec<_>>();
+        let original_outputs = partial_transaction.outputs().cloned().collect::<Vec<_>>();
+        let (transaction, states) = partial_transaction.build(&self.secp_ctx, thread_rng())?;
+
+        // Authorization may replace witnesses/signatures, but it cannot change
+        // the fees used to select funding. Fail before committing any operation
+        // or state machine if a module supplied a different shape.
+        for (original, finalized) in original_inputs.iter().zip(&transaction.inputs) {
+            let module = self.get_module(finalized.module_instance_id());
+            if module.input_fee(&original.amounts, finalized)
+                != module.input_fee(&original.amounts, &original.input)
+            {
+                return Err(TransactionSubmitError::Finalization(
+                    ClientModuleError::other("finalizer changed input fees"),
+                ));
+            }
+        }
+        for (original, finalized) in original_outputs.iter().zip(&transaction.outputs) {
+            let module = self.get_module(finalized.module_instance_id());
+            if module.output_fee(&original.amounts, finalized)
+                != module.output_fee(&original.amounts, &original.output)
+            {
+                return Err(TransactionSubmitError::Finalization(
+                    ClientModuleError::other("finalizer changed output fees"),
+                ));
+            }
+        }
 
         Ok(FinalizedTransaction {
             transaction,

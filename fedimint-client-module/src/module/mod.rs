@@ -278,6 +278,11 @@ where
         }
     }
 
+    /// This module instance within the federation. Available during init.
+    pub fn module_instance_id(&self) -> ModuleInstanceId {
+        self.module_instance_id
+    }
+
     /// Get a reference to a global Api handle
     pub fn global_api(&self) -> DynGlobalApi {
         self.client.get().api_clone()
