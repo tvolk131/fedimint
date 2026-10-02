@@ -4871,8 +4871,11 @@ version = "0.13.0-alpha"
 dependencies = [
  "anyhow",
  "bitcoin",
+ "fedimint-aead",
  "fedimint-core",
+ "fedimint-derive-secret",
  "fedimint-simplicity-common",
+ "serde",
 ]
 
 [[package]]
