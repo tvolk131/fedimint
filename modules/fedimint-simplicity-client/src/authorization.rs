@@ -25,6 +25,7 @@ pub(crate) struct Authorization {
     pub module: ModuleInstanceId,
     pub spends: Vec<PreparedSpend>,
     pub creations: Vec<Keypair>,
+    pub receipt: Option<crate::receipt::ReceiptPlan>,
 }
 
 impl fmt::Debug for Authorization {
@@ -36,6 +37,27 @@ impl fmt::Debug for Authorization {
 }
 
 impl TransactionFinalizer for Authorization {
+    fn prepare_outputs(
+        &self,
+        tx: &Transaction,
+    ) -> Result<Vec<(usize, DynOutput)>, ClientModuleError> {
+        self.receipt
+            .as_ref()
+            .map(|plan| {
+                plan.prepare(tx)
+                    .map(|output| vec![(plan.output_index, output)])
+                    .map_err(ClientModuleError::other)
+            })
+            .unwrap_or_else(|| Ok(vec![]))
+    }
+
+    fn verify_finalized(&self, tx: &Transaction) -> Result<(), ClientModuleError> {
+        if let Some(plan) = &self.receipt {
+            plan.verify(tx).map_err(ClientModuleError::other)?;
+        }
+        Ok(())
+    }
+
     fn finalize_outputs(
         &self,
         tx: &Transaction,

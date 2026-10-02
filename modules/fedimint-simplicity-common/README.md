@@ -193,6 +193,9 @@ module. The API is currently Rust-only:
   Asset change and authority successors remain explicit outputs.
 - `await_operation(id)` waits for acceptance and history synchronization or
   rejection cleanup. The core executor resumes pending submissions on restart.
+- `submit_with_receipt(..., context)` explicitly includes a sender receipt with
+  optional versioned application data. Ordinary `submit` adds a minimal receipt
+  automatically when no owned input or output identifies the operation.
 - `sync()`, `contracts()`, and `history()` provide a refresh, all recognized
   contracts (including spent ones), and ordered confirmed transactions. Filter
   `spent_by == None` for current holdings. Shared market collateral is not an
@@ -211,9 +214,15 @@ ordered authenticated scan through the current accepted session prefix. It
 stores progress atomically and refuses to silently skip an unsupported owned
 descriptor. This depends on the original federation retaining its history.
 
-Every submitted operation must contain a recognizable wallet input or output.
-To send primary-module funds solely to another wallet, first deposit into a wallet
-contract; an unrecognized direct send is rejected to avoid losing sender history.
+Direct sends from primary-module funds to another wallet carry an encrypted sender
+receipt on the existing non-spendable action output. The 1 KiB annotation limit and
+per-byte fee apply; no extra UTXO or recovery endpoint is created. Receipts use a
+separate mnemonic-derived encryption key and bind the funding inputs, nonce,
+spending references and outputs. Public receipt bytes and creation signatures
+are normalized out of that recovery commitment to avoid circular signing.
+All receipts are finalized before creation and contract authorization; a final
+check rejects any later mutation of their committed intent. `history().sent`
+records sender activity without claiming ownership of recipient contracts.
 Low-level callers bypass these wallet guarantees. Arbitrary imported policies,
 local labels, failed attempts, and original operation IDs are not implicitly
 recoverable; confirmed transactions and encrypted application context are.
@@ -257,7 +266,8 @@ explicitly. Selection handles asset change; native funding and fees are separate
 
 One `assets::action_output(AssetActions)` may accompany a transaction. It carries
 creation batches, issuance quantities, and explicit burns. It has no value, CMR,
-state, or recovery annotation and creates no UTXO. The core's validation hook
+or state and creates no UTXO. It may carry bounded opaque recovery bytes, including
+an encrypted sender receipt. The core's validation hook
 resolves all consumed contracts before any inputs or outputs are processed. The
 module checks each asset with u128 accumulation:
 

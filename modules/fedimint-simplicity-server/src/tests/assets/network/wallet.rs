@@ -233,13 +233,11 @@ async fn run() {
             },
         )
         .unwrap();
-    assert!(
-        wallet
-            .submit(vec![], vec![bob_output.clone()], vec![])
-            .await
-            .is_err(),
-        "unrecognizable sender history must not be silently accepted"
-    );
+    let (unbacked, _) = wallet
+        .submit(vec![], vec![bob_output.clone()], vec![])
+        .await
+        .unwrap();
+    assert!(wallet.await_operation(unbacked).await.is_err());
     assert!(
         wallet
             .await_operation(fedimint_core::core::OperationId::new_random())
@@ -340,4 +338,142 @@ async fn run() {
     );
     bob.shutdown().await;
     fed.completed = true;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_sender_receipts_restore_history_without_owning_recipient_contracts() {
+    tokio::time::timeout(Duration::from_secs(180), async {
+        let mut fed = Federation::new().await;
+        let alice = join(&fed, db(), 11, false, false).await;
+        let bob = join(&fed, db(), 12, false, false).await;
+        funds(&alice).await;
+        funds(&bob).await;
+        let sender = alice.get_first_module::<SimplicityClientModule>().unwrap();
+        let recipient = bob.get_first_module::<SimplicityClientModule>().unwrap();
+        // No sender-owned Simplicity contracts: funding comes entirely from the
+        // primary module. A minimal receipt is installed automatically.
+        let received = recipient
+            .receive(Amount::from_sats(10), AssetBundle::default())
+            .unwrap();
+        let id = submit(&sender, vec![], vec![received], vec![]).await;
+        recipient.sync().await.unwrap();
+        assert!(sender.contracts().await.is_empty());
+        let history = sender.history().await;
+        assert_eq!(history.len(), 1);
+        assert!(history[0].sent.is_some());
+        assert!(history[0].received.is_empty());
+        assert_eq!(history[0].transaction.tx_hash(), id);
+        assert_eq!(
+            history[0]
+                .transaction
+                .outputs
+                .iter()
+                .filter(|output| output.module_instance_id() == fed.simplicity)
+                .count(),
+            2
+        );
+        let bob_contracts = recipient.contracts().await;
+        assert_eq!(bob_contracts.len(), 1);
+        assert_eq!(
+            bob_contracts[0].0,
+            OutPoint {
+                txid: id,
+                out_idx: 0
+            }
+        );
+        for peer in fed.configs.keys() {
+            assert!(
+                fed.contract_on(
+                    *peer,
+                    OutPoint {
+                        txid: id,
+                        out_idx: 1
+                    }
+                )
+                .await
+                .is_none(),
+                "receipts must not create a UTXO"
+            );
+        }
+        // An accepted transaction funded by Bob can copy Alice's public
+        // ciphertext, but it must not become outgoing activity in her wallet.
+        let copied = history[0].transaction.outputs[1]
+            .as_any()
+            .downcast_ref::<ContractOutput>()
+            .unwrap()
+            .clone();
+        let unrelated = recipient
+            .receive(Amount::from_sats(1), AssetBundle::default())
+            .unwrap();
+        submit(&recipient, vec![], vec![unrelated, copied], vec![]).await;
+        sender.sync().await.unwrap();
+        assert_eq!(sender.history().await, history);
+        let bob_contracts = recipient.contracts().await;
+        assert_eq!(bob_contracts.len(), 2);
+        // Explicit application metadata can reuse an action output and is
+        // retained even when the transaction also has an owned contract.
+        let own = sender
+            .receive(Amount::from_sats(1), AssetBundle::default())
+            .unwrap();
+        let context = fedimint_simplicity_client::receipt::ReceiptContext {
+            application: "receipt-test".to_owned(),
+            version: 1,
+            data: b"private note".to_vec(),
+        };
+        let (op, _) = sender
+            .submit_with_receipt(
+                vec![],
+                vec![own, assets::action_output(AssetActions::default()).unwrap()],
+                vec![],
+                Some(context.clone()),
+            )
+            .await
+            .unwrap();
+        sender.await_operation(op).await.unwrap();
+        let expected = sender.history().await;
+        assert_eq!(expected.len(), 2);
+        assert_eq!(expected[1].sent.as_ref().unwrap().context, Some(context));
+        assert_eq!(expected[1].received.len(), 1);
+        let alice_contracts = sender.contracts().await;
+        drop(sender);
+        alice.shutdown().await;
+        let alice = join(&fed, db(), 11, false, true).await;
+        let restored = alice.get_first_module::<SimplicityClientModule>().unwrap();
+        assert_eq!(restored.history().await, expected);
+        assert_eq!(restored.contracts().await, alice_contracts);
+        drop(recipient);
+        bob.shutdown().await;
+        let bob = join(&fed, db(), 12, false, true).await;
+        let restored_bob = bob.get_first_module::<SimplicityClientModule>().unwrap();
+        assert_eq!(restored_bob.contracts().await, bob_contracts);
+        funds(&bob).await;
+        submit(
+            &restored_bob,
+            bob_contracts
+                .iter()
+                .map(|(point, _)| SpendIntent::owner(*point))
+                .collect(),
+            vec![],
+            vec![],
+        )
+        .await;
+        let bob_history = restored_bob.history().await;
+        assert_eq!(bob_history.len(), 3);
+        drop(restored_bob);
+        bob.shutdown().await;
+        let bob = join(&fed, db(), 12, false, true).await;
+        assert_eq!(
+            bob.get_first_module::<SimplicityClientModule>()
+                .unwrap()
+                .history()
+                .await,
+            bob_history
+        );
+        drop(restored);
+        alice.shutdown().await;
+        bob.shutdown().await;
+        fed.completed = true;
+    })
+    .await
+    .unwrap();
 }

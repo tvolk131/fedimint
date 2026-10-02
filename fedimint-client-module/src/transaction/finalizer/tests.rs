@@ -199,3 +199,102 @@ fn finalizers_cannot_append_reassign_or_overwrite_another_modules_items() {
         .build(SECP256K1, rand::thread_rng());
     assert!(result.is_err());
 }
+
+#[derive(Debug)]
+struct MetadataStages {
+    index: usize,
+    module: u16,
+    reject: bool,
+}
+impl TransactionFinalizer for MetadataStages {
+    fn prepare_outputs(
+        &self,
+        _: &Transaction,
+    ) -> Result<Vec<(usize, DynOutput)>, ClientModuleError> {
+        Ok(vec![(self.index, TestOutput(10).into_dyn(self.module))])
+    }
+    fn finalize_outputs(
+        &self,
+        tx: &Transaction,
+    ) -> Result<Vec<(usize, DynOutput)>, ClientModuleError> {
+        assert!(
+            tx.outputs
+                .iter()
+                .all(|o| o.as_any().downcast_ref::<TestOutput>().unwrap().0 >= 10)
+        );
+        Ok(vec![(self.index, TestOutput(20).into_dyn(self.module))])
+    }
+    fn verify_finalized(&self, tx: &Transaction) -> Result<(), ClientModuleError> {
+        assert!(
+            tx.outputs
+                .iter()
+                .all(|o| o.as_any().downcast_ref::<TestOutput>().unwrap().0 == 20)
+        );
+        if self.reject {
+            return Err(ClientModuleError::other("final invariant failed"));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn all_metadata_is_prepared_before_authorization_and_final_checks_can_abort() {
+    for reject in [false, true] {
+        let mut builder = TransactionBuilder::new();
+        for (index, module) in [1, 2].into_iter().enumerate() {
+            builder = builder
+                .with_outputs(
+                    ClientOutputBundle::new_no_sm(vec![ClientOutput {
+                        output: TestOutput(0),
+                        amounts: Amounts::ZERO,
+                    }])
+                    .into_dyn(module),
+                )
+                .with_finalizer(
+                    module,
+                    Arc::new(MetadataStages {
+                        index,
+                        module,
+                        reject,
+                    }),
+                );
+        }
+        assert_eq!(
+            builder.build(SECP256K1, rand::thread_rng()).is_err(),
+            reject
+        );
+    }
+}
+
+#[test]
+fn preparation_obeys_module_index_and_single_writer_boundaries() {
+    for (index, module, duplicate) in [(1, 1, false), (0, 2, false), (0, 1, true)] {
+        let mut builder = TransactionBuilder::new()
+            .with_outputs(
+                ClientOutputBundle::new_no_sm(vec![ClientOutput {
+                    output: TestOutput(0),
+                    amounts: Amounts::ZERO,
+                }])
+                .into_dyn(1),
+            )
+            .with_finalizer(
+                1,
+                Arc::new(MetadataStages {
+                    index,
+                    module,
+                    reject: false,
+                }),
+            );
+        if duplicate {
+            builder = builder.with_finalizer(
+                1,
+                Arc::new(MetadataStages {
+                    index,
+                    module,
+                    reject: false,
+                }),
+            );
+        }
+        assert!(builder.build(SECP256K1, rand::thread_rng()).is_err());
+    }
+}

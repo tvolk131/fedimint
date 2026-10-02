@@ -126,15 +126,28 @@ A shared binary-market vault remains recognizable through successors preserving
 its policy and issuance authorities, even when another participant replaces its
 annotation. Watching that vault does not count all its collateral as wallet funds.
 
-The initial persistent submission API requires at least one recognized wallet
-input or output. Directly funding only someone else's contracts from another
-module is rejected because it would leave no recoverable sender history. The
-wallet can first deposit into its own contract, then transfer it. Application
+The persistent submission API adds an encrypted sender receipt when there is no
+recognized wallet input or output, enabling direct funding of someone else's
+contracts from another module. One receipt per module instance fits in the
+existing action output's bounded recovery bytes. It creates no UTXO and requires
+no guardian endpoint: recovery scans the retained transaction history. Optional
+versioned application context may accompany the receipt. Receipt encryption uses
+a separate mnemonic derivation and fresh randomness, without a wallet identifier.
+Receipt recognition records sent activity without inferring ownership.
+
+The receipt commitment binds all input order/module IDs, nonce and outputs. For
+Simplicity inputs it binds outpoints and claim keys; foreign inputs retain their
+full encoding. Simplicity programs/witnesses and outer signatures are excluded.
+Across all Simplicity instances, FMR1 action annotations and creation signatures
+are normalized out to break circularity. Other annotation bytes remain bound.
+Copied receipts with mismatching commitments are ignored; an authenticated,
+matching but unsupported receipt is an error. Application
 metadata promised to survive must fit a descriptor or be derivable; arbitrary
 program imports and local-only notes have no implicit recovery guarantee.
 
-Core client finalizers authorize the transaction after funding, change and nonce
-are fixed, before outer signatures and state-machine IDs. Module replacements
+Core client finalizers prepare all reserved receipt metadata after funding,
+change and nonce are fixed, then authorize outputs and inputs, then verify final
+invariants before outer signatures and state-machine IDs. Module replacements
 cannot change the transaction shape or cross module boundaries, and core checks
 that fees remain unchanged. Simplicity reserves inputs together with durable core
 submission state, releases reservations on rejection, and synchronizes accepted
