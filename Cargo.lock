@@ -4893,6 +4893,7 @@ dependencies = [
  "bitcoin",
  "fedimint-core",
  "serde",
+ "serde_json",
  "simplicity-lang",
  "simplicity-sys",
  "simplicityhl",

@@ -22,5 +22,8 @@ simplicity-sys = "=0.8.0"
 simplicityhl = { git = "https://github.com/BlockstreamResearch/SimplicityHL", rev = "351eb068e30affc69189993739cd1b30b02b269d", optional = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+serde_json = { workspace = true }
+
 [lints]
 workspace = true

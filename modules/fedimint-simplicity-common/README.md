@@ -147,6 +147,11 @@ checks canonical encoding, sharing, and types; inferred type sizes are then
 checked before decoding padded witnesses. Execution is capped by static cost,
 cell, and frame bounds; the constants are in `runtime::decode_program`.
 
+Fixed [consensus vectors](tests/vectors/README.md) pin v0/v1 encodings and signing
+hashes, asset IDs, all custom jet identities/types/costs, and selected execution
+commitments/resource bounds. Direct jet tests cover the C-frame adapter boundary;
+server tests also exercise two instances through core processing and rollback.
+
 Spending costs 100 msat plus one msat per rounded static cost weight unit and
 per encoded program/witness byte. Creation costs 100 msat plus one msat per
 recovery byte. These are experimental fixed coefficients, not a benchmarked

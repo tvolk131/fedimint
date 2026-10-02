@@ -1,3 +1,5 @@
+mod vectors;
+
 use std::sync::Arc;
 
 use fedimint_core::secp256k1::{Keypair, SECP256K1, SecretKey};
