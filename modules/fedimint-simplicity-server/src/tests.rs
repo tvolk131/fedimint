@@ -1,4 +1,5 @@
 mod assets;
+mod config;
 
 use std::collections::BTreeMap;
 
