@@ -3,8 +3,9 @@
 use bitcoin::hashes::Hash;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::ModuleInstanceId;
-use fedimint_core::encoding::Encodable;
+use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::secp256k1::XOnlyPublicKey;
+use serde::{Deserialize, Serialize};
 
 use crate::ContractProgram;
 use crate::common::assets::AssetId;
@@ -13,7 +14,7 @@ use crate::compiler::{U256, Value, ValueConstructible, arguments};
 pub const BINARY_MARKET: &str = include_str!("../contracts/binary_market.simf");
 pub const ASSET_OWNER: &str = include_str!("../contracts/asset_owner.simf");
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Encodable, Decodable)]
 pub struct BinaryMarket {
     pub federation: FederationId,
     pub module: ModuleInstanceId,

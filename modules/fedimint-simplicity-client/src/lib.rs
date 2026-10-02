@@ -1,5 +1,6 @@
 //! Low-level prototype contract builder. This is not yet a persistent wallet.
 pub mod assets;
+pub mod descriptor;
 pub mod market;
 
 #[cfg(test)]

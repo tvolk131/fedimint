@@ -11,8 +11,11 @@ version = { workspace = true }
 [dependencies]
 anyhow = { workspace = true }
 bitcoin = { workspace = true }
+fedimint-aead = { workspace = true }
 fedimint-core = { workspace = true }
+fedimint-derive-secret = { workspace = true }
 fedimint-simplicity-common = { workspace = true, features = ["compiler"] }
+serde = { workspace = true }
 
 [lints]
 workspace = true
