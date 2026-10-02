@@ -1,11 +1,120 @@
 //! Persist competing attempts before starting their core executors. This makes
 //! the race deterministic while using the real guardian consensus and client.
-use fedimint_core::encoding::Decodable;
+use fedimint_client::transaction::{TransactionBuilder, TxSubmissionStates};
+use fedimint_core::core::OperationId;
+use fedimint_core::db::IDatabaseTransactionOpsCoreTyped;
+use fedimint_core::encoding::{Decodable, Encodable};
+use fedimint_mintv2_client::{MintClientInit, SpendableNote};
 use fedimint_simplicity_client::intent::{
     Intent, IntentPolicy, IntentRecord, IntentStatus, MintPairs, RetryMode,
 };
+use futures::StreamExt;
 
 use super::*;
+
+// Exercise intents with real ecash and nonzero mint fees. The dummy module is
+// used only to bootstrap issuance; all purchase funding comes from Mint v2.
+async fn builder(stopped: bool) -> ClientBuilder {
+    let mut builder = super::builder(stopped).await;
+    builder.with_module(MintClientInit);
+    builder
+}
+async fn open(database: Database, seed: u8) -> ClientHandle {
+    builder(false)
+        .await
+        .open(
+            ConnectorRegistry::build_from_testing_env().bind().await,
+            database,
+            root(seed),
+        )
+        .await
+        .unwrap()
+}
+async fn join(
+    fed: &Federation,
+    database: Database,
+    seed: u8,
+    stopped: bool,
+    recover: bool,
+) -> ClientHandle {
+    let config = fed.configs[&PeerId::from(0)]
+        .consensus
+        .to_client_config(&registry())
+        .unwrap();
+    let preview = builder(stopped)
+        .await
+        .preview_with_existing_config(
+            ConnectorRegistry::build_from_testing_env().bind().await,
+            config,
+            None,
+        )
+        .await;
+    if recover {
+        let client = preview
+            .recover(database.clone(), root(seed), None)
+            .await
+            .unwrap();
+        client.wait_for_all_recoveries().await.unwrap();
+        client.shutdown().await;
+        open(database, seed).await
+    } else {
+        preview.join(database, root(seed)).await.unwrap()
+    }
+}
+async fn funds(client: &ClientHandle) {
+    let input = client
+        .get_first_module::<DummyClientModule>()
+        .unwrap()
+        .create_input(Amount::from_sats(10_000));
+    let operation = OperationId::new_random();
+    let change = client
+        .finalize_and_submit_transaction(
+            operation,
+            "test ecash issuance",
+            |_| (),
+            TransactionBuilder::new().with_inputs(input),
+        )
+        .await
+        .unwrap();
+    client
+        .await_primary_bitcoin_module_outputs(operation, change.into_iter().collect())
+        .await
+        .unwrap();
+}
+#[derive(Debug, Encodable, Decodable)]
+struct OriginalNotes;
+fedimint_core::impl_db_record!(key = OriginalNotes, value = Vec<SpendableNote>, db_prefix = 0xb0);
+
+async fn assert_restored(client: &ClientHandle) {
+    let original = client
+        .db()
+        .begin_transaction_nc()
+        .await
+        .get_value(&OriginalNotes)
+        .await
+        .unwrap();
+    assert_eq!(
+        notes(client).await,
+        original,
+        "conflict must return the identical notes without a paid reissue"
+    );
+}
+async fn notes(client: &ClientHandle) -> Vec<SpendableNote> {
+    let mint = client
+        .get_first_instance(&fedimint_mintv2_common::KIND)
+        .unwrap();
+    client
+        .db()
+        .with_prefix_module_id(mint)
+        .0
+        .begin_transaction_nc()
+        .await
+        .find_by_prefix(&fedimint_mintv2_client::client_db::SpendableNotePrefix)
+        .await
+        .map(|(key, ())| key.0)
+        .collect()
+        .await
+}
 
 async fn genesis(fed: &Federation) -> (market::BinaryMarket, OutPoint, Keypair) {
     let creator = key();
@@ -80,8 +189,28 @@ async fn prepare(
     policy: IntentPolicy,
 ) -> (Database, fedimint_core::core::OperationId) {
     let database = db();
-    let client = join(fed, database.clone(), seed, true, false).await;
+    let client = join(fed, database.clone(), seed, false, false).await;
     funds(&client).await;
+    let owned = notes(&client).await;
+    assert!(!owned.is_empty());
+    let issued: Amount = owned.iter().map(SpendableNote::amount).sum();
+    assert!(
+        issued < Amount::from_sats(10_000),
+        "fixture must charge real mint fees"
+    );
+    let mut saved = database.begin_transaction().await;
+    saved.insert_entry(&OriginalNotes, &owned).await;
+    saved.commit_tx().await;
+    client.shutdown().await;
+    let client = builder(true)
+        .await
+        .open(
+            ConnectorRegistry::build_from_testing_env().bind().await,
+            database.clone(),
+            root(seed),
+        )
+        .await
+        .unwrap();
     let wallet = client.get_first_module::<SimplicityClientModule>().unwrap();
     let current = wallet.watch_market(market).await.unwrap();
     let id = wallet
@@ -89,6 +218,10 @@ async fn prepare(
         .await
         .unwrap();
     let pending = wallet.intent(id).await.unwrap();
+    assert!(
+        notes(&client).await.len() < owned.len(),
+        "funding must be reserved before submission"
+    );
     assert_eq!(pending.status, IntentStatus::Submitted, "{pending:?}");
     assert_eq!(pending.attempts.len(), 1);
     // Repeated polling with no accepted/rejected result must not rebuild.
@@ -102,7 +235,7 @@ async fn prepare(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shared_market_intents_survive_races_restarts_limits_and_resolution() {
     let _ = fedimint_logging::TracingSetup::default().init();
-    tokio::time::timeout(Duration::from_secs(180), run())
+    tokio::time::timeout(Duration::from_secs(360), run())
         .await
         .unwrap();
 }
@@ -111,12 +244,56 @@ async fn run() {
     let (market, anchor, oracle) = genesis(&fed).await;
     let (alice_db, alice_id) = prepare(&fed, 41, &market, 2, IntentPolicy::default()).await;
     let (bob_db, bob_id) = prepare(&fed, 42, &market, 3, IntentPolicy::default()).await;
+    // Simulate losing the acceptance response: submit the persisted transaction
+    // while its client executor is stopped. The federation accepts it, but the
+    // local submission and funding state machines still know only "pending".
+    let offline = builder(true)
+        .await
+        .open(
+            ConnectorRegistry::build_from_testing_env().bind().await,
+            alice_db.clone(),
+            root(41),
+        )
+        .await
+        .unwrap();
+    let operation = offline
+        .get_first_module::<SimplicityClientModule>()
+        .unwrap()
+        .intent(alice_id)
+        .await
+        .unwrap()
+        .attempts[0]
+        .operation;
+    let update = offline
+        .transaction_updates(operation)
+        .await
+        .update_stream
+        .next()
+        .await
+        .unwrap();
+    let TxSubmissionStates::Created(transaction) = update.state else {
+        panic!("expected pending submission")
+    };
+    fed.submit(&transaction).await;
+    assert!(
+        notes(&offline).await.len()
+            < offline
+                .db()
+                .begin_transaction_nc()
+                .await
+                .get_value(&OriginalNotes)
+                .await
+                .unwrap()
+                .len()
+    );
+    offline.shutdown().await;
     let alice = open(alice_db, 41).await;
     let a = alice.get_first_module::<SimplicityClientModule>().unwrap();
     completed(&await_record(&a, alice_id).await, 1);
     let bob = open(bob_db.clone(), 42).await;
     let b = bob.get_first_module::<SimplicityClientModule>().unwrap();
     let conflict = await_record(&b, bob_id).await;
+    assert_restored(&bob).await;
     assert_eq!(conflict.status, IntentStatus::Conflict, "{conflict:?}");
     assert_eq!(conflict.attempts.len(), 1);
     assert!(
@@ -163,11 +340,35 @@ async fn run() {
     let bob = open(bob_db, 42).await;
     let b = bob.get_first_module::<SimplicityClientModule>().unwrap();
     let second_conflict = await_record(&b, bob_id).await;
+    assert_restored(&bob).await;
     assert_eq!(second_conflict.status, IntentStatus::Conflict);
     assert_eq!(second_conflict.attempts.len(), 2);
     b.retry_intent(bob_id).await.unwrap();
     let record = await_record(&b, bob_id).await;
     let txid = completed(&record, 3);
+    bob.wait_for_all_active_state_machines().await;
+    let fees = bob
+        .db()
+        .begin_transaction_nc()
+        .await
+        .get_value(&fedimint_client::db::TransactionFeesKey(txid))
+        .await
+        .unwrap();
+    let original_balance: Amount = bob
+        .db()
+        .begin_transaction_nc()
+        .await
+        .get_value(&OriginalNotes)
+        .await
+        .unwrap()
+        .iter()
+        .map(SpendableNote::amount)
+        .sum();
+    assert_eq!(
+        bob.get_balance_for_btc().await.unwrap(),
+        original_balance - Amount::from_msats(3000) - fees.get_bitcoin()
+    );
+    assert!(fees.get_bitcoin() > Amount::ZERO);
     assert_eq!(record.intent, conflict.intent);
     let vault = fed.wait_contract(OutPoint { txid, out_idx: 0 }).await;
     assert_eq!(vault.output.amount, Amount::from_msats(6000));
@@ -220,7 +421,8 @@ async fn run() {
         IntentStatus::Failed(_)
     ));
 
-    // Automatic retries follow the same safety checks and keep recipients fixed.
+    // Automatic retries follow the same safety checks and keep recipients
+    // fixed.
     let auto = IntentPolicy {
         retry: RetryMode::Automatic,
         ..Default::default()
@@ -254,6 +456,7 @@ async fn run() {
     let eve = open(eve_db.clone(), 45).await;
     let e = eve.get_first_module::<SimplicityClientModule>().unwrap();
     let exhausted = await_record(&e, eve_id).await;
+    assert_restored(&eve).await;
     assert!(
         matches!(exhausted.status, IntentStatus::Failed(_)),
         "{exhausted:?}"

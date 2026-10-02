@@ -204,7 +204,13 @@ and authenticated evidence of a competing spend of a designated shared input.
 Network uncertainty never authorizes another attempt. Submission, funding,
 reservations and attempt identity persist atomically; cancellation still resolves
 in-flight transactions. Attempt limits, a final funded per-attempt fee cap, and
-optional preparation deadlines bound automation; primary refund costs remain
-module-dependent. Local intent payloads may contain sensitive recipient metadata
+optional preparation deadlines bound automation. New attempts require opt-in
+primary funding reservations: owned notes return locally only after authenticated
+permanent invalidity and definitive rejection of their bound transaction. The
+originating wallet module is trusted to establish that proof; the mint client
+checks the reservation's transaction and outcome, not Simplicity semantics.
+Timeouts and cancellation cannot release pending notes. Unproven rejections retain
+funding without an automatic paid reclaim. Previously persisted ordinary funding
+operations keep their original module-dependent refund behavior. Local intent payloads may contain sensitive recipient metadata
 and are omitted from database dumps. Mnemonic recovery must not restart abandoned
 or unfinished intentions.

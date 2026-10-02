@@ -173,8 +173,13 @@ recipients, and collateral price; a resolved market is a permanent failure.
 
 Manual retry is the default. Opt-in automatic retries use persisted backoff and
 jitter, a shared maximum-attempt count, a final funded fee cap per attempt, and an
-optional session deadline for preparation. Primary-module refund costs are outside
-that attempted transaction's fee cap. Core checks the actual total fees including
+optional session deadline for preparation. New attempts opt into durable primary
+funding reservations through the shared client interface. Mint v2 retains owned
+notes on rejection; Simplicity authenticates a permanent conflict and requests
+local release, then waits for restoration before retrying or finishing cancellation.
+Unproven rejections pause with funding reserved, without automatic paid reclaim.
+Timeouts cannot expire submitted reservations. Existing pre-reservation operations
+retain their original funding behavior. Core checks the actual total fees including
 funding/change overpayment before authorization. Limits cannot be reset by retry.
 Cancellation prevents future attempts but still resolves in-flight submissions.
 An unavailable federation leaves the same attempt pending. Construction/funding
