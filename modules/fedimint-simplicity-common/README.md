@@ -140,7 +140,10 @@ not be processed at the same point.
 
 Both execution versions allow at most 32 contract inputs and 32 contract outputs for this
 module instance, within at most 128 total outputs. Each program and witness is
-limited to 8 KiB, each recovery annotation to 1 KiB. Inferred type sizes are
+limited to 8 KiB, each recovery annotation to 1 KiB. An allocation-free structural
+scan checks declared node counts and constant payload lengths against the actual
+program bytes before the pinned upstream decoder reserves memory. Upstream still
+checks canonical encoding, sharing, and types; inferred type sizes are then
 checked before decoding padded witnesses. Execution is capped by static cost,
 cell, and frame bounds; the constants are in `runtime::decode_program`.
 

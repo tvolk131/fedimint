@@ -1,0 +1,104 @@
+//! Measure requested allocations, not RSS or whether decoding eventually fails.
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+use std::hint::black_box;
+
+use fedimint_core::secp256k1::{Keypair, SECP256K1, SecretKey};
+use fedimint_core::{OutPoint, TransactionId};
+use fedimint_simplicity_common::{ContractError, ContractInput, runtime};
+use simplicity::{BitWriter, encode};
+
+struct Meter;
+
+thread_local! {
+    static LARGEST: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+fn record(size: usize) {
+    let _ = LARGEST.try_with(|largest| {
+        if let Some(old) = largest.get() {
+            largest.set(Some(old.max(size)));
+        }
+    });
+}
+
+// SAFETY: allocation and deallocation are delegated unchanged to System; the
+// meter only observes sizes in a non-allocating, thread-local Cell.
+unsafe impl GlobalAlloc for Meter {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        record(layout.size());
+        unsafe { System.alloc(layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        record(layout.size());
+        unsafe { System.alloc_zeroed(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        record(size);
+        unsafe { System.realloc(ptr, layout, size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Meter = Meter;
+
+fn measure<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    LARGEST.with(|largest| largest.set(Some(0)));
+    let result = f();
+    let largest = LARGEST.with(|largest| largest.replace(None).unwrap());
+    (result, largest)
+}
+
+fn input(program: Vec<u8>) -> ContractInput {
+    ContractInput {
+        outpoint: OutPoint {
+            txid: TransactionId::from_raw_hash(bitcoin::hashes::Hash::all_zeros()),
+            out_idx: 0,
+        },
+        claim_key: Keypair::from_secret_key(SECP256K1, &SecretKey::from_slice(&[1; 32]).unwrap())
+            .public_key(),
+        program,
+        witness: vec![],
+    }
+}
+
+#[test]
+fn truncated_words_are_rejected_before_allocating_the_declared_value() {
+    // Verify that this meter observes a real allocation in the same thread.
+    let (_, largest) = measure(|| black_box(vec![0u8; black_box(1_000_000)]));
+    assert!(largest >= 1_000_000);
+    for prefix in [false, true] {
+        for exponent in 5..=32 {
+            let mut bytes = Vec::new();
+            let mut bits = BitWriter::new(&mut bytes);
+            encode::encode_natural(if prefix { 2 } else { 1 }, &mut bits).unwrap();
+            if prefix {
+                bits.write_bits_be(0b01001, 5).unwrap(); // unit
+            }
+            bits.write_bits_be(0b10, 2).unwrap(); // constant word
+            encode::encode_natural(exponent, &mut bits).unwrap();
+            bits.flush_all().unwrap();
+            let input = input(bytes);
+            let (result, largest) = measure(|| runtime::decode_program(&input));
+            assert_eq!(result.unwrap_err(), ContractError::Program);
+            assert_eq!(largest, 0, "exponent {exponent}, prefix {prefix}");
+        }
+    }
+}
+
+#[test]
+fn impossible_node_counts_are_rejected_before_reserving_nodes() {
+    for count in [1_000, 10_000, 1_000_000, usize::MAX] {
+        let mut bytes = Vec::new();
+        let mut bits = BitWriter::new(&mut bytes);
+        encode::encode_natural(count, &mut bits).unwrap();
+        bits.flush_all().unwrap();
+        let input = input(bytes);
+        let (result, largest) = measure(|| runtime::decode_program(&input));
+        assert_eq!(result.unwrap_err(), ContractError::Program);
+        assert_eq!(largest, 0, "node count {count}");
+    }
+}
