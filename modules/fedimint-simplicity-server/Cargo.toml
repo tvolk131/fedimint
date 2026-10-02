@@ -19,15 +19,24 @@ futures = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
+axum = { workspace = true }
 bitcoin = { workspace = true }
+fedimint-api-client = { workspace = true }
+fedimint-connectors = { workspace = true }
 fedimint-dummy-common = { workspace = true }
 fedimint-dummy-server = { workspace = true }
+fedimint-logging = { workspace = true }
 fedimint-mintv2-common = { workspace = true }
 fedimint-mintv2-server = { workspace = true }
+fedimint-portalloc = { workspace = true }
+fedimint-rocksdb = { workspace = true }
 fedimint-server = { workspace = true }
 fedimint-simplicity-client = { workspace = true }
+fedimint-testing-core = { workspace = true }
 rand = { workspace = true }
+serde_json = { workspace = true }
 tbs = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true }
 
 [lints]

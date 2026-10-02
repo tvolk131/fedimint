@@ -17,7 +17,15 @@ pub struct EnvironmentOutput {
 }
 
 #[derive(Debug, Clone)]
+pub struct EnvironmentInput {
+    pub outpoint: fedimint_core::OutPoint,
+    pub contract: ContractOutput,
+}
+
+#[derive(Debug, Clone)]
 pub struct Environment {
+    pub inputs: Vec<EnvironmentInput>,
+    pub actions: crate::assets::AssetActions,
     pub signature_hash: [u8; 32],
     pub session_index: u64,
     pub block_count: u64,
@@ -33,8 +41,9 @@ pub fn decode_program(input: &ContractInput) -> Result<Arc<RedeemNode>, Contract
     if input.program.len() > MAX_PROGRAM_BYTES || input.witness.len() > MAX_WITNESS_BYTES {
         return Err(ContractError::Limit);
     }
-    // Compact witnesses can expand into very large padded values. Check inferred
-    // types before the redemption decoder allocates any of those values.
+    // Compact witnesses can expand into very large padded values. Check
+    // inferred types before the redemption decoder allocates any of those
+    // values.
     simplicity::types::Context::with_context(|ctx| {
         let construct = simplicity::ConstructNode::decode::<_, FedimintJet>(
             &ctx,
@@ -95,6 +104,21 @@ fn program_fee(input: &ContractInput, program: &RedeemNode) -> Amount {
 
 pub fn execute(input: &ContractInput, environment: &Environment) -> Result<Amount, ContractError> {
     let program = decode_program(input)?;
+    if environment.current.version == 0 {
+        for node in program.as_ref().post_order_iter::<InternalSharing>() {
+            if let simplicity::node::Inner::Jet(jet) = node.node.inner()
+                && let Some(jet) = jet.as_any().downcast_ref::<FedimintJet>()
+            {
+                let new_jet = match jet {
+                    FedimintJet::Context(jet) => (*jet as u8) >= 16,
+                    FedimintJet::Core(jet) => *jet == simplicity::jet::Core::Multiply64,
+                };
+                if new_jet {
+                    return Err(ContractError::Version);
+                }
+            }
+        }
+    }
     if program.cmr().to_byte_array() != environment.current.cmr {
         return Err(ContractError::Commitment);
     }

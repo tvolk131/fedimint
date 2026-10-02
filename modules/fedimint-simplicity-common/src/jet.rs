@@ -51,6 +51,27 @@ context_jets! {
     OutputModule = 13, "fm_output_module", b"i", b"s";
     CreationSession = 14, "fm_creation_session", b"1", b"l";
     CreationBlockCount = 15, "fm_creation_block_count", b"1", b"l";
+    InputAmount = 16, "fm_input_amount", b"i", b"l";
+    InputCmr = 17, "fm_input_cmr", b"i", b"h";
+    InputState = 18, "fm_input_state", b"i", b"h";
+    InputOutpoint = 19, "fm_input_outpoint_hash", b"i", b"h";
+    InputAssetQuantity = 20, "fm_input_asset_quantity", b"*ih", b"l";
+    OutputAssetQuantity = 21, "fm_output_asset_quantity", b"*ih", b"l";
+    InputAuthority = 22, "fm_input_authority", b"*ih", b"2";
+    OutputAuthority = 23, "fm_output_authority", b"*ih", b"2";
+    IssuedQuantity = 24, "fm_issued_quantity", b"h", b"l";
+    BurnedQuantity = 25, "fm_burned_quantity", b"h", b"l";
+    InputAssetCount = 26, "fm_input_asset_count", b"i", b"i";
+    OutputAssetCount = 27, "fm_output_asset_count", b"i", b"i";
+    InputAuthorityCount = 28, "fm_input_authority_count", b"i", b"i";
+    OutputAuthorityCount = 29, "fm_output_authority_count", b"i", b"i";
+    InputAssetId = 30, "fm_input_asset_id", b"*ii", b"h";
+    OutputAssetId = 31, "fm_output_asset_id", b"*ii", b"h";
+    InputAuthorityId = 32, "fm_input_authority_id", b"*ii", b"h";
+    OutputAuthorityId = 33, "fm_output_authority_id", b"*ii", b"h";
+    InputVersion = 34, "fm_input_version", b"i", b"i";
+    OutputVersion = 35, "fm_output_version", b"i", b"i";
+
 }
 
 macro_rules! core_jets {
@@ -82,7 +103,8 @@ core_jets!(
     Subtract64,
     Bip0340Verify,
     Sha256Iv,
-    Sha256Block
+    Sha256Block,
+    Multiply64
 );
 
 impl std::fmt::Display for FedimintJet {
@@ -100,7 +122,8 @@ impl Jet for FedimintJet {
             Self::Core(core) => core.cmr(),
             Self::Context(jet) => {
                 // Provisional, domain-separated primitive identities. No claim
-                // is made that these new primitives have an upstream formal proof.
+                // is made that these new primitives have an upstream formal
+                // proof.
                 let name = format!("fedimint/simplicity/jet/v0/{}", jet.name());
                 Cmr::from_byte_array(sha256::Hash::hash(name.as_bytes()).to_byte_array())
             }
@@ -175,6 +198,66 @@ impl JetEnvironment for Environment {
         match jet {
             FedimintJet::Core(core) => core_ptr(*core),
             FedimintJet::Context(jet) => match jet {
+                ContextJet::InputAmount => {
+                    |dst, src, env| asset_jet(ContextJet::InputAmount, dst, src, env)
+                }
+                ContextJet::InputCmr => {
+                    |dst, src, env| asset_jet(ContextJet::InputCmr, dst, src, env)
+                }
+                ContextJet::InputState => {
+                    |dst, src, env| asset_jet(ContextJet::InputState, dst, src, env)
+                }
+                ContextJet::InputOutpoint => {
+                    |dst, src, env| asset_jet(ContextJet::InputOutpoint, dst, src, env)
+                }
+                ContextJet::InputAssetQuantity => {
+                    |dst, src, env| asset_jet(ContextJet::InputAssetQuantity, dst, src, env)
+                }
+                ContextJet::OutputAssetQuantity => {
+                    |dst, src, env| asset_jet(ContextJet::OutputAssetQuantity, dst, src, env)
+                }
+                ContextJet::InputAuthority => {
+                    |dst, src, env| asset_jet(ContextJet::InputAuthority, dst, src, env)
+                }
+                ContextJet::OutputAuthority => {
+                    |dst, src, env| asset_jet(ContextJet::OutputAuthority, dst, src, env)
+                }
+                ContextJet::IssuedQuantity => {
+                    |dst, src, env| asset_jet(ContextJet::IssuedQuantity, dst, src, env)
+                }
+                ContextJet::BurnedQuantity => {
+                    |dst, src, env| asset_jet(ContextJet::BurnedQuantity, dst, src, env)
+                }
+                ContextJet::InputAssetCount => {
+                    |dst, src, env| asset_jet(ContextJet::InputAssetCount, dst, src, env)
+                }
+                ContextJet::OutputAssetCount => {
+                    |dst, src, env| asset_jet(ContextJet::OutputAssetCount, dst, src, env)
+                }
+                ContextJet::InputAuthorityCount => {
+                    |dst, src, env| asset_jet(ContextJet::InputAuthorityCount, dst, src, env)
+                }
+                ContextJet::OutputAuthorityCount => {
+                    |dst, src, env| asset_jet(ContextJet::OutputAuthorityCount, dst, src, env)
+                }
+                ContextJet::InputAssetId => {
+                    |dst, src, env| asset_jet(ContextJet::InputAssetId, dst, src, env)
+                }
+                ContextJet::OutputAssetId => {
+                    |dst, src, env| asset_jet(ContextJet::OutputAssetId, dst, src, env)
+                }
+                ContextJet::InputAuthorityId => {
+                    |dst, src, env| asset_jet(ContextJet::InputAuthorityId, dst, src, env)
+                }
+                ContextJet::OutputAuthorityId => {
+                    |dst, src, env| asset_jet(ContextJet::OutputAuthorityId, dst, src, env)
+                }
+                ContextJet::InputVersion => {
+                    |dst, src, env| asset_jet(ContextJet::InputVersion, dst, src, env)
+                }
+                ContextJet::OutputVersion => {
+                    |dst, src, env| asset_jet(ContextJet::OutputVersion, dst, src, env)
+                }
                 ContextJet::SigHashAll => |dst, _, env| write_bytes(dst, &env.signature_hash),
                 ContextJet::SessionIndex => {
                     |dst, _, env| write_bytes(dst, &env.session_index.to_be_bytes())
@@ -262,12 +345,135 @@ fn read_index(mut frame: CFrameItem) -> usize {
 fn write_bytes(frame: &mut CFrameItem, bytes: &[u8]) -> bool {
     for byte in bytes {
         for bit in (0..8).rev() {
-            // SAFETY: each caller writes exactly its jet's declared target width
-            // into the write frame allocated by the Bit Machine for that type.
+            // SAFETY: each caller writes exactly its jet's declared target
+            // width into the write frame allocated by the Bit
+            // Machine for that type.
             unsafe {
                 c_writeBit(frame, byte & (1 << bit) != 0);
             }
         }
     }
     true
+}
+
+fn asset_jet(
+    jet: ContextJet,
+    dst: &mut CFrameItem,
+    mut src: CFrameItem,
+    env: &Environment,
+) -> bool {
+    use ContextJet::*;
+    use fedimint_core::encoding::Encodable;
+
+    use crate::assets::AssetId;
+    if env.current.version != crate::assets::ASSET_VERSION {
+        return false;
+    }
+    if matches!(jet, IssuedQuantity | BurnedQuantity) {
+        let id = AssetId(read_bytes::<32>(&mut src));
+        let values = if jet == IssuedQuantity {
+            &env.actions.issuance
+        } else {
+            &env.actions.burns
+        };
+        let quantity = values
+            .iter()
+            .find(|value| value.asset == id)
+            .map(|value| value.quantity)
+            .unwrap_or(0);
+        return write_bytes(dst, &quantity.to_be_bytes());
+    }
+    let index = u32::from_be_bytes(read_bytes::<4>(&mut src)) as usize;
+    let input = env.inputs.get(index);
+    if jet == InputOutpoint {
+        return input.is_some_and(|input| {
+            write_bytes(dst, &input.outpoint.consensus_hash_sha256().to_byte_array())
+        });
+    }
+    let output = if matches!(
+        jet,
+        OutputAssetQuantity
+            | OutputAuthority
+            | OutputAssetCount
+            | OutputAuthorityCount
+            | OutputAssetId
+            | OutputAuthorityId
+            | OutputVersion
+    ) {
+        env.outputs
+            .get(index)
+            .and_then(|output| output.contract.as_ref())
+            .filter(|output| output.actions().is_none())
+    } else {
+        input.map(|input| &input.contract)
+    };
+    let Some(output) = output else {
+        return false;
+    };
+    match jet {
+        InputAmount => write_bytes(dst, &output.amount.msats.to_be_bytes()),
+        InputCmr => write_bytes(dst, &output.cmr),
+        InputState => write_bytes(dst, &output.state),
+        InputVersion | OutputVersion => write_bytes(dst, &output.version.to_be_bytes()),
+        InputAssetQuantity | OutputAssetQuantity => {
+            let id = AssetId(read_bytes::<32>(&mut src));
+            let quantity = output
+                .bundle()
+                .and_then(|bundle| bundle.balances.iter().find(|value| value.asset == id))
+                .map(|value| value.quantity)
+                .unwrap_or(0);
+            write_bytes(dst, &quantity.to_be_bytes())
+        }
+        InputAuthority | OutputAuthority => {
+            let id = AssetId(read_bytes::<32>(&mut src));
+            let present = output
+                .bundle()
+                .is_some_and(|bundle| bundle.authorities.contains(&id));
+            // SAFETY: authority membership jets have a one-bit target.
+            unsafe {
+                c_writeBit(dst, present);
+            }
+            true
+        }
+        InputAssetCount | OutputAssetCount => write_bytes(
+            dst,
+            &(output
+                .bundle()
+                .map(|bundle| bundle.balances.len())
+                .unwrap_or(0) as u32)
+                .to_be_bytes(),
+        ),
+        InputAuthorityCount | OutputAuthorityCount => write_bytes(
+            dst,
+            &(output
+                .bundle()
+                .map(|bundle| bundle.authorities.len())
+                .unwrap_or(0) as u32)
+                .to_be_bytes(),
+        ),
+        InputAssetId | OutputAssetId | InputAuthorityId | OutputAuthorityId => {
+            let entry = u32::from_be_bytes(read_bytes::<4>(&mut src)) as usize;
+            let id = output.bundle().and_then(|bundle| {
+                if matches!(jet, InputAssetId | OutputAssetId) {
+                    bundle.balances.get(entry).map(|value| value.asset)
+                } else {
+                    bundle.authorities.get(entry).copied()
+                }
+            });
+            id.is_some_and(|id| write_bytes(dst, &id.0))
+        }
+        _ => false,
+    }
+}
+
+fn read_bytes<const N: usize>(frame: &mut CFrameItem) -> [u8; N] {
+    let mut bytes = [0; N];
+    for byte in &mut bytes {
+        for _ in 0..8 {
+            // SAFETY: asset_jet dispatch consumes exactly its declared source
+            // width: u32, u256, (u32,u256), or (u32,u32).
+            *byte = (*byte << 1) | u8::from(unsafe { c_readBit(frame) });
+        }
+    }
+    bytes
 }

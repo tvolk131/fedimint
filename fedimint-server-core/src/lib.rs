@@ -39,6 +39,27 @@ pub struct TransactionConsensusContext {
     pub session_index: u64,
 }
 
+/// Module-owned validation result, scoped to one transaction and database
+/// snapshot. Core validates every touched module before processing any inputs
+/// or outputs.
+pub struct ModuleTransactionValidation(Box<dyn std::any::Any + Send + Sync>);
+
+impl ModuleTransactionValidation {
+    pub fn new<T: std::any::Any + Send + Sync>(value: T) -> Self {
+        Self(Box::new(value))
+    }
+
+    pub fn get<T: std::any::Any>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+}
+
+impl std::fmt::Debug for ModuleTransactionValidation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ModuleTransactionValidation")
+    }
+}
+
 /// Authenticated transaction view. This is constructed by the core, never
 /// decoded from a module input. Existing modules may ignore it.
 #[derive(Debug)]
@@ -46,6 +67,7 @@ pub struct ModuleTransactionContext<'a> {
     pub transaction: &'a fedimint_core::transaction::Transaction,
     pub consensus: TransactionConsensusContext,
     pub module_instance_id: ModuleInstanceId,
+    pub validation: Option<&'a ModuleTransactionValidation>,
 }
 
 #[apply(async_trait_maybe_send!)]
@@ -55,8 +77,8 @@ pub trait ServerModule: Debug + Sized {
     type Init: ServerModuleInit;
 
     fn module_kind() -> ModuleKind {
-        // Note: All modules should define kinds as &'static str, so this doesn't
-        // allocate
+        // Note: All modules should define kinds as &'static str, so this
+        // doesn't allocate
         <Self::Init as ModuleInit>::Common::KIND
     }
 
@@ -113,6 +135,17 @@ pub trait ServerModule: Debug + Sized {
         _input: &<Self::Common as ModuleCommon>::Input,
     ) -> Result<(), <Self::Common as ModuleCommon>::InputError> {
         Ok(())
+    }
+
+    /// Validate against the unmodified transaction snapshot. The returned value
+    /// is available to this module's processing hooks only for this
+    /// transaction. Implementations must not mutate the database here.
+    async fn validate_transaction(
+        &self,
+        _dbtx: &mut DatabaseTransaction<'_>,
+        _context: &ModuleTransactionContext<'_>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
+        Ok(ModuleTransactionValidation::new(()))
     }
 
     /// Try to spend a transaction input. On success all necessary updates will
@@ -282,6 +315,12 @@ pub trait IServerModule: Debug {
     // before any input is processed.
     fn verify_input(&self, input: &DynInput) -> Result<(), DynInputError>;
 
+    async fn validate_transaction(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError>;
+
     /// Try to spend a transaction input. On success all necessary updates will
     /// be part of the database transaction. On failure (e.g. double spend)
     /// the database transaction is rolled back and the operation will take
@@ -441,6 +480,14 @@ where
                 .expect("incorrect input type passed to module plugin"),
         )
         .map_err(|v| DynInputError::from_typed(input.module_instance_id(), v))
+    }
+
+    async fn validate_transaction(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
+        <Self as ServerModule>::validate_transaction(self, dbtx, context).await
     }
 
     /// Try to spend a transaction input. On success all necessary updates will

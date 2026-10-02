@@ -23,3 +23,15 @@ pub struct BlockVoteKey(pub PeerId);
 pub struct BlockVotePrefix;
 impl_db_record!(key = BlockVoteKey, value = u64, db_prefix = 0x02);
 impl_db_lookup!(key = BlockVoteKey, query_prefix = BlockVotePrefix);
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Encodable, Decodable)]
+pub struct NamespaceKey(pub [u8; 32]);
+impl_db_record!(key = NamespaceKey, value = (), db_prefix = 0x03);
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Encodable, Decodable)]
+pub struct AssetKey(pub fedimint_simplicity_common::assets::AssetId);
+impl_db_record!(
+    key = AssetKey,
+    value = fedimint_simplicity_common::assets::AssetRecord,
+    db_prefix = 0x04
+);

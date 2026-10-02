@@ -3,19 +3,18 @@
 pub mod db;
 #[cfg(test)]
 mod tests;
+mod validation;
 
 use std::collections::BTreeMap;
 
 use anyhow::ensure;
 use async_trait::async_trait;
-use fedimint_core::bitcoin::hashes::Hash;
 use fedimint_core::config::{
     ServerModuleConfig, ServerModuleConsensusConfig, TypedServerModuleConfig,
     TypedServerModuleConsensusConfig,
 };
 use fedimint_core::core::ModuleInstanceId;
 use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
-use fedimint_core::encoding::Encodable;
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::{
     Amounts, ApiEndpoint, ApiVersion, CoreConsensusVersion, InputMeta, ModuleConsensusVersion,
@@ -25,24 +24,26 @@ use fedimint_core::{InPoint, NumPeersExt, OutPoint, PeerId};
 use fedimint_server_core::bitcoin_rpc::ServerBitcoinRpcMonitor;
 use fedimint_server_core::config::PeerHandleOps;
 use fedimint_server_core::{
-    ConfigGenModuleArgs, ModuleTransactionContext, ServerModule, ServerModuleInit,
-    ServerModuleInitArgs,
+    ConfigGenModuleArgs, ModuleTransactionContext, ModuleTransactionValidation, ServerModule,
+    ServerModuleInit, ServerModuleInitArgs,
 };
+use fedimint_simplicity_common::assets::{AssetId, AssetRecord};
 use fedimint_simplicity_common::config::{
     SimplicityClientConfig, SimplicityConfig, SimplicityConfigConsensus, SimplicityConfigPrivate,
 };
-use fedimint_simplicity_common::runtime::{
-    Environment, EnvironmentOutput, decode_program, execute,
-};
+use fedimint_simplicity_common::runtime::decode_program;
 use fedimint_simplicity_common::{
     BlockCountVote, ContractError, ContractInput, ContractOutcome, ContractOutput,
-    ContractOutputError, EXECUTION_VERSION, MAX_CONTRACTS, MAX_RECOVERY_BYTES,
-    MODULE_CONSENSUS_VERSION, SimplicityCommonInit, SimplicityModuleTypes, output_fee,
-    signature_hash,
+    ContractOutputError, MAX_CONTRACTS, MODULE_CONSENSUS_VERSION, SimplicityCommonInit,
+    SimplicityModuleTypes, output_fee,
 };
 use futures::StreamExt;
 
-use crate::db::{BlockVoteKey, BlockVotePrefix, ContractKey, ContractPrefix, StoredContract};
+use crate::db::{
+    AssetKey, BlockVoteKey, BlockVotePrefix, ContractKey, ContractPrefix, NamespaceKey,
+    StoredContract,
+};
+use crate::validation::ValidatedTransaction;
 
 #[derive(Debug, Clone)]
 pub struct SimplicityInit;
@@ -215,6 +216,15 @@ impl ServerModule for Simplicity {
     ) -> Result<TransactionItemAmounts, ContractOutputError> {
         Err(ContractError::MissingContext.into())
     }
+    async fn validate_transaction(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
+        validation::validate(self, dbtx, context)
+            .await
+            .map(ModuleTransactionValidation::new)
+    }
     async fn process_input_with_context<'a, 'b, 'c>(
         &'a self,
         dbtx: &mut DatabaseTransaction<'c>,
@@ -222,72 +232,26 @@ impl ServerModule for Simplicity {
         point: InPoint,
         context: &ModuleTransactionContext<'_>,
     ) -> Result<InputMeta, ContractError> {
-        validate_shape(context)?;
-        let stored = dbtx
-            .get_value(&ContractKey(input.outpoint))
-            .await
-            .ok_or(ContractError::UnknownContract)?;
-        if stored.output.version != EXECUTION_VERSION {
-            return Err(ContractError::Version);
-        }
-        let inputs = context
+        let validated = validated(context)?;
+        let index = context
             .transaction
             .inputs
             .iter()
             .enumerate()
             .filter(|(_, input)| input.module_instance_id() == context.module_instance_id)
-            .map(|(index, _)| index as u64)
-            .collect::<Vec<_>>();
-        let index = inputs
-            .iter()
-            .position(|index| *index == point.in_idx)
+            .position(|(index, _)| index as u64 == point.in_idx)
             .ok_or(ContractError::Context)?;
-        let outputs = context
-            .transaction
-            .outputs
-            .iter()
-            .map(|output| {
-                let contract = if output.module_instance_id() == context.module_instance_id {
-                    Some(
-                        output
-                            .as_any()
-                            .downcast_ref::<ContractOutput>()
-                            .ok_or(ContractError::Context)?
-                            .clone(),
-                    )
-                } else {
-                    None
-                };
-                Ok(EnvironmentOutput {
-                    module_id: output.module_instance_id(),
-                    hash: output.consensus_hash_sha256().to_byte_array(),
-                    contract,
-                })
-            })
-            .collect::<Result<Vec<_>, ContractError>>()?;
-        let environment = Environment {
-            signature_hash: signature_hash(
-                context.consensus.federation_id,
-                context.module_instance_id,
-                context.transaction,
-            )?,
-            session_index: context.consensus.session_index,
-            block_count: self.consensus_block_count(dbtx).await,
-            current: stored.output.clone(),
-            creation_session: stored.creation_session,
-            creation_block_count: stored.creation_block_count,
-            input_index: index as u32,
-            input_count: inputs.len() as u32,
-            outputs,
-        };
-        let fee = execute(input, &environment)?;
-        dbtx.remove_entry(&ContractKey(input.outpoint)).await;
+        if dbtx
+            .remove_entry(&ContractKey(input.outpoint))
+            .await
+            .is_none()
+        {
+            return Err(ContractError::UnknownContract);
+        }
+        let meta = validated.inputs.get(index).ok_or(ContractError::Context)?;
         Ok(InputMeta {
-            pub_key: input.claim_key,
-            amount: TransactionItemAmounts {
-                amounts: Amounts::new_bitcoin(stored.output.amount),
-                fees: Amounts::new_bitcoin(fee),
-            },
+            pub_key: meta.pub_key,
+            amount: meta.amount.clone(),
         })
     }
     async fn process_output_with_context<'a, 'b>(
@@ -297,14 +261,21 @@ impl ServerModule for Simplicity {
         point: OutPoint,
         context: &ModuleTransactionContext<'_>,
     ) -> Result<TransactionItemAmounts, ContractOutputError> {
-        validate_shape(context)?;
-        if output.version != EXECUTION_VERSION {
-            return Err(ContractError::Version.into());
-        }
-        if output.recovery.len() > MAX_RECOVERY_BYTES
-            || output.amount.msats > 2_100_000_000_000_000_000
-        {
-            return Err(ContractError::Limit.into());
+        let validated = validated(context)?;
+        if output.actions().is_some() {
+            for namespace in &validated.namespaces {
+                if dbtx.get_value(&NamespaceKey(*namespace)).await.is_some() {
+                    return Err(ContractError::NamespaceUsed.into());
+                }
+                dbtx.insert_new_entry(&NamespaceKey(*namespace), &()).await;
+            }
+            for (id, record) in &validated.creations {
+                dbtx.insert_new_entry(&AssetKey(*id), record).await;
+            }
+            return Ok(TransactionItemAmounts {
+                amounts: Amounts::new_bitcoin(output.amount),
+                fees: Amounts::new_bitcoin(output_fee(output)),
+            });
         }
         if dbtx.get_value(&ContractKey(point)).await.is_some() {
             return Err(ContractError::DuplicateOutput.into());
@@ -348,6 +319,12 @@ impl ServerModule for Simplicity {
                 }
             },
             public_api_endpoint! {
+                "asset", ApiVersion::new(0, 1),
+                async |_module: &Simplicity, context, id: AssetId| -> Option<AssetRecord> {
+                    Ok(context.db().begin_transaction_nc().await.get_value(&AssetKey(id)).await)
+                }
+            },
+            public_api_endpoint! {
                 "block_count", ApiVersion::new(0, 0),
                 async |module: &Simplicity, context, _params: ()| -> u64 {
                     Ok(module.consensus_block_count(&mut context.db().begin_transaction_nc().await).await)
@@ -377,4 +354,17 @@ fn validate_shape(context: &ModuleTransactionContext<'_>) -> Result<(), Contract
         return Err(ContractError::Limit);
     }
     Ok(())
+}
+
+fn validated<'a>(
+    context: &'a ModuleTransactionContext<'_>,
+) -> Result<&'a ValidatedTransaction, ContractError> {
+    let validated = context
+        .validation
+        .and_then(|validation| validation.get::<ValidatedTransaction>())
+        .ok_or(ContractError::MissingContext)?;
+    if validated.txid != context.transaction.tx_hash() {
+        return Err(ContractError::Context);
+    }
+    Ok(validated)
 }
