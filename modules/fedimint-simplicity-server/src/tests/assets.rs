@@ -1,3 +1,4 @@
+mod instances;
 mod market_hardening;
 mod network;
 
