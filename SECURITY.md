@@ -149,8 +149,21 @@ Contract values, states, revealed programs/witnesses, and recovery annotations
 are public to guardians and retained transaction history. The unauthenticated
 point-query API returns current contract records, including recovery bytes.
 Wallets must encrypt sensitive annotations; deleting a spent live record cannot
-erase its historical ciphertext. This module adds neither ecash-like transfer
-privacy nor mnemonic recovery. See the
+erase its historical ciphertext. The persistent client encrypts versioned
+recovery descriptors with mnemonic-derived keys scoped to federation and module.
+It authenticates federation session history, verifies recovered policies against
+output commitments, and reconstructs confirmed activity including terminal
+spends. Recovery requires the original federation's retained history and wallet
+software that still supports historical templates. It adds no ecash-like transfer
+privacy: values, policies and public witnesses remain visible.
+
+Local wallet databases contain decrypted descriptors, derived-key salts,
+application secrets, and confirmed transaction history. Protect the local database
+like other wallet material; federation annotation encryption does not encrypt
+local storage. The database dump API intentionally omits these wallet records.
+Receiving requires a sender to include the receiver's recovery annotation; low-level
+builders do not automatically supply it. Repeated annotations or policies can
+link outputs, so receive requests should be fresh. See the
 [prototype documentation](modules/fedimint-simplicity-common/README.md) for exact
 API, retention, and implementation limits.
 

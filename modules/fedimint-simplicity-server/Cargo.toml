@@ -22,7 +22,10 @@ serde = { workspace = true }
 axum = { workspace = true }
 bitcoin = { workspace = true }
 fedimint-api-client = { workspace = true }
+fedimint-client = { workspace = true }
 fedimint-connectors = { workspace = true }
+fedimint-derive-secret = { workspace = true }
+fedimint-dummy-client = { workspace = true }
 fedimint-dummy-common = { workspace = true }
 fedimint-dummy-server = { workspace = true }
 fedimint-logging = { workspace = true }

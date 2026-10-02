@@ -3,10 +3,10 @@
 ## Status
 
 The guardian contract ledger, execution environments, explicit assets, and
-low-level client builders described below are implemented as an experimental
-prototype. The wallet recovery design is agreed but not implemented: clients
-currently supply opaque recovery bytes without a descriptor, encryption, or
-scanning protocol. The persistent wallet must satisfy
+client builders, and persistent wallet described below are implemented as an
+experimental prototype. Encrypted descriptors and authenticated history replay
+support mnemonic-only recovery for the wallet's supported contracts. The wallet
+must satisfy
 [REQ-simplicity-recovery](REQ-simplicity-recovery.md).
 
 ## Module and transaction boundaries
@@ -53,8 +53,8 @@ internal data. Multiple programs may inspect the same output; assigning distinct
 successors is an application policy obligation.
 
 Live contract records, including opaque recovery annotations, disappear on spend.
-Core history can retain their original transactions. The current module provides
-no transfer privacy or mnemonic recovery protocol.
+Core history retains their original transactions for mnemonic recovery. Contract
+amounts, asset transfers, policies, and public witnesses remain transparent.
 
 ## Execution versions and explicit assets
 
@@ -112,9 +112,34 @@ recognize terminal spends with no Simplicity successor and preserve their
 confirmed activity rather than only the remaining holdings.
 
 The recovery contract does not depend on Fedimint's deprecated encrypted-backup
-service. Record encoding and placement, including any additional metadata needed
-for terminal spends, remain to be designed within the module's size and fee
-constraints; the current opaque field is not itself a recovery implementation.
+service. A versioned descriptor identifies a software template, its parameters,
+a random key-derivation salt, and optional application context. Encryption and
+spending keys use separate mnemonic derivations scoped to federation and module.
+Receivers provide the sender with a destination contract and freshly encrypted
+annotation; the sender needs no discovery key or stable wallet identifier.
+
+Each authenticated session prefix updates recognized contracts, spent status,
+confirmed transactions, and the scan cursor in one client database transaction.
+The open session's saved prefix must match later extensions exactly. Original
+spent descriptors identify terminal interactions without an extra receipt UTXO.
+A shared binary-market vault remains recognizable through successors preserving
+its policy and issuance authorities, even when another participant replaces its
+annotation. Watching that vault does not count all its collateral as wallet funds.
+
+The initial persistent submission API requires at least one recognized wallet
+input or output. Directly funding only someone else's contracts from another
+module is rejected because it would leave no recoverable sender history. The
+wallet can first deposit into its own contract, then transfer it. Application
+metadata promised to survive must fit a descriptor or be derivable; arbitrary
+program imports and local-only notes have no implicit recovery guarantee.
+
+Core client finalizers authorize the transaction after funding, change and nonce
+are fixed, before outer signatures and state-machine IDs. Module replacements
+cannot change the transaction shape or cross module boundaries, and core checks
+that fees remain unchanged. Simplicity reserves inputs together with durable core
+submission state, releases reservations on rejection, and synchronizes accepted
+transactions into confirmed history. Initial recovery uses the core's unusable
+module mode; applications reopen the client after recovery completes.
 
 ## Alternatives
 

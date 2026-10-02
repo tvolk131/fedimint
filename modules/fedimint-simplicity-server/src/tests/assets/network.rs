@@ -30,6 +30,8 @@ use tempfile::TempDir;
 use super::*;
 use crate::SimplicityInit;
 
+mod wallet;
+
 #[derive(Debug)]
 struct Bitcoin;
 #[async_trait::async_trait]
