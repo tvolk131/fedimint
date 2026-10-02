@@ -8,6 +8,8 @@ use simplicity::{BitIter, BitMachine, Cost, RedeemNode};
 use crate::jet::FedimintJet;
 use crate::{ContractError, ContractInput, ContractOutput, MAX_PROGRAM_BYTES, MAX_WITNESS_BYTES};
 
+mod preflight;
+
 #[derive(Debug, Clone)]
 pub struct EnvironmentOutput {
     pub module_id: ModuleInstanceId,
@@ -41,6 +43,7 @@ pub fn decode_program(input: &ContractInput) -> Result<Arc<RedeemNode>, Contract
     if input.program.len() > MAX_PROGRAM_BYTES || input.witness.len() > MAX_WITNESS_BYTES {
         return Err(ContractError::Limit);
     }
+    preflight::check(&input.program).map_err(|_| ContractError::Program)?;
     // Compact witnesses can expand into very large padded values. Check
     // inferred types before the redemption decoder allocates any of those
     // values.
