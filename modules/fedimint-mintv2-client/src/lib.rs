@@ -19,6 +19,7 @@ mod input;
 pub mod issuance;
 mod output;
 mod receive;
+mod reservation;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -500,8 +501,8 @@ impl ClientModule for MintClientModule {
         dbtx: &mut DatabaseTransaction<'_>,
         operation_id: OperationId,
         unit: AmountUnit,
-        mut input_amount: Amount,
-        mut output_amount: Amount,
+        input_amount: Amount,
+        output_amount: Amount,
     ) -> Result<
         (
             ClientInputBundle<MintInput, MintClientStateMachines>,
@@ -509,89 +510,49 @@ impl ClientModule for MintClientModule {
         ),
         ClientModuleError,
     > {
-        if unit != self.cfg.amount_unit {
-            return Err(ClientModuleError::other(
-                "Module can only handle its configured amount unit",
-            ));
-        }
-
-        let requested_amount = output_amount.saturating_sub(input_amount);
-        // `select_funding_input` only reads notes, so the balance it left behind is
-        // still accurate for reporting a total below.
-        let Some(funding_notes) = self.select_funding_input(dbtx, requested_amount).await else {
-            let total_amount = self.get_balance(dbtx, unit).await;
-            return Err(InsufficientBalanceError {
-                requested_amount,
-                total_amount,
-            }
-            .into());
-        };
-
-        for note in &funding_notes {
-            self.remove_spendable_note(dbtx, note).await;
-        }
-
-        input_amount += funding_notes.iter().map(SpendableNote::amount).sum();
-
-        output_amount += funding_notes
-            .iter()
-            .map(|input| self.cfg.fee_consensus.fee(input.amount()))
-            .sum();
-
-        assert!(output_amount <= input_amount);
-
-        let (input_notes, output_amounts) = self
-            .rebalance(dbtx, &self.cfg.fee_consensus, input_amount - output_amount)
-            .await;
-
-        for note in &input_notes {
-            self.remove_spendable_note(dbtx, note).await;
-        }
-
-        input_amount += input_notes.iter().map(SpendableNote::amount).sum();
-
-        output_amount += input_notes
-            .iter()
-            .map(|note| self.cfg.fee_consensus.fee(note.amount()))
-            .sum();
-
-        output_amount += output_amounts
-            .iter()
-            .map(|denomination| {
-                denomination.amount() + self.cfg.fee_consensus.fee(denomination.amount())
-            })
-            .sum();
-
-        assert!(output_amount <= input_amount);
-
-        let mut spendable_notes = funding_notes
-            .into_iter()
-            .chain(input_notes)
-            .collect::<Vec<SpendableNote>>();
-
-        // We sort the notes by denomination to minimize the leaked information.
-        spendable_notes.sort_by_key(|note| note.denomination);
-
-        let input_bundle =
-            Self::create_input_bundle(operation_id, spendable_notes, false, self.cfg.amount_unit);
-
-        let mut denominations = represent_amount_with_fees(
-            input_amount.saturating_sub(output_amount),
-            &self.cfg.fee_consensus,
+        self.create_funding(
+            dbtx,
+            operation_id,
+            unit,
+            input_amount,
+            output_amount,
+            InputSMState::Pending,
         )
-        .into_iter()
-        .chain(output_amounts)
-        .collect::<Vec<Denomination>>();
+        .await
+    }
 
-        // We sort the amounts to minimize the leaked information.
-        denominations.sort();
+    async fn create_reserved_inputs_and_outputs(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        operation_id: OperationId,
+        unit: AmountUnit,
+        input_amount: Amount,
+        output_amount: Amount,
+    ) -> Result<
+        (
+            ClientInputBundle<MintInput, MintClientStateMachines>,
+            ClientOutputBundle<MintOutput, MintClientStateMachines>,
+        ),
+        ClientModuleError,
+    > {
+        self.create_funding(
+            dbtx,
+            operation_id,
+            unit,
+            input_amount,
+            output_amount,
+            InputSMState::Reserved,
+        )
+        .await
+    }
 
-        let output_bundle = self.create_output_bundle(operation_id, denominations).await;
-
-        let sender = self.balance_update_sender.clone();
-        dbtx.on_commit(move || sender.send_replace(()));
-
-        Ok((input_bundle, output_bundle))
+    async fn release_funding_after_conflict(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        operation_id: OperationId,
+        txid: fedimint_core::TransactionId,
+    ) -> Result<bool, ClientModuleError> {
+        reservation::request_release(dbtx, operation_id, txid).await
     }
 
     async fn await_primary_module_output(
@@ -729,11 +690,137 @@ impl MintClientModule {
         (input_notes, output_denominations)
     }
 
+    // Reservations reuse the normal fee-aware selection and change logic.
+    // Notes, their final-txid state machine, and submission commit atomically.
+    #[allow(clippy::too_many_arguments)]
+    async fn create_funding(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        operation_id: OperationId,
+        unit: AmountUnit,
+        mut input_amount: Amount,
+        mut output_amount: Amount,
+        initial_state: InputSMState,
+    ) -> Result<
+        (
+            ClientInputBundle<MintInput, MintClientStateMachines>,
+            ClientOutputBundle<MintOutput, MintClientStateMachines>,
+        ),
+        ClientModuleError,
+    > {
+        if initial_state == InputSMState::Reserved
+            && dbtx
+                .get_value(&client_db::FundingReservationKey(operation_id))
+                .await
+                .is_some()
+        {
+            return Err(ClientModuleError::other(
+                "funding reservation already exists",
+            ));
+        }
+        if unit != self.cfg.amount_unit {
+            return Err(ClientModuleError::other(
+                "Module can only handle its configured amount unit",
+            ));
+        }
+
+        let requested_amount = output_amount.saturating_sub(input_amount);
+        // `select_funding_input` only reads notes, so the balance it left
+        // behind is still accurate for reporting a total below.
+        let Some(funding_notes) = self.select_funding_input(dbtx, requested_amount).await else {
+            let total_amount = self.get_balance(dbtx, unit).await;
+            return Err(InsufficientBalanceError {
+                requested_amount,
+                total_amount,
+            }
+            .into());
+        };
+
+        for note in &funding_notes {
+            self.remove_spendable_note(dbtx, note).await;
+        }
+
+        input_amount += funding_notes.iter().map(SpendableNote::amount).sum();
+
+        output_amount += funding_notes
+            .iter()
+            .map(|input| self.cfg.fee_consensus.fee(input.amount()))
+            .sum();
+
+        assert!(output_amount <= input_amount);
+
+        let (input_notes, output_amounts) = self
+            .rebalance(dbtx, &self.cfg.fee_consensus, input_amount - output_amount)
+            .await;
+
+        for note in &input_notes {
+            self.remove_spendable_note(dbtx, note).await;
+        }
+
+        input_amount += input_notes.iter().map(SpendableNote::amount).sum();
+
+        output_amount += input_notes
+            .iter()
+            .map(|note| self.cfg.fee_consensus.fee(note.amount()))
+            .sum();
+
+        output_amount += output_amounts
+            .iter()
+            .map(|denomination| {
+                denomination.amount() + self.cfg.fee_consensus.fee(denomination.amount())
+            })
+            .sum();
+
+        assert!(output_amount <= input_amount);
+
+        let mut spendable_notes = funding_notes
+            .into_iter()
+            .chain(input_notes)
+            .collect::<Vec<SpendableNote>>();
+
+        // We sort the notes by denomination to minimize the leaked information.
+        spendable_notes.sort_by_key(|note| note.denomination);
+
+        if initial_state == InputSMState::Reserved && !spendable_notes.is_empty() {
+            dbtx.insert_new_entry(
+                &client_db::FundingReservationKey(operation_id),
+                &reservation::FundingReservation::AwaitingOutcome,
+            )
+            .await;
+        }
+        let input_bundle = Self::create_input_bundle(
+            operation_id,
+            spendable_notes,
+            false,
+            self.cfg.amount_unit,
+            initial_state,
+        );
+
+        let mut denominations = represent_amount_with_fees(
+            input_amount.saturating_sub(output_amount),
+            &self.cfg.fee_consensus,
+        )
+        .into_iter()
+        .chain(output_amounts)
+        .collect::<Vec<Denomination>>();
+
+        // We sort the amounts to minimize the leaked information.
+        denominations.sort();
+
+        let output_bundle = self.create_output_bundle(operation_id, denominations).await;
+
+        let sender = self.balance_update_sender.clone();
+        dbtx.on_commit(move || sender.send_replace(()));
+
+        Ok((input_bundle, output_bundle))
+    }
+
     fn create_input_bundle(
         operation_id: OperationId,
         notes: Vec<SpendableNote>,
         include_receive_sm: bool,
         amount_unit: AmountUnit,
+        initial_state: InputSMState,
     ) -> ClientInputBundle<MintInput, MintClientStateMachines> {
         let inputs = notes
             .iter()
@@ -752,7 +839,7 @@ impl MintClientModule {
                         txid: range.txid(),
                         spendable_notes: notes.clone(),
                     },
-                    state: InputSMState::Pending,
+                    state: initial_state.clone(),
                 })];
 
                 if include_receive_sm {
@@ -1061,8 +1148,13 @@ impl MintClientModule {
             return Err(ReceiveECashError::UneconomicalDenomination);
         }
 
-        let input =
-            Self::create_input_bundle(operation_id, ecash.notes(), true, self.cfg.amount_unit);
+        let input = Self::create_input_bundle(
+            operation_id,
+            ecash.notes(),
+            true,
+            self.cfg.amount_unit,
+            InputSMState::Pending,
+        );
         let input = self.client_ctx.make_client_inputs(input);
         let ec = base32::encode_prefixed(FEDIMINT_PREFIX, &ecash);
 
@@ -1119,8 +1211,9 @@ impl MintClientModule {
         ecash: &ECash,
     ) -> Result<FeeQuote, TransactionSubmitError> {
         // A receive submits the ecash notes as explicit inputs and no explicit
-        // outputs; the shared, module-agnostic fee quote runs the primary-module
-        // balancing (rebalancing + minting change) over the real inventory.
+        // outputs; the shared, module-agnostic fee quote runs the
+        // primary-module balancing (rebalancing + minting change) over
+        // the real inventory.
         let notes = ecash.notes();
         let input_amount: Amount = notes.iter().map(SpendableNote::amount).sum();
         let input_fee: Amount = notes
@@ -1163,8 +1256,8 @@ impl MintClientModule {
         }
 
         // Reissue path: the send mints itself `represent_amount(amount)` as
-        // explicit outputs (no explicit inputs) and the primary module funds and
-        // balances it. Quote that exact transaction.
+        // explicit outputs (no explicit inputs) and the primary module funds
+        // and balances it. Quote that exact transaction.
         let denominations = represent_amount(amount);
         let output_amount: Amount = denominations.iter().map(|d| d.amount()).sum();
         let output_fee: Amount = denominations

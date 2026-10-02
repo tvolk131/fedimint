@@ -547,7 +547,8 @@ where
     // binary-search it for free to find that fundable ceiling and seed the real
     // (fee-quoting) search there. This peels off the gateway fee — usually the
     // larger of the two — for free, leaving the expensive quotes to probe only
-    // the small window the federation fee opens up, instead of the whole balance.
+    // the small window the federation fee opens up, instead of the whole
+    // balance.
     if gross_up(Amount::from_msats(lo_bound)).msats > balance.msats {
         // The balance can't even fund the smallest amount's gross-up.
         return Ok(None);
@@ -570,13 +571,14 @@ where
     let mut hi = fundable_max;
     let mut lo_affordable = false;
 
-    // Probe the fee once at `fundable_max`. The send overhead (the gross-up plus
-    // the federation fee, less the amount) is monotone non-decreasing, so the
-    // overhead here is an upper bound on the overhead at the true maximum, and
-    // `balance - overhead` is therefore a proven-affordable, tight lower bound.
-    // If the quote reports `InsufficientFunds` — real note selection can't fund
-    // a value this large — the seed is skipped and the search falls back to the
-    // full bracket below. Any other failure is fatal and returned immediately.
+    // Probe the fee once at `fundable_max`. The send overhead (the gross-up
+    // plus the federation fee, less the amount) is monotone non-decreasing,
+    // so the overhead here is an upper bound on the overhead at the true
+    // maximum, and `balance - overhead` is therefore a proven-affordable,
+    // tight lower bound. If the quote reports `InsufficientFunds` — real
+    // note selection can't fund a value this large — the seed is skipped
+    // and the search falls back to the full bracket below. Any other
+    // failure is fatal and returned immediately.
     let funded = gross_up(Amount::from_msats(fundable_max));
     match fee_quote(funded).await {
         Ok(quote) => {
@@ -584,7 +586,8 @@ where
                 .msats
                 .saturating_add(quote.total().get_bitcoin().msats);
             if total <= balance.msats {
-                // Even the largest fundable amount fits once the fee is included.
+                // Even the largest fundable amount fits once the fee is
+                // included.
                 return Ok(Some(Amount::from_msats(fundable_max)));
             }
             let overhead = total.saturating_sub(fundable_max);
@@ -662,11 +665,28 @@ pub struct TransactionBuilder {
     inputs: Vec<ClientInputBundle>,
     outputs: Vec<ClientOutputBundle>,
     finalizers: Vec<RegisteredFinalizer>,
+    reserve_funding: bool,
 }
 
 impl TransactionBuilder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Hold primary funding after rejection instead of automatically reclaiming
+    /// it. The operation must explicitly release it after proving permanent
+    /// invalidity. Unsupported primary modules fail before submission.
+    ///
+    /// Funding and submission still commit together: abandoning construction
+    /// rolls both back. Once committed, cancellation or timeout cannot release
+    /// the funding. This does not change explicitly supplied inputs.
+    pub fn with_funding_reservations(mut self) -> Self {
+        self.reserve_funding = true;
+        self
+    }
+
+    pub fn reserves_funding(&self) -> bool {
+        self.reserve_funding
     }
 
     pub fn with_inputs(mut self, inputs: ClientInputBundle) -> Self {
@@ -707,10 +727,11 @@ impl TransactionBuilder {
     where
         C: secp256k1::Signing + secp256k1::Verification,
     {
-        // `input_idx_to_bundle_idx[input_idx]` stores the index of a bundle the input
-        // at `input_idx` comes from, so we can call state machines of the
-        // corresponding bundle for every input bundle. It is always
-        // monotonically increasing, e.g. `[0, 0, 1, 2, 2, 2, 4]`
+        // `input_idx_to_bundle_idx[input_idx]` stores the index of a bundle the
+        // input at `input_idx` comes from, so we can call state
+        // machines of the corresponding bundle for every input bundle.
+        // It is always monotonically increasing, e.g. `[0, 0, 1, 2, 2,
+        // 2, 4]`
         let (input_idx_to_bundle_idx, inputs, input_keys): (Vec<_>, Vec<_>, Vec<_>) = multiunzip(
             self.inputs
                 .iter()
@@ -722,8 +743,8 @@ impl TransactionBuilder {
                         .map(move |input| (bundle_idx, input.input.clone(), input.keys.clone()))
                 }),
         );
-        // `output_idx_to_bundle` works exactly like `input_idx_to_bundle_idx` above,
-        // but for outputs.
+        // `output_idx_to_bundle` works exactly like `input_idx_to_bundle_idx`
+        // above, but for outputs.
         let (output_idx_to_bundle_idx, outputs): (Vec<_>, Vec<_>) = multiunzip(
             self.outputs
                 .iter()

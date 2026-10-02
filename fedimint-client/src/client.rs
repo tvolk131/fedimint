@@ -590,7 +590,8 @@ impl Client {
     /// version (0, 0).
     pub async fn core_api_version(&self) -> ApiVersion {
         // Try to get from cache. If not available, return a conservative
-        // default. The cache should always be populated after successful client init.
+        // default. The cache should always be populated after successful client
+        // init.
         self.db
             .begin_transaction_nc()
             .await
@@ -780,24 +781,38 @@ impl Client {
                 return Err(TransactionSubmitError::NoPrimaryModule { unit: *unit });
             };
 
-            let (added_input_bundle, added_output_bundle) = module
-                .create_final_inputs_and_outputs(
-                    module_id,
-                    dbtx,
-                    operation_id,
-                    *unit,
-                    input_amount,
-                    output_amount,
-                )
-                .await?;
+            let (added_input_bundle, added_output_bundle) =
+                if partial_transaction.reserves_funding() {
+                    module
+                        .create_reserved_inputs_and_outputs(
+                            module_id,
+                            dbtx,
+                            operation_id,
+                            *unit,
+                            input_amount,
+                            output_amount,
+                        )
+                        .await?
+                } else {
+                    module
+                        .create_final_inputs_and_outputs(
+                            module_id,
+                            dbtx,
+                            operation_id,
+                            *unit,
+                            input_amount,
+                            output_amount,
+                        )
+                        .await?
+                };
 
             added_inputs_bundles.push(added_input_bundle);
             added_outputs_bundles.push(added_output_bundle);
         }
 
         // This is the range of  outputs that will be added to the transaction
-        // in order to balance it. Notice that it may stay empty in case the transaction
-        // is already balanced.
+        // in order to balance it. Notice that it may stay empty in case the
+        // transaction is already balanced.
         let change_range = Range {
             start: partial_transaction.outputs().count() as u64,
             end: (partial_transaction.outputs().count() as u64
@@ -824,9 +839,9 @@ impl Client {
             assert!(input_amount >= output_amount, "Transaction is underfunded");
         }
 
-        // Compute fees as the difference between total input and output amounts.
-        // This captures both explicit federation fees and any overpayment due to
-        // denomination constraints.
+        // Compute fees as the difference between total input and output
+        // amounts. This captures both explicit federation fees and any
+        // overpayment due to denomination constraints.
         let fees = {
             let mut input_total = Amounts::ZERO;
             for input in partial_transaction.inputs() {
@@ -961,10 +976,11 @@ impl Client {
                 )
                 .await?;
 
-            // Fold the change into the totals. These are a disjoint set of items
-            // from the explicit ones (the primary module only sees the scalar
-            // amounts to balance, never the explicit items), so this is not
-            // double-counting. Iterate the bundles the way `finalize_transaction`
+            // Fold the change into the totals. These are a disjoint set of
+            // items from the explicit ones (the primary module only
+            // sees the scalar amounts to balance, never the
+            // explicit items), so this is not double-counting.
+            // Iterate the bundles the way `finalize_transaction`
             // would, looking each fee up via the module that owns the item.
             for input in change_input.inputs() {
                 let module = self.get_module(input.input.module_instance_id());
@@ -1414,8 +1430,8 @@ impl Client {
         self.config().await.to_json()
     }
 
-    // Ideally this would not be in the API, but there's a lot of places where this
-    // makes it easier.
+    // Ideally this would not be in the API, but there's a lot of places where
+    // this makes it easier.
     #[doc(hidden)]
     /// Like [`Self::get_balance`] but returns an error if primary module is not
     /// available
@@ -1525,8 +1541,9 @@ impl Client {
     ) {
         let mut backoff = Self::create_api_version_backoff();
 
-        // NOTE: `FuturesUnordered` is a footgun, but since we only poll it for result
-        // and make a single async db write operation, it should be OK.
+        // NOTE: `FuturesUnordered` is a footgun, but since we only poll it for
+        // result and make a single async db write operation, it should
+        // be OK.
         let mut requests = FuturesUnordered::new();
 
         for peer_id in num_peers.peer_ids() {
@@ -1594,8 +1611,8 @@ impl Client {
     ) -> BTreeMap<PeerId, SupportedApiVersionsSummary> {
         let mut backoff = Self::create_api_version_backoff();
 
-        // NOTE: `FuturesUnordered` is a footgun, but since we only poll it for result
-        // and collect responses, it should be OK.
+        // NOTE: `FuturesUnordered` is a footgun, but since we only poll it for
+        // result and collect responses, it should be OK.
         let mut requests = FuturesUnordered::new();
 
         for peer_id in num_peers.peer_ids() {
@@ -1817,8 +1834,8 @@ impl Client {
             let db = db.clone();
             let task_group = task_group.clone();
             let client_span_owned = client_span.clone();
-            // Separate task group, because we actually don't want to be waiting for this to
-            // finish, and it's just best effort.
+            // Separate task group, because we actually don't want to be waiting
+            // for this to finish, and it's just best effort.
             task_group.clone().spawn_cancellable_with_span(
                 client_span.clone(),
                 "refresh_common_api_version_static",
@@ -1892,10 +1909,11 @@ impl Client {
         );
 
         let common_api_versions = loop {
-            // Wait to collect enough answers before calculating a set of common api
-            // versions to use. Note that all peers individual responses from
-            // previous attempts are still being used, and requests, or even
-            // retries for response of peers are not actually cancelled, as they
+            // Wait to collect enough answers before calculating a set of common
+            // api versions to use. Note that all peers individual
+            // responses from previous attempts are still being
+            // used, and requests, or even retries for response of
+            // peers are not actually cancelled, as they
             // are happening on a separate task. This is all just to bound the
             // time user can be waiting for the join operation to finish, at the
             // risk of picking wrong version in very rare circumstances.
@@ -2172,9 +2190,9 @@ impl Client {
     ) {
         debug!(target: LOG_CLIENT_RECOVERY, num_modules=%module_recovery_progress_receivers.len(), "Staring module recoveries");
 
-        // A recovery update for a single module: either an intermediate progress
-        // report, or the final completion carrying the recovered amount (if the
-        // module tracks it).
+        // A recovery update for a single module: either an intermediate
+        // progress report, or the final completion carrying the
+        // recovered amount (if the module tracks it).
         enum RecoveryUpdate {
             Progress(RecoveryProgress),
             Completed(Option<Amount>),
@@ -2969,6 +2987,23 @@ impl ClientContextIface for Client {
         tx_builder: TransactionBuilder,
     ) -> Result<OutPointRange, TransactionSubmitError> {
         Client::finalize_and_submit_transaction_inner(self, dbtx, operation_id, tx_builder).await
+    }
+
+    async fn release_funding_after_conflict(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        operation_id: OperationId,
+        txid: fedimint_core::TransactionId,
+    ) -> Result<bool, ClientModuleError> {
+        let mut released = true;
+        // Visit all instances, including a previous primary module. Each module
+        // owns its reservation records and ignores operations it did not fund.
+        for (instance, _, module) in self.modules.iter_modules() {
+            released &= module
+                .release_funding_after_conflict(instance, dbtx, operation_id, txid)
+                .await?;
+        }
+        Ok(released)
     }
 
     async fn fee_quote(
