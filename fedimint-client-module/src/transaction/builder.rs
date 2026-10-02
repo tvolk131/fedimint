@@ -19,6 +19,7 @@ use rand::{CryptoRng, Rng, RngCore};
 use secp256k1::Secp256k1;
 use tracing::warn;
 
+use super::finalizer::{RegisteredFinalizer, TransactionFinalizer, finalize};
 use crate::error::TransactionSubmitError;
 use crate::module::{IdxRange, OutPointRange, StateGenerator};
 use crate::sm::{self, DynState};
@@ -660,6 +661,7 @@ where
 pub struct TransactionBuilder {
     inputs: Vec<ClientInputBundle>,
     outputs: Vec<ClientOutputBundle>,
+    finalizers: Vec<RegisteredFinalizer>,
 }
 
 impl TransactionBuilder {
@@ -677,11 +679,21 @@ impl TransactionBuilder {
         self
     }
 
+    pub fn with_finalizer(
+        mut self,
+        module: ModuleInstanceId,
+        finalizer: Arc<dyn TransactionFinalizer>,
+    ) -> Self {
+        self.finalizers
+            .push(RegisteredFinalizer { module, finalizer });
+        self
+    }
+
     pub fn build<C, R: RngCore + CryptoRng>(
         self,
         secp_ctx: &Secp256k1<C>,
         mut rng: R,
-    ) -> (Transaction, Vec<DynState>)
+    ) -> Result<(Transaction, Vec<DynState>), TransactionSubmitError>
     where
         C: secp256k1::Signing + secp256k1::Verification,
     {
@@ -715,7 +727,15 @@ impl TransactionBuilder {
         );
         let nonce: [u8; 8] = rng.r#gen();
 
-        let txid = Transaction::tx_hash_from_parts(&inputs, &outputs, nonce);
+        let mut transaction = Transaction {
+            inputs,
+            outputs,
+            nonce,
+            signatures: TransactionSignature::NaiveMultisig(vec![]),
+        };
+        finalize(&mut transaction, &self.finalizers)
+            .map_err(TransactionSubmitError::Finalization)?;
+        let txid = transaction.tx_hash();
         let msg = secp256k1::Message::from_digest_slice(&txid[..]).expect("txid has right length");
 
         let signatures = input_keys
@@ -724,12 +744,7 @@ impl TransactionBuilder {
             .map(|keypair| secp_ctx.sign_schnorr(&msg, keypair))
             .collect();
 
-        let transaction = Transaction {
-            inputs,
-            outputs,
-            nonce,
-            signatures: TransactionSignature::NaiveMultisig(signatures),
-        };
+        transaction.signatures = TransactionSignature::NaiveMultisig(signatures);
 
         let input_states = self
             .inputs
@@ -764,7 +779,7 @@ impl TransactionBuilder {
                     ))
                 })
             });
-        (transaction, input_states.chain(output_states).collect())
+        Ok((transaction, input_states.chain(output_states).collect()))
     }
 
     pub fn inputs(&self) -> impl Iterator<Item = &ClientInput> {

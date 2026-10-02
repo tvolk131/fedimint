@@ -179,7 +179,8 @@ fn tx_builder_empty_bundles() {
             .into_instanceless()
             .into_dyn(3),
         )
-        .build(&Secp256k1::new(), rand::thread_rng());
+        .build(&Secp256k1::new(), rand::thread_rng())
+        .unwrap();
 
     // This actually depends on how builder processes inputs and outputs,
     // but if it ever changes, just adjust the string.
