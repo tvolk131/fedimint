@@ -689,6 +689,16 @@ impl TransactionBuilder {
         self
     }
 
+    pub fn verify_fees(&self, fees: &Amounts) -> Result<(), TransactionSubmitError> {
+        for registration in &self.finalizers {
+            registration
+                .finalizer
+                .verify_fees(fees)
+                .map_err(TransactionSubmitError::Finalization)?;
+        }
+        Ok(())
+    }
+
     pub fn build<C, R: RngCore + CryptoRng>(
         self,
         secp_ctx: &Secp256k1<C>,

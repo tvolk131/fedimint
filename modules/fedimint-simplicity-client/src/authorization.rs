@@ -26,6 +26,7 @@ pub(crate) struct Authorization {
     pub spends: Vec<PreparedSpend>,
     pub creations: Vec<Keypair>,
     pub receipt: Option<crate::receipt::ReceiptPlan>,
+    pub max_fee: Option<fedimint_core::Amount>,
 }
 
 impl fmt::Debug for Authorization {
@@ -37,6 +38,17 @@ impl fmt::Debug for Authorization {
 }
 
 impl TransactionFinalizer for Authorization {
+    fn verify_fees(&self, fees: &fedimint_core::module::Amounts) -> Result<(), ClientModuleError> {
+        if let Some(limit) = self.max_fee {
+            for (unit, amount) in fees.clone() {
+                if unit != fedimint_core::module::AmountUnit::BITCOIN || amount > limit {
+                    return Err(ClientModuleError::other("intent fee budget exceeded"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn prepare_outputs(
         &self,
         tx: &Transaction,

@@ -1181,11 +1181,13 @@ impl ClientBuilder {
 
         let client_arc = ClientHandle::new(client_inner);
 
+        // `ClientModule::start` may use its fully initialized ClientContext or
+        // spawn work that does. Publish it before starting any module tasks.
+        final_client.set(client_iface.clone());
+
         for (_, _, module) in client_arc.modules.iter_modules() {
             module.start().await;
         }
-
-        final_client.set(client_iface.clone());
 
         if !module_recoveries.is_empty() {
             // Sourced from the config so recovering modules (which aren't yet in
