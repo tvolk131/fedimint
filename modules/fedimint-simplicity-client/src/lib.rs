@@ -1,7 +1,12 @@
-//! Low-level prototype contract builder. This is not yet a persistent wallet.
+//! Experimental contract builders and a persistent, history-recoverable wallet.
+mod authorization;
+pub mod client;
+pub mod states;
+pub use client::{SimplicityClientInit, SimplicityClientModule, SpendIntent};
 pub mod assets;
 pub mod descriptor;
 pub mod market;
+pub mod wallet;
 
 #[cfg(test)]
 mod tests;

@@ -4870,12 +4870,20 @@ name = "fedimint-simplicity-client"
 version = "0.13.0-alpha"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bitcoin",
+ "erased-serde",
  "fedimint-aead",
+ "fedimint-api-client",
+ "fedimint-client-module",
  "fedimint-core",
  "fedimint-derive-secret",
  "fedimint-simplicity-common",
+ "futures",
+ "rand 0.8.5",
  "serde",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4901,8 +4909,11 @@ dependencies = [
  "bitcoin",
  "erased-serde",
  "fedimint-api-client",
+ "fedimint-client",
  "fedimint-connectors",
  "fedimint-core",
+ "fedimint-derive-secret",
+ "fedimint-dummy-client",
  "fedimint-dummy-common",
  "fedimint-dummy-server",
  "fedimint-logging",

@@ -3,9 +3,10 @@
 ## Status
 
 These are the agreed requirements for the persistent Simplicity wallet. The
-prototype has a guardian ledger and low-level transaction builders with opaque
-per-output recovery bytes, but no persistent wallet or mnemonic recovery
-implementation. The intended recovery architecture is described in
+prototype implements a persistent client wallet using encrypted per-output
+descriptors and an ordered federation-history scan. Four-guardian tests discard
+the client database and recover holdings, authority ownership, spendability, and
+confirmed activity, including a fully drained wallet. The architecture is described in
 [ARCH-simplicity](ARCH-simplicity.md).
 
 ## Source and purpose

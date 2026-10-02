@@ -70,6 +70,12 @@ impl ContractDescriptor {
 /// Wallet applications can provide additional templates without teaching
 /// guardians their policy or storing contract source outside the federation.
 pub trait ContractTemplates: fmt::Debug + Send + Sync {
+    /// Whether native collateral is a wallet balance. Watching a shared vault
+    /// does not imply owning its collateral. Applications opt in per template.
+    fn owns_balance(&self, _descriptor: &ContractDescriptor) -> bool {
+        false
+    }
+
     fn compile(
         &self,
         descriptor: &ContractDescriptor,
@@ -81,6 +87,11 @@ pub trait ContractTemplates: fmt::Debug + Send + Sync {
 pub struct BuiltinTemplates;
 
 impl ContractTemplates for BuiltinTemplates {
+    fn owns_balance(&self, descriptor: &ContractDescriptor) -> bool {
+        descriptor.template_version == 1
+            && matches!(descriptor.template.as_str(), "owner" | "top-up-or-release")
+    }
+
     fn compile(
         &self,
         descriptor: &ContractDescriptor,
@@ -141,6 +152,11 @@ impl fmt::Debug for WalletKeys {
 }
 
 impl WalletKeys {
+    pub(crate) fn identity(&self) -> [u8; 32] {
+        self.secret
+            .tweak(b"local database identity")
+            .to_random_bytes()
+    }
     pub fn new(root: &DerivableSecret, federation: FederationId, module: ModuleInstanceId) -> Self {
         Self {
             secret: root.tweak(

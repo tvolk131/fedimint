@@ -10,12 +10,20 @@ version = { workspace = true }
 
 [dependencies]
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 bitcoin = { workspace = true }
+erased-serde = { workspace = true }
 fedimint-aead = { workspace = true }
+fedimint-api-client = { workspace = true }
+fedimint-client-module = { workspace = true }
 fedimint-core = { workspace = true }
 fedimint-derive-secret = { workspace = true }
 fedimint-simplicity-common = { workspace = true, features = ["compiler"] }
+futures = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

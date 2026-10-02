@@ -6,8 +6,8 @@ resulting bytecode with `rust-simplicity`. It is opt-in and disabled by default.
 The [architecture record](../../specs/ARCH-simplicity.md) explains its boundary
 with Fedimint consensus and other modules.
 The agreed wallet recovery contract is recorded in
-[REQ-simplicity-recovery](../../specs/REQ-simplicity-recovery.md); it is not yet
-implemented by this prototype.
+[REQ-simplicity-recovery](../../specs/REQ-simplicity-recovery.md). The persistent
+Rust client implements it for versioned wallet templates.
 
 ## Run the prototype
 
@@ -38,8 +38,9 @@ cargo build -p fedimintd --features experimental-simplicity
 ```
 
 The module still has to be selected explicitly during federation setup. Existing
-federations and default builds do not enable it. There is no CLI wallet or
-persistent `ClientModule` integration yet.
+federations and default builds do not enable it. Wallet applications register
+`SimplicityClientInit::default()` in their client module registry. There is no
+CLI wallet integration yet.
 
 ## Guardian and client API
 
@@ -47,7 +48,8 @@ persistent `ClientModule` integration yet.
 limits, and the authorization digest. Its optional `compiler` feature adds the
 pinned SimplicityHL adapter. `fedimint-simplicity-server` owns the contract UTXO
 ledger, consensus block-count votes, validation, and the bitcoin liability audit.
-`fedimint-simplicity-client` is a low-level Rust builder.
+`fedimint-simplicity-client` provides low-level Rust builders and the persistent
+`SimplicityClientModule`.
 
 A `ContractOutput` contains the execution version, bitcoin amount in msats,
 program commitment (CMR), 32-byte application state, and bounded recovery bytes.
@@ -57,15 +59,15 @@ An input consumes one UTXO; a contract output creates one. Version-one action
 outputs describe asset operations and do not create spendable UTXOs. A transaction can include many
 of both and combine them with other modules' ordinary inputs and outputs.
 
-The client flow is:
+The low-level builder flow is:
 
 1. `ContractProgram::compile(source, arguments(...))` compiles a policy. The
    [example](../fedimint-simplicity-client/contracts/top_up_or_release.simf)
    checks an owner signature and both clocks, then either preserves its CMR and
    state in a successor of at least the current value or releases the balance.
 2. `program.output(amount, state, recovery)` creates a funded output request.
-   Retain the source/template identity and arguments locally: a CMR alone is not
-   a recoverable program.
+   A CMR alone is not a recoverable program. Use the persistent wallet below
+   when mnemonic recovery is required.
 3. For a spend, use `program.input(outpoint, claim_key, witnesses(...))` with
    `placeholder_signature()` to assemble a draft. Choose all contract inputs,
    all outputs, the transaction nonce, and required funding. Estimate spending
@@ -147,10 +149,10 @@ Spending removes the live UTXO and recovery annotation. Any state needed by a
 successor must be carried forward. Fedimint's existing transaction/session history
 may retain all original bytes indefinitely: removing the live record does **not**
 erase historical ciphertext. Recovery bytes are opaque public data to this module;
-wallets must encrypt them before use. No wallet identifier, scanning API, recovery
-encryption scheme, or mnemonic recovery implementation is provided yet.
+the persistent wallet encrypts descriptors before use. There is no public wallet
+identifier or new guardian scanning endpoint.
 
-The agreed persistent-wallet design scans existing federation session history
+The persistent wallet scans existing federation session history
 to restore both current contracts and confirmed interactions, including those
 whose outputs have all been spent. It requires only compatible wallet software,
 the mnemonic, and the federation; it does not use the deprecated backup API or
@@ -160,12 +162,57 @@ completes. See [ARCH-simplicity](../../specs/ARCH-simplicity.md#wallet-recovery-
 for the design and [REQ-simplicity-recovery](../../specs/REQ-simplicity-recovery.md)
 for its requirements and history boundary.
 
+## Persistent wallet API
+
+Register `SimplicityClientInit::default()` and obtain `SimplicityClientModule` from
+the normal Fedimint client. Native funding/change uses the client's primary
+module. The API is currently Rust-only:
+
+- `receive(amount, bundle)` makes a fresh owner policy with encrypted recovery
+  metadata, ready to hand to a sender.
+- `output(descriptor, amount, state, bundle)` does the same for a versioned
+  application template. Built-ins cover owner outputs, top-up/release, and the
+  binary-market vault. Applications can supply a `ContractTemplates` registry.
+- `submit(spends, outputs, creation_keys)` reserves selected contracts and returns
+  an operation ID and transaction ID after durable submission is recorded.
+  `SpendIntent::owner(outpoint)` installs an owner signature automatically;
+  custom intents supply other witnesses and an optional signature witness name.
+  Asset change and authority successors remain explicit outputs.
+- `await_operation(id)` waits for acceptance and history synchronization or
+  rejection cleanup. The core executor resumes pending submissions on restart.
+- `sync()`, `contracts()`, and `history()` provide a refresh, all recognized
+  contracts (including spent ones), and ordered confirmed transactions. Filter
+  `spent_by == None` for current holdings. Shared market collateral is not an
+  owner's native balance merely because the wallet watches its vault.
+
+Descriptors carry template ID/version, parameters, random key salt, and optional
+application data. Their authenticated encrypted envelope must fit the existing
+1 KiB annotation limit. Keep old template definitions in wallet releases. Use
+fresh receive requests: repeated ciphertext or policies can link transfers.
+Spending and metadata keys are derived independently from the module root secret,
+federation identity, and instance ID. No backup upload or external file is used.
+
+Use the normal client `recover(..., None)` flow with the same root secret after
+losing its database, wait for recovery, then reopen the client. Recovery uses an
+ordered authenticated scan through the current accepted session prefix. It
+stores progress atomically and refuses to silently skip an unsupported owned
+descriptor. This depends on the original federation retaining its history.
+
+Every submitted operation must contain a recognizable wallet input or output.
+To send primary-module funds solely to another wallet, first deposit into a wallet
+contract; an unrecognized direct send is rejected to avoid losing sender history.
+Low-level callers bypass these wallet guarantees. Arbitrary imported policies,
+local labels, failed attempts, and original operation IDs are not implicitly
+recoverable; confirmed transactions and encrypted application context are.
+
 ## Prototype boundary
 
 Native bitcoin contracts, public asset issuance/transfers/destruction, and a
-binary-market example are implemented. Private transfers, durable wallet state
-machines, recovery scanning, market indexing, and a production trading UI remain
-later work. The SDK does not discover holdings or retry conflicting vault spends.
+binary-market example are implemented, together with persistent submission,
+input reservations, encrypted descriptors, and history-based recovery. Private
+transfers, general market discovery/indexing, CLI support, and a production
+trading UI remain later work. Rejected conflicting vault spends must be rebuilt
+by the application against the accepted successor.
 
 The runtime, compiler revision, core jet allowlist, custom jet identifiers and
 CMRs, types, and costs are consensus-critical. Custom environment jets currently
@@ -320,6 +367,13 @@ The [network test](../fedimint-simplicity-server/src/tests/assets/network.rs)
 submits market transactions through the federation API, verifies all guardians'
 contract and origin records, and kills a guardian process while the remaining quorum settles the market.
 Restarting it from the same RocksDB exercises recovery of committed state and
-catch-up of missed consensus history. It does not test a persistent client wallet
-or inject crashes at every database-write boundary. No test
+catch-up of missed consensus history. The separate
+[wallet network test](../fedimint-simplicity-server/src/tests/assets/network/wallet.rs)
+restarts a client with a persisted submission, exercises native top-up/release,
+creates and transfers assets, discards entire client databases, recovers from
+root secrets without backup snapshots, spends recovered contracts, and restores
+history after all contracts are spent. Unit tests cover interrupted open-session
+replay, changed/missing prefixes, unsupported owned descriptors, foreign/copied
+annotations, and public-vault successors. These tests do not inject crashes at
+every database-write boundary. No test
 claims exhaustive bytecode fuzzing or production security assurance.
