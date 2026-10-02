@@ -197,3 +197,14 @@ the market outcome, while position-owner programs authorize payout destinations.
 Collateral operations share one vault and serialize; ordinary position transfers
 remain public, independent UTXO spends. Oracle honesty, client descriptor retention,
 and safe application covenant construction remain explicit trust boundaries.
+
+Shared-contract retry handlers are trusted wallet software. They preserve an
+immutable versioned request and may rebuild only after a definitive rejection
+and authenticated evidence of a competing spend of a designated shared input.
+Network uncertainty never authorizes another attempt. Submission, funding,
+reservations and attempt identity persist atomically; cancellation still resolves
+in-flight transactions. Attempt limits, a final funded per-attempt fee cap, and
+optional preparation deadlines bound automation; primary refund costs remain
+module-dependent. Local intent payloads may contain sensitive recipient metadata
+and are omitted from database dumps. Mnemonic recovery must not restart abandoned
+or unfinished intentions.

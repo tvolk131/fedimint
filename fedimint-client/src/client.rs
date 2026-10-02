@@ -845,6 +845,7 @@ impl Client {
                 .expect("Inputs >= outputs for own transactions")
         };
 
+        partial_transaction.verify_fees(&fees)?;
         let original_inputs = partial_transaction.inputs().cloned().collect::<Vec<_>>();
         let original_outputs = partial_transaction.outputs().cloned().collect::<Vec<_>>();
         let (transaction, states) = partial_transaction.build(&self.secp_ctx, thread_rng())?;

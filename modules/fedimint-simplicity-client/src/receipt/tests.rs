@@ -167,6 +167,7 @@ fn receipts_precede_creation_signatures_across_instances_in_either_order() {
                         spends: vec![],
                         creations: vec![key],
                         receipt: Some(plan.clone()),
+                        max_fee: None,
                     }),
                 );
             plans.push(plan);

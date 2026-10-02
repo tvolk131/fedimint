@@ -71,7 +71,7 @@ pub struct WalletStore {
     pub(crate) templates: Arc<dyn ContractTemplates>,
     pub(crate) federation: FederationId,
     pub(crate) module: ModuleInstanceId,
-    sync_lock: Arc<Mutex<()>>,
+    pub(crate) sync_lock: Arc<Mutex<()>>,
 }
 
 impl WalletStore {

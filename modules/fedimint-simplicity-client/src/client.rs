@@ -50,12 +50,14 @@ impl SpendIntent {
 #[derive(Debug, Clone)]
 pub struct SimplicityClientInit {
     pub templates: Arc<dyn ContractTemplates>,
+    pub intents: Arc<dyn crate::intent::IntentHandlers>,
 }
 
 impl Default for SimplicityClientInit {
     fn default() -> Self {
         Self {
             templates: Arc::new(BuiltinTemplates),
+            intents: Arc::new(crate::intent::BuiltinIntents),
         }
     }
 }
@@ -101,6 +103,9 @@ impl ClientModuleInit for SimplicityClientInit {
         Ok(SimplicityClientModule {
             store,
             context: args.context(),
+            intents: self.intents.clone(),
+            intent_lock: Arc::new(tokio::sync::Mutex::new(())),
+            tasks: args.task_group().clone(),
         })
     }
 
@@ -136,6 +141,9 @@ impl ClientModuleInit for SimplicityClientInit {
 pub struct SimplicityClientModule {
     pub(crate) store: WalletStore,
     pub(crate) context: ClientContext<Self>,
+    pub(crate) intents: Arc<dyn crate::intent::IntentHandlers>,
+    pub(crate) intent_lock: Arc<tokio::sync::Mutex<()>>,
+    tasks: fedimint_core::task::TaskGroup,
 }
 
 #[apply(async_trait_maybe_send!)]
@@ -145,6 +153,14 @@ impl ClientModule for SimplicityClientModule {
     type Backup = NoModuleBackup;
     type ModuleStateMachineContext = Self;
     type States = SimplicityState;
+
+    async fn start(&self) {
+        let module = self.context.self_ref().clone();
+        self.tasks
+            .spawn_cancellable("simplicity intents", async move {
+                module.run_intents().await;
+            });
+    }
 
     fn context(&self) -> Self {
         self.clone()
@@ -273,10 +289,39 @@ impl SimplicityClientModule {
     async fn submit_inner(
         &self,
         spends: Vec<SpendIntent>,
-        mut outputs: Vec<ContractOutput>,
+        outputs: Vec<ContractOutput>,
         creations: Vec<Keypair>,
         requested_receipt: Option<crate::receipt::SenderReceipt>,
     ) -> anyhow::Result<(OperationId, TransactionId)> {
+        let mut dbtx = self.store.db.begin_transaction().await;
+        let result = self
+            .submit_dbtx(
+                &mut dbtx.to_ref_nc(),
+                Submission {
+                    spends,
+                    outputs,
+                    creations,
+                    requested_receipt,
+                    max_fee: None,
+                },
+            )
+            .await?;
+        dbtx.commit_tx_result().await?;
+        Ok(result)
+    }
+
+    pub(crate) async fn submit_dbtx(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        submission: Submission,
+    ) -> anyhow::Result<(OperationId, TransactionId)> {
+        let Submission {
+            spends,
+            mut outputs,
+            creations,
+            requested_receipt,
+            max_fee,
+        } = submission;
         ensure!(
             !spends.is_empty() || !outputs.is_empty(),
             "empty contract operation"
@@ -287,7 +332,6 @@ impl SimplicityClientModule {
         );
         let operation_id = OperationId::new_random();
         let points: Vec<_> = spends.iter().map(|spend| spend.outpoint).collect();
-        let mut dbtx = self.store.db.begin_transaction().await;
         dbtx.insert_new_entry(&db::OperationResultKey(operation_id), &None)
             .await;
         let mut inputs = vec![];
@@ -426,6 +470,7 @@ impl SimplicityClientModule {
                 spends: prepared,
                 creations,
                 receipt,
+                max_fee,
             }),
         );
         let range = self
@@ -438,7 +483,6 @@ impl SimplicityClientModule {
                 builder,
             )
             .await?;
-        dbtx.commit_tx_result().await?;
         Ok((operation_id, range.txid()))
     }
 
@@ -458,4 +502,14 @@ impl SimplicityClientModule {
             .await;
         result.map_err(anyhow::Error::msg)
     }
+}
+
+/// Built and committed in the caller's database transaction so intent attempts,
+/// reservations, primary funding and core submission cannot diverge on a crash.
+pub(crate) struct Submission {
+    pub spends: Vec<SpendIntent>,
+    pub outputs: Vec<ContractOutput>,
+    pub creations: Vec<Keypair>,
+    pub requested_receipt: Option<crate::receipt::SenderReceipt>,
+    pub max_fee: Option<Amount>,
 }

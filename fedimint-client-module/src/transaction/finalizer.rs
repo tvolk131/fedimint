@@ -18,6 +18,11 @@ use crate::error::ClientModuleError;
 /// finalizer in the same phase and must be safe to rerun after a client
 /// database transaction retry.
 pub trait TransactionFinalizer: Debug + MaybeSend + MaybeSync {
+    /// Enforce a wallet's fee budget after funding and denomination change.
+    fn verify_fees(&self, _fees: &fedimint_core::module::Amounts) -> Result<(), ClientModuleError> {
+        Ok(())
+    }
+
     /// Populate reserved metadata before any signatures can commit to it.
     fn prepare_outputs(
         &self,

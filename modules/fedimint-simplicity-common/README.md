@@ -400,3 +400,63 @@ replay, changed/missing prefixes, unsupported owned descriptors, foreign/copied
 annotations, and public-vault successors. These tests do not inject crashes at
 every database-write boundary. No test
 claims exhaustive bytecode fuzzing or production security assurance.
+
+## Durable shared-contract intents
+
+`SimplicityClientModule::submit_intent(intent, policy)` persists a versioned
+semantic request and returns its local operation ID. `intent` reports the durable
+record; `intents` lists local operations after restart, and `await_intent` returns
+when an operation completes or needs user action.
+`retry_intent` resumes a manual conflict, and `cancel_intent` stops future attempts.
+Cancellation cannot retract a transaction already submitted: it still resolves
+as accepted or rejected. Losing connectivity leaves that same attempt pending.
+
+`IntentPolicy` defaults to manual retry, at most three attempts, and at most 100
+sats of total transaction fees per attempt. Configure those limits for the app.
+The fee check runs after primary funding and denomination change, before signing
+and committing submission. Rejected transactions may entail primary-module refund
+costs outside this transaction's fee cap. An optional session deadline prevents
+preparing new attempts; on-chain contract clocks govern actual acceptance.
+Automatic retry is opt-in and uses bounded exponential backoff with jitter. Both
+retry modes share the original attempt limit and immutable intent parameters.
+
+After a definitive rejection, the client refreshes authenticated history and
+requires proof that a different accepted transaction consumed a designated shared
+input. A timeout, an error string, or a disappeared ordinary owned input is not
+that proof. A handler rebuilds from the verified successor within the original
+request. Unknown templates, changed contract semantics, exhausted limits, and
+construction/funding errors stop further automatic action. Funding errors may
+need explicit retry after the primary module completes its rejection refund.
+
+The first built-in handler is `intent::MintPairs`, for buying a fixed quantity of
+binary-market pairs with independent, fixed YES and NO recipient outputs:
+
+```rust,ignore
+let anchor = wallet.watch_market(&market).await?;
+let intent = MintPairs {
+    market,
+    anchor,
+    quantity,
+    yes_destination, // zero native amount, exactly quantity YES, no authorities
+    no_destination,  // zero native amount, exactly quantity NO, no authorities
+}.into_intent();
+let id = wallet.submit_intent(intent, IntentPolicy::default()).await?;
+let record = wallet.await_intent(id).await?;
+```
+
+`watch_market` verifies immutable asset origins and scans authenticated history to
+learn the actual vault lineage, including prior spends. It merges exactly the
+wallet's already-scanned prefix and then ordinary sync follows successors. It is
+a one-time history scan rather than a new guardian index. Matching the policy CMR
+alone does not identify a successor: the consuming transaction and exact unique
+authorities must also match. The handler refuses pair issuance after resolution.
+Recombination, redemption, and resolution retain their low-level submission APIs;
+additional semantic handlers can be registered through `SimplicityClientInit`'s
+`IntentHandlers` implementation without changing guardians.
+
+Intent records and transaction submission/funding commit atomically. Reopening
+an existing database resumes outstanding attempts without duplicating them.
+Mnemonic-only recovery restores confirmed interactions and usable positions, but
+does not resume unfinished local intentions or recover a watch-only subscription
+that never produced an interaction. Such subscriptions can be re-added explicitly.
+No new consensus version or guardian endpoint is needed for this retry engine.

@@ -154,6 +154,44 @@ submission state, releases reservations on rejection, and synchronizes accepted
 transactions into confirmed history. Initial recovery uses the core's unusable
 module mode; applications reopen the client after recovery completes.
 
+## Shared-contract conflict handling
+
+A durable, versioned semantic intent is a client operation above individual core
+transaction submissions. Wallet software registers template handlers that retain
+historical intent meaning. The first handler mints a fixed number of market pairs
+to fixed, independent recipient outputs; other market actions continue using the
+low-level transaction API. Guardians enforce the same contracts either way.
+
+Each attempt's core submission, primary funding, Simplicity reservations, and
+association with its parent intent commit in one client database transaction. A
+pending attempt must resolve before any replacement can be built. Definitive
+rejection permits rebuilding only after authenticated history identifies a
+competing transaction spending a designated shared input. Error strings and
+network timeouts are insufficient. The market handler follows the actual
+consuming transaction and unique authorities to a successor, preserving quantity,
+recipients, and collateral price; a resolved market is a permanent failure.
+
+Manual retry is the default. Opt-in automatic retries use persisted backoff and
+jitter, a shared maximum-attempt count, a final funded fee cap per attempt, and an
+optional session deadline for preparation. Primary-module refund costs are outside
+that attempted transaction's fee cap. Core checks the actual total fees including
+funding/change overpayment before authorization. Limits cannot be reset by retry.
+Cancellation prevents future attempts but still resolves in-flight submissions.
+An unavailable federation leaves the same attempt pending. Construction/funding
+errors pause for attention; they do not trigger unbounded repeated submissions.
+
+Public market discovery verifies immutable origins and replays authenticated
+sessions through exactly the wallet's already-scanned prefix. It merges the
+resulting chain/history atomically under the scan lock, avoiding a live-UTXO query
+racing a recovery cursor that has already passed its consumption. Later ordinary
+sync follows the imported chain. Watching does not imply owning vault collateral.
+
+Existing database restarts resume pending intents. Mnemonic-only recovery restores
+confirmed interactions and outputs from federation records, but must not recreate
+or automatically execute unfinished local intentions. A watch-only subscription
+with no confirmed participation is local-only state. Applications can add it again.
+These mechanisms change client behavior only, not guardian consensus rules.
+
 ## Alternatives
 
 Compact module-specific recovery history remains a possible download

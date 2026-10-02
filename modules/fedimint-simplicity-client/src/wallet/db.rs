@@ -46,3 +46,22 @@ impl_db_record!(key = ObservedTransactionKey, value = (), db_prefix = 0x08);
 #[derive(Debug, Clone, Encodable, Decodable, Serialize)]
 pub struct OperationResultKey(pub OperationId);
 impl_db_record!(key = OperationResultKey, value = Option<Result<(), String>>, db_prefix = 0x09, notify_on_modify = true);
+
+#[derive(Debug, Clone, Encodable, Decodable, Serialize)]
+pub struct IntentKey(pub OperationId);
+#[derive(Debug, Encodable, Decodable)]
+pub struct IntentPrefix;
+impl_db_record!(
+    key = IntentKey,
+    value = crate::intent::IntentRecord,
+    db_prefix = 0x0a,
+    notify_on_modify = true
+);
+impl_db_lookup!(key = IntentKey, query_prefix = IntentPrefix);
+
+#[derive(Debug, Clone, Encodable, Decodable, Serialize)]
+pub struct ActiveIntentKey(pub OperationId);
+#[derive(Debug, Encodable, Decodable)]
+pub struct ActiveIntentPrefix;
+impl_db_record!(key = ActiveIntentKey, value = (), db_prefix = 0x0b);
+impl_db_lookup!(key = ActiveIntentKey, query_prefix = ActiveIntentPrefix);
