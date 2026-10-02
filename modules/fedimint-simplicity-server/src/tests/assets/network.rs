@@ -273,6 +273,9 @@ fn registry() -> ServerModuleInitRegistry {
         SimplicityInit,
     ));
     registry.attach(fedimint_server_core::DynServerModuleInit::from(DummyInit));
+    registry.attach(fedimint_server_core::DynServerModuleInit::from(
+        fedimint_mintv2_server::MintInit,
+    ));
     registry
 }
 
@@ -325,7 +328,9 @@ async fn run_guardian(config_path: std::path::PathBuf) {
         format!("127.0.0.1:{}", port + 2).parse().unwrap(),
         Box::new(|_| axum::Router::new()),
         1,
-        Duration::from_secs(120),
+        // Client restart/recovery scenarios with real mint issuance may span
+        // several minutes without filling a consensus session.
+        Duration::from_secs(600),
         ConnectionLimits {
             max_connections: 1000,
             max_requests_per_connection: 100,

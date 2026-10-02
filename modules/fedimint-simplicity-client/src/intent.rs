@@ -46,7 +46,8 @@ pub struct IntentPolicy {
     /// Includes the initial submission. Manual retries share the same limit.
     pub max_attempts: u32,
     /// Maximum total transaction fee per attempt, including primary funding and
-    /// change. Rejected funding may have its own module-specific refund costs.
+    /// change. Reserved funding is released locally after a proven conflict;
+    /// an unresolved rejection holds funding without a paid reclaim.
     pub max_fee: Amount,
     /// Stop preparing new attempts at this authenticated session count. This
     /// cannot revoke a transaction that has already been signed/submitted.
@@ -145,6 +146,17 @@ impl IntentHandlers for BuiltinIntents {
     }
 }
 
+impl IntentAttempt {
+    fn conflict(&self, contracts: &BTreeMap<OutPoint, WalletContract>) -> Option<TransactionId> {
+        self.shared_inputs.iter().find_map(|point| {
+            contracts
+                .get(point)
+                .and_then(|contract| contract.spent_by)
+                .filter(|txid| *txid != self.transaction)
+        })
+    }
+}
+
 impl IntentRecord {
     fn can_prepare(&self, session: u64) -> anyhow::Result<()> {
         ensure!(!self.cancel_requested, "intent cancelled");
@@ -182,20 +194,17 @@ impl IntentRecord {
                 self.status = IntentStatus::Complete(attempt.transaction);
             }
             Err(error) => {
-                let conflict = attempt.shared_inputs.iter().find_map(|point| {
-                    contracts
-                        .get(point)
-                        .and_then(|contract| contract.spent_by)
-                        .filter(|txid| *txid != attempt.transaction)
-                });
+                let conflict = attempt.conflict(contracts);
                 attempt.outcome = conflict.map_or_else(
                     || AttemptOutcome::Rejected(error.clone()),
                     AttemptOutcome::Conflicted,
                 );
-                self.status = if self.cancel_requested {
+                self.status = if conflict.is_none() {
+                    IntentStatus::Attention(format!(
+                        "{error}; funding remains reserved until permanent invalidity is established"
+                    ))
+                } else if self.cancel_requested {
                     IntentStatus::Cancelled
-                } else if conflict.is_none() {
-                    IntentStatus::Attention(error)
                 } else if self.attempts.len() >= self.policy.max_attempts as usize {
                     IntentStatus::Failed("intent attempt limit reached".to_owned())
                 } else if self.policy.retry == RetryMode::Manual {
@@ -340,7 +349,15 @@ impl SimplicityClientModule {
             .await
             .ok_or_else(|| anyhow::anyhow!("unknown local intent"))?;
         record.cancel_requested = true;
-        if !matches!(
+        if record
+            .attempts
+            .last()
+            .is_some_and(|attempt| matches!(attempt.outcome, AttemptOutcome::Rejected(_)))
+        {
+            // Cancellation prevents a replacement, but cannot forget held
+            // funding. Recheck authenticated history before reporting success.
+            record.status = IntentStatus::Submitted;
+        } else if !matches!(
             record.status,
             IntentStatus::Submitted | IntentStatus::Complete(_)
         ) {
@@ -410,7 +427,30 @@ impl SimplicityClientModule {
             if result.is_err() {
                 self.sync().await?;
             }
-            record.resolve(result, &self.contracts().await.into_iter().collect());
+            let contracts = self.contracts().await.into_iter().collect();
+            if result.is_err() && attempt.conflict(&contracts).is_some() {
+                let mut tx = self.store.db.begin_transaction().await;
+                ensure!(
+                    tx.get_value(&db::IntentKey(id)).await.as_ref() == Some(&original),
+                    "intent changed while releasing funding"
+                );
+                let released = self
+                    .context
+                    .release_funding_after_conflict(
+                        &mut tx.to_ref_nc(),
+                        attempt.operation,
+                        attempt.transaction,
+                    )
+                    .await?;
+                // Persist the release request even when the funding state
+                // machine has not restored the notes yet. A restart repeats
+                // this idempotently; no replacement starts before completion.
+                tx.commit_tx_result().await?;
+                if !released {
+                    return Ok(());
+                }
+            }
+            record.resolve(result, &contracts);
         } else {
             self.sync().await?;
             if let Err(error) = record.can_prepare(self.store.next_session().await) {
@@ -435,8 +475,10 @@ impl SimplicityClientModule {
                     Err(error) => record.status = IntentStatus::Failed(error.to_string()),
                     Ok(plan) => {
                         let mut tx = self.store.db.begin_transaction().await;
+                        tx.ignore_uncommitted(); // Construction errors intentionally roll back.
                         // Compare-and-commit also protects independent handles
-                        // sharing a database, beyond this process's driver lock.
+                        // sharing a database, beyond this process's driver
+                        // lock.
                         ensure!(
                             tx.get_value(&db::IntentKey(id)).await.as_ref() == Some(&record),
                             "intent changed while preparing"
@@ -450,6 +492,7 @@ impl SimplicityClientModule {
                                     creations: vec![],
                                     requested_receipt: None,
                                     max_fee: Some(record.policy.max_fee),
+                                    reserve_funding: true,
                                 },
                             )
                             .await;
@@ -470,7 +513,8 @@ impl SimplicityClientModule {
                                 record.status = IntentStatus::Attention(format!("{error:#}"))
                             }
                         }
-                        // Failure must roll back reservations AND primary funding.
+                        // Failure must roll back reservations AND primary
+                        // funding.
                         drop(tx);
                     }
                 }

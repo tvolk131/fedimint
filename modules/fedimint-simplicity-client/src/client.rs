@@ -303,6 +303,7 @@ impl SimplicityClientModule {
                     creations,
                     requested_receipt,
                     max_fee: None,
+                    reserve_funding: false,
                 },
             )
             .await?;
@@ -321,6 +322,7 @@ impl SimplicityClientModule {
             creations,
             requested_receipt,
             max_fee,
+            reserve_funding,
         } = submission;
         ensure!(
             !spends.is_empty() || !outputs.is_empty(),
@@ -433,6 +435,9 @@ impl SimplicityClientModule {
             }]
         });
         let mut builder = TransactionBuilder::new();
+        if reserve_funding {
+            builder = builder.with_funding_reservations();
+        }
         let has_inputs = !inputs.is_empty();
         if has_inputs {
             builder = builder.with_inputs(self.context.make_client_inputs(ClientInputBundle::new(
@@ -512,4 +517,5 @@ pub(crate) struct Submission {
     pub creations: Vec<Keypair>,
     pub requested_receipt: Option<crate::receipt::SenderReceipt>,
     pub max_fee: Option<Amount>,
+    pub reserve_funding: bool,
 }

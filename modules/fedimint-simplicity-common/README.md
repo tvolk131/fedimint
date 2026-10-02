@@ -414,8 +414,9 @@ as accepted or rejected. Losing connectivity leaves that same attempt pending.
 `IntentPolicy` defaults to manual retry, at most three attempts, and at most 100
 sats of total transaction fees per attempt. Configure those limits for the app.
 The fee check runs after primary funding and denomination change, before signing
-and committing submission. Rejected transactions may entail primary-module refund
-costs outside this transaction's fee cap. An optional session deadline prevents
+and committing submission. New intent attempts require a primary module with
+funding-reservation support (currently Mint v2). Proven conflicts return the
+original notes locally without a reclaim transaction or fees. An optional session deadline prevents
 preparing new attempts; on-chain contract clocks govern actual acceptance.
 Automatic retry is opt-in and uses bounded exponential backoff with jitter. Both
 retry modes share the original attempt limit and immutable intent parameters.
@@ -425,8 +426,22 @@ requires proof that a different accepted transaction consumed a designated share
 input. A timeout, an error string, or a disappeared ordinary owned input is not
 that proof. A handler rebuilds from the verified successor within the original
 request. Unknown templates, changed contract semantics, exhausted limits, and
-construction/funding errors stop further automatic action. Funding errors may
-need explicit retry after the primary module completes its rejection refund.
+construction/funding errors stop further automatic action. The intent waits for
+funding release to finish before exposing a conflict, retrying, or finishing
+cancellation. An unproven rejection pauses for attention with funds still reserved;
+cancelling cannot discard that unresolved funding. There is no automatic paid
+reclaim fallback. A timeout or restart leaves the same reservation pending.
+
+The shared client exposes `TransactionBuilder::with_funding_reservations` and
+`ClientContext::release_funding_after_conflict`. The funding module owns its notes;
+the originating wallet module must authenticate permanent invalidity before
+requesting release. Reservation state, final transaction identity, and submission
+commit together; abandoned construction rolls them all back. Release requests and
+restoration are durable and idempotent. One reservation belongs to one attempt,
+so another concurrent wallet operation can select the released notes before a
+retry. Ordinary submissions and previously persisted pre-reservation attempts
+retain their original funding behavior, including possible reclaim fees. Imported
+ecash still requires reissuance; this API cannot restore arbitrary supplied notes.
 
 The first built-in handler is `intent::MintPairs`, for buying a fixed quantity of
 binary-market pairs with independent, fixed YES and NO recipient outputs:

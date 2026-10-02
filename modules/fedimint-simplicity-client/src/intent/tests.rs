@@ -125,3 +125,15 @@ async fn attempt_index_rolls_back_and_preserves_completed_history() {
         IntentStatus::Complete(txid(2))
     );
 }
+
+#[test]
+fn cancellation_of_an_unproven_rejection_keeps_funding_unresolved() {
+    let mut r = record();
+    r.cancel_requested = true;
+    r.resolve(Err("temporarily invalid".to_owned()), &BTreeMap::new());
+    assert!(matches!(r.status, IntentStatus::Attention(_)));
+    assert!(matches!(r.attempts[0].outcome, AttemptOutcome::Rejected(_)));
+    assert!(r.can_prepare(0).is_err());
+    r.resolve(Err("rejected".to_owned()), &competing());
+    assert_eq!(r.status, IntentStatus::Cancelled);
+}
