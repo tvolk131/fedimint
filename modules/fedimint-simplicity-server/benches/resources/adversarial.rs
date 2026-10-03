@@ -347,7 +347,7 @@ fn build_case(name: &str) -> Case {
             transaction
                 .inputs
                 .remove(if index == last { last - 1 } else { last });
-            preflight = Outcome::Module(ContractError::Program);
+            // Decoding now follows state resolution.
             Outcome::Module(ContractError::Program)
         }
         "packed_bad_outer_signature" => Outcome::Signature,
@@ -410,7 +410,7 @@ fn build_case(name: &str) -> Case {
 }
 
 pub fn check_preflight(transaction: &Transaction) -> Result<(), TransactionError> {
-    resources::check_signed_transaction(transaction, MODULE)
+    resources::check_signed_structure(transaction, MODULE).map(|_| ())
 }
 
 fn classify(result: Result<(), TransactionError>) -> Outcome {

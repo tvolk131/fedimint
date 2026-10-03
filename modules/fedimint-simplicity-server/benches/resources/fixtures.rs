@@ -858,20 +858,8 @@ pub fn check_all() {
         }
         rt.block_on(async {
             let db = fixture.database().await;
-            let result = module
-                .validate_transaction(
-                    &mut db.begin_transaction_nc().await,
-                    &ModuleTransactionContext {
-                        transaction: &fixture.transaction,
-                        consensus: TransactionConsensusContext {
-                            federation_id: federation(),
-                            session_index: 10,
-                        },
-                        module_instance_id: MODULE,
-                        validation: None,
-                    },
-                )
-                .await;
+            let result =
+                validate_module(&module, &mut db.begin_transaction_nc().await, fixture).await;
             let error = result.err().map(|error| match error {
                 TransactionError::Input(error) => error
                     .as_any()
@@ -887,7 +875,11 @@ pub fn check_all() {
                 error => panic!("{name}: unexpected error {error}"),
             });
             assert_eq!(
-                error, fixture.validation_error,
+                error,
+                fixture
+                    .preflight_error
+                    .clone()
+                    .or_else(|| fixture.validation_error.clone()),
                 "{name}: guardian validation"
             );
             let transaction = fixture.funded_transaction();
@@ -931,7 +923,7 @@ pub fn manifest() -> serde_json::Value {
                 "input_fee_msat": fixture.inputs.iter().map(runtime::input_fee).collect::<Result<Vec<_>, _>>().ok().map(|fees| fees.iter().map(|fee| fee.msats).sum::<u64>()),
                 "output_fee_msat": fixture.transaction.outputs.iter().filter_map(|output| output.as_any().downcast_ref::<ContractOutput>()).map(|output| output_fee(output).msats).sum::<u64>(),
                 "decode_error": fixture.decode_error.as_ref().map(ToString::to_string),
-                "validation_error": fixture.validation_error.as_ref().map(ToString::to_string),
+                "validation_error": fixture.preflight_error.as_ref().or(fixture.validation_error.as_ref()).map(ToString::to_string),
                 "preflight_error": fixture.preflight_error.as_ref().map(ToString::to_string),
             })
         }).collect::<Vec<_>>()
@@ -975,4 +967,31 @@ fn contract_error(error: TransactionError) -> ContractError {
             .clone(),
         error => panic!("unexpected core error: {error}"),
     }
+}
+
+/// All production module phases, excluding foreign funding/signatures and
+/// writes.
+pub async fn validate_module(
+    module: &Simplicity,
+    dbtx: &mut fedimint_core::db::DatabaseTransaction<'_>,
+    fixture: &Fixture,
+) -> Result<fedimint_server_core::ModuleTransactionValidation, TransactionError> {
+    let mut context = ModuleTransactionContext {
+        transaction: &fixture.transaction,
+        consensus: TransactionConsensusContext {
+            federation_id: federation(),
+            session_index: 10,
+        },
+        module_instance_id: MODULE,
+        preparation: None,
+        validation: None,
+    };
+    <Simplicity as ServerModule>::verify_transaction(&context)?;
+    let resolved = module.prepare_transaction(dbtx, &context).await?;
+    let prepared = <Simplicity as ServerModule>::prepare_kind_transaction(
+        &context,
+        BTreeMap::from([(MODULE, resolved)]),
+    )?;
+    context.preparation = Some(&prepared);
+    module.validate_transaction(dbtx, &context).await
 }

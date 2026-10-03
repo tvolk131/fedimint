@@ -160,15 +160,24 @@ Core runs stateless transaction verification once per module kind before its
 parallel per-input checks. Simplicity checks counts, lengths and creation charges
 first, then duplicate references, output/action structure and creation destination
 indices across all its instances. Guardians check the outer signature scheme and
-count next. Only then are programs decoded sequentially and their bounds summed,
-before any program or creation authorization executes. Every instance shares the
-allowance. The wallet runs the same structural/resource checks during finalization,
+count next. Guardians resolve all consumed contracts through each instance's
+database namespace before decoding any Simplicity program. Kind-wide preparation
+then decodes sequentially, sums bounds and checks all execution versions and
+commitments before any Simplicity VM executes. Every instance shares the
+allowance. The wallet runs structural/resource checks during finalization,
 before outer signatures exist and before submission/funding state commits.
 Creation destinations must be asset-bundle outputs in their own instance; several
-assets may share a destination. State-dependent accounting, namespace checks,
-actual signatures, program commitments and funding remain later checks.
+assets may share a destination. State-dependent asset accounting, namespace
+checks, actual signatures and funding remain later checks.
 For multiply-invalid transactions this phase order determines the first error;
 module preflight faults use the same input-error envelope as resource-limit faults.
+Guardian preparations retain decoded programs using an 8 MiB conservative logical
+accounting budget per transaction across all instances. Programs that do not fit
+are decoded again at execution; cache capacity cannot reject a transaction or
+change its fees. This is not an RSS ceiling: decoding/accounting scratch space,
+the current uncached program and the VM use additional memory. Preparations use
+one snapshot and are dropped before core applies input/output changes. Each
+submission, revalidation and consensus attempt prepares its own data.
 Outer transaction bytes, recovery annotations, assets, types, cells and frames
 retain their separate limits. These checks do not replace admission concurrency
 controls or bound a guardian's aggregate load from repeated requests.

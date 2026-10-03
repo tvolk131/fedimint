@@ -45,12 +45,13 @@ fn raw_input(program: Vec<u8>, owner: &Keypair) -> ContractInput {
 }
 
 #[tokio::test]
-async fn shared_cost_budget_accepts_exact_boundary_and_rejects_before_state_access() {
+async fn shared_cost_budget_accepts_exact_boundary_and_rejects_before_execution() {
     let fed = harness();
     let owner = key();
     let mut inputs = [
         raw_input(units(8192), &owner),
         raw_input(units(1809), &owner),
+        raw_input(units(1810), &owner),
     ];
     let outputs = inputs
         .iter()
@@ -60,12 +61,12 @@ async fn shared_cost_budget_accepts_exact_boundary_and_rejects_before_state_acce
             DynOutput::from_typed(
                 if index == 0 { SIMP } else { OTHER },
                 ContractOutput {
-                    version: index as u32,
+                    version: u32::from(index != 0),
                     amount: Amount::from_sats(100),
                     cmr: decoded.cmr().to_byte_array(),
                     state: [0; 32],
                     recovery: vec![],
-                    extension: (index == 1).then(|| AssetExtension::Bundle(AssetBundle::default())),
+                    extension: (index != 0).then(|| AssetExtension::Bundle(AssetBundle::default())),
                 },
             )
         })
@@ -90,10 +91,9 @@ async fn shared_cost_budget_accepts_exact_boundary_and_rejects_before_state_acce
     let before = snapshot(&fed).await;
     for reverse in [false, true] {
         let mut over = valid.clone();
-        let mut last = inputs[1].clone();
-        last.program = units(1810); // Only 200 milliweight over the shared cap.
-        last.outpoint.out_idx = 999; // Must reject even before resolving this UTXO.
-        over.inputs[1] = DynInput::from_typed(OTHER, last);
+        // Known state and matching commitment, only 200 milliweight over the
+        // shared cap. Unknown references now reject in the earlier state phase.
+        over.inputs[1] = DynInput::from_typed(OTHER, inputs[2].clone());
         if reverse {
             over.inputs.swap(0, 1);
         }

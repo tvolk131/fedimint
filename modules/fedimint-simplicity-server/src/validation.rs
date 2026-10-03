@@ -20,14 +20,14 @@ use fedimint_simplicity_common::assets::{
 };
 use fedimint_simplicity_common::resources::check_output;
 use fedimint_simplicity_common::runtime::{
-    Environment, EnvironmentInput, EnvironmentOutput, execute,
+    Environment, EnvironmentInput, EnvironmentOutput, decode_program, execute_decoded,
 };
 use fedimint_simplicity_common::{
     ContractError, ContractInput, ContractOutput, ContractOutputError, signature_hash,
 };
 
-use crate::db::{AssetKey, ContractKey, NamespaceKey};
-use crate::{Simplicity, validate_shape};
+use crate::db::{AssetKey, NamespaceKey};
+use crate::{Simplicity, preparation, validate_shape};
 
 #[derive(Debug)]
 pub(crate) struct ValidatedTransaction {
@@ -54,6 +54,7 @@ pub(crate) async fn validate(
         TransactionError::Input(DynInputError::from_typed(context.module_instance_id, error))
     };
     validate_shape(context).map_err(output_err)?;
+    let prepared = preparation::get(context)?;
     let hashes = TransactionHashes::new(context);
     let mut outputs = Vec::new();
     let mut actions = AssetActions::default();
@@ -83,28 +84,24 @@ pub(crate) async fn validate(
         });
     }
     let mut inputs = Vec::new();
+    let mut input_indices = Vec::new();
     let mut stored_inputs = Vec::new();
-    let mut seen = BTreeSet::new();
-    for input in context
+    for (index, input) in context
         .transaction
         .inputs
         .iter()
-        .filter(|input| input.module_instance_id() == context.module_instance_id)
+        .enumerate()
+        .filter(|(_, input)| input.module_instance_id() == context.module_instance_id)
     {
         let input = input
             .as_any()
             .downcast_ref::<ContractInput>()
             .ok_or_else(|| input_err(ContractError::Context))?;
-        if !seen.insert(input.outpoint) {
-            return Err(input_err(ContractError::UnknownContract));
-        }
-        let stored = dbtx
-            .get_value(&ContractKey(input.outpoint))
-            .await
-            .ok_or_else(|| input_err(ContractError::UnknownContract))?;
-        if stored.output.version > ASSET_VERSION {
-            return Err(input_err(ContractError::Version));
-        }
+        let stored = prepared
+            .contracts
+            .get(&index)
+            .ok_or_else(|| input_err(ContractError::MissingContext))?;
+        input_indices.push(index);
         inputs.push(input);
         stored_inputs.push(stored);
     }
@@ -138,7 +135,18 @@ pub(crate) async fn validate(
             inputs: resolved.clone(),
             actions: actions.clone(),
         };
-        let fee = execute(input, &environment).map_err(input_err)?;
+        let cached = prepared
+            .programs
+            .get(&input_indices[index])
+            .ok_or_else(|| input_err(ContractError::MissingContext))?;
+        let decoded;
+        let program = if let Some(program) = cached {
+            program
+        } else {
+            decoded = decode_program(input).map_err(input_err)?;
+            &decoded
+        };
+        let fee = execute_decoded(input, &environment, program).map_err(input_err)?;
         metadata.push(InputMeta {
             pub_key: input.claim_key,
             amount: TransactionItemAmounts {

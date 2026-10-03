@@ -69,10 +69,11 @@ The same fixed keys, nonce, votes and contract outpoints reproduce the same case
 | `runtime_execute` | Production `execute`, including decode, CMR/version checks, VM allocation/execution and fee calculation. |
 | `intent_hash` | One production v0/v1 transaction intent hash. |
 | `environment_clone` | Clone and drop one already constructed environment. Shares immutable input/output/action data through `Arc` and copies the current contract snapshot. It is **not** a measurement of the entire context-building path. The first baseline predates sharing and copied the full context. |
-| `guardian_validation` | The actual `ServerModule::validate_transaction` hook: output validation/hashing, consumed-contract DB reads, conservation checks, block votes, intent hashes, environment construction, every input's runtime execution and final transaction hash. Includes current-thread executor entry and result destruction. |
+| `guardian_validation` | The production structural, state-resolution, kind-preparation and instance-validation hooks: limits, decoding/commitments, output hashing, conservation, clocks, intent hashes, environments and VM execution. Includes current-thread executor entry and dropping preparations/results. |
 | `transaction_preflight` | Production `resources::check_transaction`: combined byte/count checks, creation-signature charges, structural checks and sequential redemption decoding/static cost accumulation. This unsigned client preflight omits the outer signature envelope. Stops on the first error, before VM execution or database access. |
 | `core_submission` | Production `process_transaction_with_dbtx` in submission mode: kind-wide preflight, input verification, module validation, outer signatures, native funding checks and processing hooks. Includes creation of a fresh warm MemDatabase transaction and dropping all writes after each iteration. |
-| `adversarial_preflight` | Production `resources::check_signed_transaction`, including signature scheme/count after structural checks and before decoding, on the funded and possibly mutated adversarial transaction. |
+| `adversarial_preflight` | Production `resources::check_signed_structure`: cheap structural checks and signature scheme/count, without decoding or database access. |
+| `retained_decode` | Decode all inputs of each adversarial case's unmutated workload and retain every graph until the end, then drop them. An allocation probe for the retention decision, not production cache behavior or full guardian memory. |
 | `adversarial_core` | The same core submission path and rollback methodology, on the adversarial matrix. Invalid cases must fail for their explicitly asserted reason. |
 
 Per-input stages use the first input. The guardian stage measures all inputs in
@@ -82,9 +83,8 @@ are seeded directly; these fixtures measure transitions from ledger state, not
 asset genesis.
 
 The guardian stage is **module validation**, not end-to-end acceptance. It omits
-core's stateless transaction preflight (which decodes each Simplicity input),
-outer signature verification, native bitcoin funding checks, processing hooks,
-database commits, RocksDB I/O, network admission and consensus. Transactions have
+foreign-module verification, outer cryptographic signature verification, native
+bitcoin funding checks, processing hooks, database commits, RocksDB I/O, network admission and consensus. Transactions have
 outer signatures but do not include fee/collateral sponsorship. In particular,
 `market_issue` needs foreign funding to pass core conservation. Benchmark success
 must not be interpreted as full transaction acceptance.
@@ -95,9 +95,9 @@ It seeds state separately and runs all core submission checks, but does not
 commit writes, exercise RocksDB, mint funding, network admission or consensus.
 Accepted fixtures are rolled back between iterations. The schema-2 manifest
 records both the original and funded transaction hashes/sizes and the expected
-preflight error. The isolated guardian/runtime stages intentionally retain
-over-budget workloads for historical comparisons; only the core stage models
-the caps' effect on transaction processing.
+preflight error. The isolated runtime stages retain over-budget workloads for
+historical comparisons. The guardian stage now includes preparation and therefore enforces
+the aggregate caps; its scope differs from reports before preparation was added.
 
 The helper environment is for isolated runtime/clone measurements. The guardian
 measurement constructs its own context using production code; it does not use
@@ -204,6 +204,8 @@ The [cap-fitting adversarial report](REPORT-2026-10-03-adversarial.md) records
 expensive accepted/rejected workloads and suggestions for validation ordering.
 The [structural-preflight comparison](REPORT-2026-10-03-structural-preflight.md)
 measures moving cheap structural rejection ahead of program decoding.
+The [preparation comparison](REPORT-2026-10-03-preparation.md) measures resolving
+state before decoding and reusing decoded programs within a validation attempt.
 Keep the harness, fixtures and methodology as regression tools. Retain selected
 comparison reports; routine raw runs need not all be committed.
 Fee coefficients or limit changes should be reviewed separately after examining

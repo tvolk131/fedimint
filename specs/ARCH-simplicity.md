@@ -26,18 +26,27 @@ validation behavior through default hook implementations. No new core transactio
 wire format is introduced.
 
 A stateless core verification hook runs once per participating module kind before
-per-input verification. Simplicity uses it to bound redemption bytes and aggregate
-static execution cost across all its instances, including creation authorization
-work, before database-dependent validation. Cheap structural checks across all
-instances and the outer signature envelope precede sequential program decoding;
-other modules retain their existing per-input verification. The wallet shares the
-structural/resource checks before committing submission and funding reservations,
-but runs them before outer signatures are constructed.
+per-input verification. Simplicity checks redemption bytes, creation charges,
+structure and the outer signature envelope there. Core then resolves each
+instance's state through its own database namespace, before preparing programs
+once per kind. Simplicity decodes sequentially, checks every commitment and
+execution version, and enforces the shared static-cost budget before any of its
+programs execute. All phases use the same unmodified database snapshot. Existing
+modules have no-op preparation defaults and retain their validation behavior.
+The wallet checks structural/resource limits before committing submission and
+funding reservations, but runs before outer signatures are constructed.
+
+Kind preparation retains decoded programs within a local accounting budget;
+uncached programs are decoded again for execution. Retention changes performance
+only, never transaction validity or fees. Preparations are owned by one validation
+attempt and dropped before input/output processing; admission and consensus do
+not share cached state.
 
 Core invokes a module validation hook against the unmodified transaction snapshot
 before processing inputs or outputs. A transaction-local, type-erased result is
-passed only to that module's processing hooks. Simplicity resolves every consumed
-contract, validates asset accounting, and executes programs in that phase; it
+passed only to that module's processing hooks. Simplicity uses the prepared
+contracts/programs, validates each instance's asset accounting, and executes its
+programs in that phase; it
 applies the validated changes during ordinary input/output processing.
 
 Each contract input consumes one module UTXO and reports its gross bitcoin value

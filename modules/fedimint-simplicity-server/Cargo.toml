@@ -25,6 +25,9 @@ fedimint-server-core = { workspace = true }
 fedimint-simplicity-common = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
+simplicity-lang = { version = "=0.9.0", default-features = false, features = [
+    "bitcoin",
+] }
 
 [dev-dependencies]
 axum = { workspace = true }
@@ -48,9 +51,6 @@ fedimint-simplicity-client = { workspace = true }
 fedimint-testing-core = { workspace = true }
 rand = { workspace = true }
 serde_json = { workspace = true }
-simplicity-lang = { version = "=0.9.0", default-features = false, features = [
-    "bitcoin",
-] }
 tbs = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }

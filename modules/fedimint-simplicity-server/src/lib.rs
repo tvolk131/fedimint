@@ -1,6 +1,7 @@
 //! Experimental Simplicity guardian module.
 
 pub mod db;
+mod preparation;
 #[cfg(test)]
 mod tests;
 mod validation;
@@ -215,12 +216,25 @@ impl ServerModule for Simplicity {
     fn verify_transaction(
         context: &ModuleTransactionContext<'_>,
     ) -> Result<(), fedimint_core::transaction::TransactionError> {
-        // Core calls this once across all instances. Program decoding happens
-        // here rather than in the parallel per-input verification pass.
-        fedimint_simplicity_common::resources::check_signed_transaction(
+        // State resolution and kind-wide decoding follow these cheap checks.
+        fedimint_simplicity_common::resources::check_signed_structure(
             context.transaction,
             context.module_instance_id,
         )
+        .map(|_| ())
+    }
+    async fn prepare_transaction(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
+        preparation::resolve(dbtx, context).await
+    }
+    fn prepare_kind_transaction(
+        context: &ModuleTransactionContext<'_>,
+        instances: BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
+        preparation::prepare(context, instances)
     }
     async fn process_input<'a, 'b, 'c>(
         &'a self,

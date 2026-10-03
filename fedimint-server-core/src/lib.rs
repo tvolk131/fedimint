@@ -52,6 +52,10 @@ impl ModuleTransactionValidation {
     pub fn get<T: std::any::Any>(&self) -> Option<&T> {
         self.0.downcast_ref()
     }
+
+    pub fn into_inner<T: std::any::Any>(self) -> Result<T, Self> {
+        self.0.downcast().map(|value| *value).map_err(Self)
+    }
 }
 
 impl std::fmt::Debug for ModuleTransactionValidation {
@@ -67,6 +71,8 @@ pub struct ModuleTransactionContext<'a> {
     pub transaction: &'a fedimint_core::transaction::Transaction,
     pub consensus: TransactionConsensusContext,
     pub module_instance_id: ModuleInstanceId,
+    /// Preparation for this module kind, scoped to this validation attempt.
+    pub preparation: Option<&'a ModuleTransactionValidation>,
     pub validation: Option<&'a ModuleTransactionValidation>,
 }
 
@@ -147,6 +153,29 @@ pub trait ServerModule: Debug + Sized {
         _input: &<Self::Common as ModuleCommon>::Input,
     ) -> Result<(), <Self::Common as ModuleCommon>::InputError> {
         Ok(())
+    }
+
+    /// Resolve state against the unmodified snapshot without executing programs
+    /// or mutating the database. Core completes this phase for every instance
+    /// before calling any kind's `prepare_kind_transaction` hook.
+    async fn prepare_transaction(
+        &self,
+        _dbtx: &mut DatabaseTransaction<'_>,
+        _context: &ModuleTransactionContext<'_>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
+        Ok(ModuleTransactionValidation::new(()))
+    }
+
+    /// Prepare execution once per kind, with only that kind's resolved states.
+    /// Core completes every kind's preparation before calling any validation
+    /// hook. The result is available to this kind's validation hooks and is
+    /// dropped before input/output processing. The context uses the lowest
+    /// participating instance ID, as in `verify_transaction`.
+    fn prepare_kind_transaction(
+        _context: &ModuleTransactionContext<'_>,
+        _instances: std::collections::BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
+        Ok(ModuleTransactionValidation::new(()))
     }
 
     /// Validate against the unmodified transaction snapshot. The returned value
@@ -333,6 +362,18 @@ pub trait IServerModule: Debug {
         context: &ModuleTransactionContext<'_>,
     ) -> Result<(), fedimint_core::transaction::TransactionError>;
 
+    async fn prepare_transaction(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError>;
+
+    fn prepare_kind_transaction(
+        &self,
+        context: &ModuleTransactionContext<'_>,
+        instances: std::collections::BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError>;
+
     async fn validate_transaction(
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
@@ -498,6 +539,22 @@ where
                 .expect("incorrect input type passed to module plugin"),
         )
         .map_err(|v| DynInputError::from_typed(input.module_instance_id(), v))
+    }
+
+    async fn prepare_transaction(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
+        <Self as ServerModule>::prepare_transaction(self, dbtx, context).await
+    }
+
+    fn prepare_kind_transaction(
+        &self,
+        context: &ModuleTransactionContext<'_>,
+        instances: std::collections::BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
+        <Self as ServerModule>::prepare_kind_transaction(context, instances)
     }
 
     async fn validate_transaction(

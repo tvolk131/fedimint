@@ -6,7 +6,6 @@ mod fixtures;
 use std::hint::black_box;
 
 use fedimint_core::db::DatabaseTransaction;
-use fedimint_server_core::{ModuleTransactionContext, ServerModule, TransactionConsensusContext};
 use fedimint_simplicity_common::{resources, runtime};
 use fedimint_simplicity_server::Simplicity;
 use fixtures::{DECODE_CASES, EXECUTION_CASES, TRANSACTION_CASES, case};
@@ -41,6 +40,20 @@ fn adversarial_preflight(bencher: divan::Bencher, name: &str) {
         black_box(fixtures::adversarial::check_preflight(black_box(
             &case.transaction,
         )))
+    });
+}
+
+#[divan::bench(args = fixtures::adversarial::CASES)]
+fn retained_decode(bencher: divan::Bencher, name: &str) {
+    let case = fixtures::adversarial::case(name);
+    bencher.bench(|| {
+        let programs: Vec<_> = case
+            .fixture
+            .inputs
+            .iter()
+            .map(|input| runtime::decode_program(black_box(input)).expect("valid baseline"))
+            .collect();
+        drop(black_box(programs));
     });
 }
 
@@ -148,19 +161,6 @@ async fn validate(
     fixture: &fixtures::Fixture,
 ) {
     drop(black_box(
-        module
-            .validate_transaction(
-                dbtx,
-                &ModuleTransactionContext {
-                    transaction: black_box(&fixture.transaction),
-                    consensus: TransactionConsensusContext {
-                        federation_id: fixtures::federation(),
-                        session_index: 10,
-                    },
-                    module_instance_id: fixtures::MODULE,
-                    validation: None,
-                },
-            )
-            .await,
+        fixtures::validate_module(module, dbtx, fixture).await,
     ));
 }
