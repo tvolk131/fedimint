@@ -21,7 +21,7 @@ async fn structural_errors_precede_decoding_in_submission_and_consensus() {
     let mut tx = transaction(vec![DynInput::from_typed(SIMP, input.clone())], vec![]);
     sign_transaction(&mut tx, &[owner]).unwrap();
     let module_error = |error| TransactionError::Input(DynInputError::from_typed(SIMP, error));
-    let mut cases = vec![(tx.clone(), module_error(ContractError::Program))];
+    let mut cases = vec![(tx.clone(), module_error(ContractError::UnknownContract))];
     let mut duplicate = tx.clone();
     duplicate.inputs.push(duplicate.inputs[0].clone());
     // Also has the wrong signature count, fixing precedence explicitly.

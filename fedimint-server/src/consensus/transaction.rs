@@ -1,3 +1,4 @@
+use fedimint_core::core::{DynInput, DynOutput};
 use fedimint_core::db::DatabaseTransaction;
 use fedimint_core::module::{Amounts, CoreConsensusVersion, TransactionItemAmounts};
 use fedimint_core::transaction::{TRANSACTION_OVERFLOW_ERROR, Transaction, TransactionError};
@@ -34,12 +35,12 @@ pub async fn process_transaction_with_dbtx(
     let module_ids = transaction
         .inputs
         .iter()
-        .map(|input| input.module_instance_id())
+        .map(DynInput::module_instance_id)
         .chain(
             transaction
                 .outputs
                 .iter()
-                .map(|output| output.module_instance_id()),
+                .map(DynOutput::module_instance_id),
         )
         .collect::<std::collections::BTreeSet<_>>();
     let mut verified_kinds = std::collections::BTreeSet::new();
@@ -50,6 +51,7 @@ pub async fn process_transaction_with_dbtx(
                 transaction,
                 consensus,
                 module_instance_id,
+                preparation: None,
                 validation: None,
             })?;
         }
@@ -70,6 +72,46 @@ pub async fn process_transaction_with_dbtx(
         })
         .map_err(|_| TransactionError::InvalidWitnessLength)?;
 
+    // Resolve every instance before any kind decodes/prepares programs. All
+    // phases use this same snapshot, before processing can mutate it.
+    let mut resolved = std::collections::BTreeMap::<_, std::collections::BTreeMap<_, _>>::new();
+    for &module_instance_id in &module_ids {
+        let module = modules.get_expect(module_instance_id);
+        let state = module
+            .prepare_transaction(
+                &mut dbtx.to_ref_with_prefix_module_id(module_instance_id).0,
+                &ModuleTransactionContext {
+                    transaction,
+                    consensus,
+                    module_instance_id,
+                    preparation: None,
+                    validation: None,
+                },
+            )
+            .await?;
+        resolved
+            .entry(module.module_kind())
+            .or_default()
+            .insert(module_instance_id, state);
+    }
+    let mut preparations = std::collections::BTreeMap::new();
+    for &module_instance_id in &module_ids {
+        let module = modules.get_expect(module_instance_id);
+        if let Some(instances) = resolved.remove(&module.module_kind()) {
+            let preparation = module.prepare_kind_transaction(
+                &ModuleTransactionContext {
+                    transaction,
+                    consensus,
+                    module_instance_id,
+                    preparation: None,
+                    validation: None,
+                },
+                instances,
+            )?;
+            preparations.insert(module.module_kind(), preparation);
+        }
+    }
+
     let mut validations = std::collections::BTreeMap::new();
     for module_instance_id in module_ids {
         let validation = modules
@@ -80,12 +122,15 @@ pub async fn process_transaction_with_dbtx(
                     transaction,
                     consensus,
                     module_instance_id,
+                    preparation: preparations
+                        .get(&modules.get_expect(module_instance_id).module_kind()),
                     validation: None,
                 },
             )
             .await?;
         validations.insert(module_instance_id, validation);
     }
+    drop(preparations);
 
     let mut funding_verifier = FundingVerifier::default();
     let mut public_keys = Vec::new();
@@ -119,6 +164,7 @@ pub async fn process_transaction_with_dbtx(
                     transaction,
                     consensus,
                     module_instance_id: input.module_instance_id(),
+                    preparation: None,
                     validation: validations.get(&input.module_instance_id()),
                 },
             )
@@ -160,6 +206,7 @@ pub async fn process_transaction_with_dbtx(
                     transaction,
                     consensus,
                     module_instance_id: output.module_instance_id(),
+                    preparation: None,
                     validation: validations.get(&output.module_instance_id()),
                 },
             )

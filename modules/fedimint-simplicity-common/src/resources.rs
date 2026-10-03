@@ -32,14 +32,24 @@ pub fn check_transaction(transaction: &Transaction) -> Result<(), ContractError>
     check_programs(transaction, cost)
 }
 
-/// Guardian preflight. Keep the outer signature envelope check after cheap
-/// Simplicity limits/structure but before redemption decoding. The unsigned
-/// client finalizer uses `check_transaction` instead. Core still verifies the
-/// actual signatures once input keys have been resolved.
+/// Complete signed resource check for callers without guardian state. Guardian
+/// processing separates `check_signed_structure` from decoding after resolving
+/// all contracts. The unsigned client finalizer uses `check_transaction`.
 pub fn check_signed_transaction(
     transaction: &Transaction,
     error_instance: ModuleInstanceId,
 ) -> Result<(), TransactionError> {
+    let cost = check_signed_structure(transaction, error_instance)?;
+    check_programs(transaction, cost)
+        .map_err(|error| TransactionError::Input(DynInputError::from_typed(error_instance, error)))
+}
+
+/// Cheap guardian checks before state resolution. Return the creation charge
+/// so kind-wide preparation can add decoded costs to the same budget.
+pub fn check_signed_structure(
+    transaction: &Transaction,
+    error_instance: ModuleInstanceId,
+) -> Result<Cost, TransactionError> {
     let input_error =
         |error| TransactionError::Input(DynInputError::from_typed(error_instance, error));
     let cost = check_structure(transaction).map_err(input_error)?;
@@ -53,7 +63,7 @@ pub fn check_signed_transaction(
             return Err(TransactionError::UnsupportedSignatureScheme { variant: *variant });
         }
     }
-    check_programs(transaction, cost).map_err(input_error)
+    Ok(cost)
 }
 
 fn check_structure(transaction: &Transaction) -> Result<Cost, ContractError> {

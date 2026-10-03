@@ -109,8 +109,17 @@ fn program_fee(input: &ContractInput, program: &RedeemNode) -> Amount {
 
 pub fn execute(input: &ContractInput, environment: &Environment) -> Result<Amount, ContractError> {
     let program = decode_program(input)?;
-    if environment.current.version == 0 {
-        for node in program.as_ref().post_order_iter::<InternalSharing>() {
+    execute_decoded(input, environment, &program)
+}
+
+/// Check execution-version restrictions and the stored policy commitment
+/// without allocating a machine or executing any jet.
+pub fn check_commitment(
+    program: &RedeemNode,
+    output: &ContractOutput,
+) -> Result<(), ContractError> {
+    if output.version == 0 {
+        for node in program.post_order_iter::<InternalSharing>() {
             if let simplicity::node::Inner::Jet(jet) = node.node.inner()
                 && let Some(jet) = jet.as_any().downcast_ref::<FedimintJet>()
             {
@@ -124,12 +133,23 @@ pub fn execute(input: &ContractInput, environment: &Environment) -> Result<Amoun
             }
         }
     }
-    if program.cmr().to_byte_array() != environment.current.cmr {
+    if program.cmr().to_byte_array() != output.cmr {
         return Err(ContractError::Commitment);
     }
-    let mut machine = BitMachine::for_program(&program).map_err(|_| ContractError::Limit)?;
+    Ok(())
+}
+
+/// Execute the result of decoding this exact input. Guardian preparations are
+/// scoped to the immutable transaction and recheck the snapshot commitment.
+pub fn execute_decoded(
+    input: &ContractInput,
+    environment: &Environment,
+    program: &RedeemNode,
+) -> Result<Amount, ContractError> {
+    check_commitment(program, &environment.current)?;
+    let mut machine = BitMachine::for_program(program).map_err(|_| ContractError::Limit)?;
     machine
-        .exec(&program, environment)
+        .exec(program, environment)
         .map_err(|_| ContractError::Rejected)?;
-    Ok(program_fee(input, &program))
+    Ok(program_fee(input, program))
 }
