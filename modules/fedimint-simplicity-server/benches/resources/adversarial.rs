@@ -42,6 +42,15 @@ pub const CASES: &[&str] = &[
     "creations_19_bad_first",
     "creations_19_bad_last",
     "creations_19_bad_destination",
+    "context_amount",
+    "context_outpoint",
+    "context_asset_first",
+    "context_asset_last",
+    "context_asset_missing",
+    "context_authority_missing",
+    "context_issued_missing",
+    "context_burned_missing",
+    "context_bad_last_index",
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -160,6 +169,90 @@ fn mixed(bad: bool) -> Fixture {
     fixture
 }
 
+// Repeat a context access 512 times in a shared DAG. All asset lists contain
+// 32 entries; missing IDs force a complete scan. Issue and burn the same amount
+// so the full, funded transaction conserves assets and authorities.
+fn context_access(name: &str) -> Fixture {
+    use fedimint_simplicity_common::jet::ContextJet;
+
+    let jet = match name {
+        "context_amount" => ContextJet::InputAmount,
+        "context_outpoint" | "context_bad_last_index" => ContextJet::InputOutpoint,
+        "context_authority_missing" => ContextJet::OutputAuthority,
+        "context_issued_missing" => ContextJet::IssuedQuantity,
+        "context_burned_missing" => ContextJet::BurnedQuantity,
+        _ => ContextJet::OutputAssetQuantity,
+    };
+    let program = simplicity::types::Context::with_context(|ctx| {
+        let access = |index| {
+            let index =
+                Arc::const_word(&ctx, simplicity::Value::u32(index).to_word().expect("u32"));
+            let id = if name.ends_with("first") {
+                1
+            } else if name.ends_with("last") {
+                32
+            } else {
+                255
+            };
+            let id = Arc::const_word(
+                &ctx,
+                simplicity::Value::from_byte_array([id; 32])
+                    .to_word()
+                    .expect("asset"),
+            );
+            let argument = match jet {
+                ContextJet::InputAmount | ContextJet::InputOutpoint => index,
+                ContextJet::IssuedQuantity | ContextJet::BurnedQuantity => id,
+                _ => Arc::pair(&index, &id).expect("index and asset"),
+            };
+            let read = Arc::comp(&argument, &Arc::jet(&ctx, &FedimintJet::Context(jet)))
+                .expect("jet argument");
+            Arc::comp(&read, &Arc::unit(&ctx)).expect("discard jet result")
+        };
+        let good = access(0);
+        let nodes = (0..512)
+            .map(|i| {
+                if i == 511 && name == "context_bad_last_index" {
+                    access(u32::MAX)
+                } else {
+                    good.clone()
+                }
+            })
+            .collect();
+        compose_balanced(nodes)
+            .finalize_types()
+            .expect("closed types")
+            .to_vec_without_witness()
+    });
+    let mut fixture = encoded(program, vec![]);
+    let balances: Vec<_> = (1..=32)
+        .map(|index| AssetAmount {
+            asset: AssetId([index; 32]),
+            quantity: 1,
+        })
+        .collect();
+    for value in &balances {
+        fixture.records.insert(value.asset, record(value.asset));
+    }
+    fixture.consumed[0].extension = Some(AssetExtension::Bundle(AssetBundle {
+        authorities: balances.iter().map(|value| value.asset).collect(),
+        balances: balances.clone(),
+    }));
+    fixture.transaction.outputs = vec![
+        DynOutput::from_typed(MODULE, fixture.consumed[0].clone()),
+        DynOutput::from_typed(
+            MODULE,
+            assets::action_output(AssetActions {
+                issuance: balances.clone(),
+                burns: balances,
+                creations: vec![],
+            })
+            .expect("bounded actions"),
+        ),
+    ];
+    fixture
+}
+
 fn build_case(name: &str) -> Case {
     let mut fixture = match name {
         "constants_256x32" | "constants_1024x15" | "constants_2048x7" | "constants_4096x3" => {
@@ -195,6 +288,7 @@ fn build_case(name: &str) -> Case {
         "signatures_38_bad_last" => signatures(38, Some(37)),
         "mixed_33" => mixed(false),
         "mixed_33_bad_last" => mixed(true),
+        name if name.starts_with("context_") => context_access(name),
         name if name.starts_with("creations_") => creation_case(19),
         _ => packed(),
     };
@@ -273,9 +367,10 @@ fn build_case(name: &str) -> Case {
         "packed_bad_outer_signature" => Outcome::Signature,
         "packed_missing_outer_signature" => Outcome::SignatureCount,
         "packed_underfunded" => Outcome::Funding,
-        "signatures_38_bad_first" | "signatures_38_bad_last" | "mixed_33_bad_last" => {
-            Outcome::Module(ContractError::Rejected)
-        }
+        "signatures_38_bad_first"
+        | "signatures_38_bad_last"
+        | "mixed_33_bad_last"
+        | "context_bad_last_index" => Outcome::Module(ContractError::Rejected),
         "creations_19_bad_first" | "creations_19_bad_last" | "creations_19_bad_destination" => {
             let mut output = transaction.outputs[1]
                 .as_any()
@@ -344,8 +439,13 @@ fn classify(result: Result<(), TransactionError>) -> Outcome {
 }
 
 pub fn check_all() {
+    check_cases(CASES);
+}
+
+pub fn check_cases(names: &[&str]) {
     let rt = executor();
-    for (name, case) in CASE_DATA.iter() {
+    for name in names {
+        let case = case(name);
         assert_eq!(
             resources::check_transaction(&case.fixture.transaction),
             Ok(()),

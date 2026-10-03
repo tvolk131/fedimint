@@ -115,6 +115,12 @@ keeps peak allocation associated with one operation.
 ## Cases
 
 - `unit_v0` / `unit_v1`: minimal programs, exposing fixed overhead.
+- Adversarial `context_*` cases repeat a context jet 512 times with full
+  32-entry balance, authority, issuance and burn lists. They cover first/last/
+  missing asset searches, authority absence, outpoint hashing, a scalar-read
+  control and an invalid index on the final call. Each is a funded transaction
+  within both caps, with asserted outcomes and dropped-write checks in submission
+  and consensus modes. The same cases run in `tests/resource_workloads.rs`.
 - `owner`: one valid transaction-bound BIP340 signature.
 - `market_issue` / `market_resolve`: the actual binary-market template, including
   asset accounting or an external oracle's signature. `bad_oracle` signs the

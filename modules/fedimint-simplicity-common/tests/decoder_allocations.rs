@@ -104,6 +104,54 @@ fn impossible_node_counts_are_rejected_before_reserving_nodes() {
 }
 
 #[test]
+fn compact_sum_witness_cannot_allocate_its_unselected_giant_branch() {
+    use std::sync::Arc;
+
+    use fedimint_simplicity_common::jet::FedimintJet;
+    use simplicity::ConstructNode;
+    use simplicity::node::{CoreConstructible, WitnessConstructible};
+
+    for levels in [0, 8, 12, 20] {
+        let program = simplicity::types::Context::with_context(|ctx| {
+            // A -> 1, where A is a product of 512-bit words. Sharing keeps the
+            // encoded program tiny even when A describes tens of MiB.
+            let mut consume: Arc<ConstructNode> = Arc::comp(
+                &Arc::jet(&ctx, &FedimintJet::Core(simplicity::jet::Core::Eq256)),
+                &Arc::unit(&ctx),
+            )
+            .unwrap();
+            for _ in 0..levels {
+                consume = Arc::comp(
+                    &Arc::pair(&Arc::take(&consume), &Arc::drop_(&consume)).unwrap(),
+                    &Arc::unit(&ctx),
+                )
+                .unwrap();
+            }
+            let branches = Arc::case(&Arc::unit(&ctx), &Arc::take(&consume)).unwrap();
+            let argument = Arc::pair(&Arc::witness(&ctx, None), &Arc::unit(&ctx)).unwrap();
+            Arc::comp(&argument, &branches)
+                .unwrap()
+                .finalize_types()
+                .unwrap()
+                .to_vec_without_witness()
+        });
+        assert!(program.len() < 256);
+        let mut input = input(program);
+        input.witness = vec![0]; // Left unit, with no right-branch payload.
+        let (result, largest) = measure(|| runtime::decode_program(&input));
+        if levels <= 8 {
+            result.unwrap(); // Positive controls: the encoding itself is valid.
+        } else {
+            assert_eq!(result.unwrap_err(), ContractError::Limit);
+            assert!(
+                largest < 128 * 1024,
+                "expanded witness allocation: {largest}"
+            );
+        }
+    }
+}
+
+#[test]
 fn aggregate_byte_limit_rejects_before_allocating_decoded_constants() {
     use std::sync::Arc;
 

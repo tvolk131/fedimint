@@ -5,6 +5,22 @@ rejection and decoded-program reuse. The latest measured core path takes about
 17 ms for packed constants and 21 ms for constants plus 33 signature checks on
 an M4 Pro. These are observed workloads, not worst-case bounds or Pi 5 sizing.
 
+## Context-access follow-up
+
+Nine `context_*` workloads perform 512 accesses per program against 32-entry
+asset/authority/action lists. Two 100-sample runs on the same machine measured
+0.743–0.750 ms for scalar reads, 1.248–1.258 ms for outpoint hashing,
+1.707–1.902 ms for asset searches, and 1.559–1.625 ms for authority/action searches.
+A final invalid index rejected in 1.139–1.157 ms. These are full warm in-memory
+core checks, not isolated jet costs; differences also include argument
+construction. The tested cases do not justify changing the current 1,000
+milliweight context-jet charge, but do not establish its worst-case adequacy.
+All nine cases run in normal regression tests with both processing modes and
+dropped-write checks. A separate allocation test covers a sub-256-byte program
+whose one-bit sum witness would expand its unselected branch to tens of MiB;
+the existing type guard rejects it before any 128 KiB allocation request, while
+smaller encodings decode successfully. No consensus limit or fee changed.
+
 ## Evidence and method
 
 The published tag `codex/simplicity-benchmarks-2026-10-03` preserves the original
