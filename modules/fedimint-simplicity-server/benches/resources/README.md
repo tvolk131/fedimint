@@ -210,3 +210,14 @@ Keep the harness, fixtures and methodology as regression tools. Retain selected
 comparison reports; routine raw runs need not all be committed.
 Fee coefficients or limit changes should be reviewed separately after examining
 the measurements.
+
+The original raw data and reports are preserved by the published tag
+`codex/simplicity-benchmarks-2026-10-03` at
+`39102ef2040d3c4dd6b0027132a5ddb4ba46c553`.
+[Browse the archived data](https://github.com/tvolk131/fedimint/tree/39102ef2040d3c4dd6b0027132a5ddb4ba46c553/modules/fedimint-simplicity-server/benches/resources/2026-10-02-m4-pro).
+Keep this tag when squashing or rebasing the feature branch. To retrieve it:
+
+```sh
+git fetch origin tag codex/simplicity-benchmarks-2026-10-03
+git show codex/simplicity-benchmarks-2026-10-03:modules/fedimint-simplicity-server/benches/resources/2026-10-02-m4-pro/metadata.json
+```
