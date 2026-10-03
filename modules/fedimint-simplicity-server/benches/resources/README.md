@@ -193,21 +193,10 @@ recovery scans or multiple module instances at once.
 Those remain relevant before production calibration, alongside measurements on
 guardian-class Linux hardware and concurrent invalid-submission load.
 
-The [2026-10-02 report](REPORT-2026-10-02.md) contains the first measured baseline,
-its raw data, and interpretation.
-The [context-sharing comparison](REPORT-2026-10-02-context-sharing.md) records the
-first optimization against that unchanged fixture matrix.
-The [aggregate-cap measurements](REPORT-2026-10-02-transaction-caps.md) add
-preflight and core submission measurements, including accepted and rejected
-workloads near the new transaction budgets.
-The [cap-fitting adversarial report](REPORT-2026-10-03-adversarial.md) records
-expensive accepted/rejected workloads and suggestions for validation ordering.
-The [structural-preflight comparison](REPORT-2026-10-03-structural-preflight.md)
-measures moving cheap structural rejection ahead of program decoding.
-The [preparation comparison](REPORT-2026-10-03-preparation.md) measures resolving
-state before decoding and reusing decoded programs within a validation attempt.
-Keep the harness, fixtures and methodology as regression tools. Retain selected
-comparison reports; routine raw runs need not all be committed.
+[Results and optimization history](RESULTS.md) consolidate the measured baseline,
+context sharing, aggregate caps, adversarial exploration and validation ordering.
+Keep the harness, fixtures and methodology as regression tools. Retain key
+comparisons and archive their evidence; routine raw runs need not all be committed.
 Fee coefficients or limit changes should be reviewed separately after examining
 the measurements.
 

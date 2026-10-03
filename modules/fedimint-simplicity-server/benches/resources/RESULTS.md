@@ -1,0 +1,207 @@
+# Simplicity resource results — 2026-10-02/03
+
+These measurements motivated transaction-wide caps, shared context, early
+rejection and decoded-program reuse. The latest measured core path takes about
+17 ms for packed constants and 21 ms for constants plus 33 signature checks on
+an M4 Pro. These are observed workloads, not worst-case bounds or Pi 5 sizing.
+
+## Evidence and method
+
+The published tag `codex/simplicity-benchmarks-2026-10-03` preserves the original
+source history, six detailed reports and first baseline's raw results at
+`39102ef2040d3c4dd6b0027132a5ddb4ba46c553`.
+[Browse the archive][archive]; retrieval commands are in [README.md](README.md).
+Later comparisons retained selected results rather than committing every raw run.
+The revisions below are the original measured revisions, retained by that tag;
+rebasing the feature branch does not change this experimental provenance.
+
+| Phase | Source revision | Measured scope |
+| --- | --- | --- |
+| Initial baseline | `d748fb05f03` + harness in `48d3fd7ebbe` | Isolated module validation; no aggregate cap |
+| Shared context | `48d3fd7ebbe` → `10fe62152db` | Same 28 fixtures and module scope |
+| Aggregate caps | `ce3d2562895` | Adds unsigned preflight and funded core submission; 35 fixtures |
+| Adversarial corpus | `0eb6c7f8cfb` | Adds 34 cap-fitting workloads/faults and a mutation probe |
+| Structural rejection | `0eb6c7f8cfb` → `3580e4ab851` | Same core cases; signed preflight scope changes |
+| State preparation/reuse | `3580e4ab851` → `39102ef2040` | Same core cases; module preparation and retained-decode stage added |
+
+All runs used Apple M4 Pro (14 cores, 48 GiB), macOS 26.6.2 (25G83), Rust 1.98.1,
+native ARM64, the default optimized bench profile with thin LTO, Divan 0.1.21,
+and no target-CPU/compiler-flag overrides. Timings used the System allocator,
+two passes of 100 samples with one iteration each; the last two comparisons
+alternated before/after executables. Timer precision was 41 ns. No builds/tests
+ran concurrently; there was no CPU pinning, thermal control or load isolation.
+Ranges below span run medians, not confidence intervals. Different measurement
+sessions are not interchangeable baselines; compare within each table.
+
+Allocation profiling used separate `bench-alloc` executables, normally with
+100 samples and with ten for preparation/retention. Their timings are excluded.
+Peak values use the median-time column of Divan's `max alloc`, in decimal units:
+additional live Rust allocation requests on the measured thread. They exclude
+existing fixtures/state, stack, allocator overhead, direct C allocation and other
+threads; they are neither RSS nor the maximum across all samples. Cumulative
+`alloc` bytes exclude separately reported growth events.
+
+Setup, compilation, signing, state seeding and fixture assertions are outside
+timing. Module-only measurements omit core verification, funding and processing.
+Core measurements include fresh warm MemDatabase transactions, signatures,
+funding checks, processing hooks and dropping writes, using dummy funding.
+They exclude wire decoding, database commits/RocksDB, real mint funding,
+network admission, consensus and concurrent requests. Module fixtures alone may
+lack collateral/fee sponsorship and must not be interpreted as accepted payments.
+Do not subtract stage medians to derive unmeasured costs. Full commands, stage
+definitions and case descriptions remain in [README.md](README.md).
+
+## Why both caps matter
+
+The initial 32-input signature stress case contained 6,144 BIP340 checks, cost
+318,679,936 milliweight in aggregate, and took 807–810 ms of module validation
+despite encoding to only 8,783 bytes. Each input fit the old 10,000,000 ceiling.
+Shared context alone left this workload at 813–818 ms.
+
+The subsequent 2,000,000 milliweight aggregate cap rejects that case in
+0.147–0.151 ms through core. It also charges each asset creation signature
+100,000 milliweight. The 16 KiB aggregate redemption-byte cap independently
+limits decoding work; these caps sum across Simplicity instances. Fees were not
+changed by the cap or optimization commits.
+
+Selected core measurements immediately after introducing caps:
+
+| Case | Outcome | Median | Peak Rust heap |
+| --- | --- | ---: | ---: |
+| Owner signature | Accept | 0.317–0.332 ms | 15.53 KB |
+| Market issuance | Accept | 2.412–2.439 ms | 318.3 KB |
+| Market resolution | Accept | 2.510–2.602 ms | 317.6 KB |
+| Three 4 KiB constants | Accept | 25.29–26.63 ms | 31.86 KB |
+| Four 4 KiB constants | Byte limit | 0.584–0.625 µs | 1.896 KB |
+| 19 creations + minimal spend | Accept | 0.413–0.485 ms | 32.12 KB |
+| 20 creations + minimal spend | Weight limit | 2.21–2.37 µs | 2.988 KB |
+
+Three constants cost only 197,508 milliweight but use 12,300 redemption bytes;
+decoding alone consumed 12.42–12.80 ms and was then repeated during execution.
+The original market issuance likewise spent about 1.1 ms decoding versus 47 µs
+in its cached VM. Near the old per-program ceiling, signature jets took over
+50 times as long as cheap combinators. Static cost is a bound, not a precise
+latency model; calibration must include decoding, context and expensive jet mixes.
+
+## Shared context
+
+Caching each version's intent hash once per instance/validation call and sharing
+immutable context through `Arc` preserved every field of the initial manifest.
+The isolated environment-clone stage changed ownership model; the module stage
+continued to build its own context. Selected module-only comparisons:
+
+| Case | Before | After | Peak before → after |
+| --- | ---: | ---: | ---: |
+| 32 simple inputs | 0.265–0.281 ms | 0.0857–0.0871 ms | — |
+| 32 successors | 0.568–0.622 ms | 0.1109–0.1109 ms | 53.74 → 40.21 KB |
+| Recovery-heavy context | 2.831–2.970 ms | 0.3085–0.3174 ms | 218.6 → 166.6 KB |
+| Asset-heavy context | 3.304–3.597 ms | 0.4536–0.4590 ms | 259.8 → 200.4 KB |
+
+Cumulative allocation traffic fell from 4.664 MB to 408.9 KB for recovery-heavy
+context and from 5.502 MB to 469 KB for assets. Single-input market/signature
+workloads remained essentially unchanged. The tiny unit case moved from
+3.749–3.832 µs to 3.916–4.040 µs: sharing adds some fixed bookkeeping.
+
+## Adversarial findings and structural rejection
+
+Before the ordering improvements, packed constants used exactly 16,384 redemption
+bytes and 264,740 milliweight yet took 34.06–34.31 ms through core. Mixing constants
+with 33 signatures took 38.06–39.62 ms at 16,295 bytes and 1,971,725 milliweight.
+A mixed workload failing its last signature jet still took 37.29–38.73 ms.
+Its changed program sharing required fewer constants to stay within the caps;
+it was not an identical-work comparison with the accepted case.
+
+668 deterministic program-bit mutations produced 358 successful preflights and
+310 `Program` errors without panic. Slowest observed rejected/successful probes
+were about 7.1/15.9 ms. Each had one timing sample and no VM execution: passing
+preflight did not establish authorization or a worst-case bound.
+
+Moving duplicate, output/action and signature-envelope checks before decoding
+produced the following paired core measurements:
+
+| Fault | Before | After |
+| --- | ---: | ---: |
+| Duplicate reference | 14.95–15.02 ms | 0.667–0.791 µs |
+| Unsupported output version | 14.93–15.08 ms | 0.708–0.833 µs |
+| Missing outer signature | 30.39–30.53 ms | 0.708–0.833 µs |
+| Invalid nineteenth creation destination | 289.2–293.9 µs | 3.332–3.374 µs |
+
+Accepted workloads, correctly shaped bad signatures and missing UTXOs were controls
+with no meaningful improvement in that pass. Sub-microsecond results are sensitive
+to timer granularity. Transaction hashes, sizes, bounds and core outcomes were
+unchanged; signed preflight expectations changed with its new rejection order.
+
+## Latest measured path: state preparation and decoded-program reuse
+
+The guardian now resolves all consumed contracts before decoding and checks all
+commitments/versions and shared static cost before any Simplicity VM runs.
+Programs may be retained within an 8 MiB conservative logical budget per attempt;
+otherwise they are decoded again for execution. Capacity affects performance,
+not validity, fees or errors. See [validation architecture][architecture].
+
+| Core case | Before preparation | After preparation |
+| --- | ---: | ---: |
+| Accepted packed constants | 34.15–34.21 ms | 17.44–17.45 ms |
+| Accepted constants + 33 signatures | 38.00–38.10 ms | 21.44–21.49 ms |
+| Accepted two deep chains | 27.76–28.34 ms | 14.44–14.51 ms |
+| Accepted 38 signature checks | 5.074–5.234 ms | 4.947–5.195 ms |
+| Unknown first contract | 16.82–16.94 ms | 34.56–36.18 µs |
+| Unknown last contract | 16.83–16.86 ms | 43.43–45.33 µs |
+| Wrong first CMR | 20.96–20.97 ms | 4.235–4.236 ms |
+| Wrong last CMR | 33.49–33.53 ms | 16.49–16.54 ms |
+| Invalid outer signature, correct count | 34.02–34.06 ms | 17.38–17.40 ms |
+| Mixed workload failing its last signature jet | 37.23–37.40 ms | 20.76–20.82 ms |
+
+Decoder-heavy accepted workloads roughly halve their time. Signature-heavy
+controls do not show a meaningful change. A late commitment failure still needs
+preceding decoding but no earlier VM execution. Outer authorization remains late.
+
+Retaining all graphs in an initial isolated probe peaked at 2.21 MB for two deep
+chains and 29.71 KB for packed constants. This justified exploration, not a bound.
+Production charges nodes/data, jets, padded values and pointer-distinct types,
+including value-owned types, with conservative bookkeeping allowances. Retention
+uses outer input identity within the immutable transaction, not just its CMR.
+Preparations never cross attempts and are dropped before core processing.
+
+| Core workload | Before peak Rust heap | After peak Rust heap |
+| --- | ---: | ---: |
+| Packed constants | 41.81 KB | 69.77 KB |
+| Two deep chains | 1.499 MB | 2.229 MB |
+| Two balanced graphs | 1.402 MB | 2.133 MB |
+| Constants + 33 signatures | 38.50 KB | 64.82 KB |
+
+The largest observed peak rose about 0.73 MB. The retention budget is not an exact
+allocator/RSS ceiling: decoder/accounting scratch, snapshot records, an uncached
+current program and VM require additional memory. The corpus proves no maximum.
+The allocation baseline manifest matched the timing baseline except for its
+profiler flag.
+
+The comparison preserved transaction bytes/hashes, static bounds and core outcomes.
+Two malformed-witness probes now pass cheap structure and fail preparation.
+The isolated guardian benchmark now includes all preparation hooks, so its nine
+historical over-budget cases reject; its scope changed. Only the unchanged core
+scope supports the timing comparison above. Unsigned client preflight still
+decodes; signed guardian structural preflight no longer does.
+
+## Validation and remaining work
+
+The preparation change was covered by 131 tests across common/client/server and
+core/server-core, including targeted reruns after fixture adjustments, and 265
+benchmark smoke cases. Regressions cover cross-instance state/cost barriers,
+commitment/version rejection before VM failures, exact cost boundaries, stale
+state, and equal outcomes/fees across zero/partial/full retention, including
+same-policy inputs with different witnesses. The archived reports retain the
+earlier checks and scoped lint exceptions; these counts describe those revisions.
+
+Production calibration still needs Raspberry Pi 5 measurements with recorded
+RAM, storage, cooling, clocks and throttling; full admission/consensus/RocksDB
+costs; concurrent valid/invalid submissions; and broader decoder/type/VM shapes.
+Recovery scans and history storage need separate measurement. Fees have not been
+calibrated by these experiments. Rejected transactions pay no accepted-transaction
+fee, and per-transaction caps do not bound repeated or simultaneous submissions.
+Earlier outer authorization/funding checks, bounded admission and duplicate-work
+coalescing remain separate work. Valid claim-key signatures alone cannot prove
+that a contract's policy will succeed.
+
+[archive]: https://github.com/tvolk131/fedimint/tree/39102ef2040d3c4dd6b0027132a5ddb4ba46c553/modules/fedimint-simplicity-server/benches/resources
+[architecture]: ../../../../specs/ARCH-simplicity.md#module-and-transaction-boundaries

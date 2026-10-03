@@ -156,31 +156,18 @@ can still authorize a batch of assets. These are consensus constants in
 retained as a decoder safeguard, but a spend must also fit the stricter aggregate
 budget. Fees are unchanged; resource charges do not add a second fee.
 
-Core runs stateless transaction verification once per module kind before its
-parallel per-input checks. Simplicity checks counts, lengths and creation charges
-first, then duplicate references, output/action structure and creation destination
-indices across all its instances. Guardians check the outer signature scheme and
-count next. Guardians resolve all consumed contracts through each instance's
-database namespace before decoding any Simplicity program. Kind-wide preparation
-then decodes sequentially, sums bounds and checks all execution versions and
-commitments before any Simplicity VM executes. Every instance shares the
-allowance. The wallet runs structural/resource checks during finalization,
-before outer signatures exist and before submission/funding state commits.
-Creation destinations must be asset-bundle outputs in their own instance; several
-assets may share a destination. State-dependent asset accounting, namespace
-checks, actual signatures and funding remain later checks.
-For multiply-invalid transactions this phase order determines the first error;
-module preflight faults use the same input-error envelope as resource-limit faults.
-Guardian preparations retain decoded programs using an 8 MiB conservative logical
-accounting budget per transaction across all instances. Programs that do not fit
-are decoded again at execution; cache capacity cannot reject a transaction or
-change its fees. This is not an RSS ceiling: decoding/accounting scratch space,
-the current uncached program and the VM use additional memory. Preparations use
-one snapshot and are dropped before core applies input/output changes. Each
-submission, revalidation and consensus attempt prepares its own data.
-Outer transaction bytes, recovery annotations, assets, types, cells and frames
-retain their separate limits. These checks do not replace admission concurrency
-controls or bound a guardian's aggregate load from repeated requests.
+See [validation ordering](../../specs/ARCH-simplicity.md#module-and-transaction-boundaries)
+for the guardian phases and client finalization boundary. Multiply-invalid
+transactions return the first error in that order; module preflight faults use
+an input-error envelope. Creation destinations must be asset-bundle outputs in
+their own instance, and several assets may share one destination.
+
+Guardian preparations use an 8 MiB conservative logical retention budget across
+all instances in one transaction, with re-decoding on cache misses. This is not
+an RSS ceiling: decoder/accounting scratch, an uncached program, snapshot records
+and the VM require additional memory. Outer transaction bytes, recovery data,
+assets, types, cells and frames retain their separate limits. None of these
+bounds aggregate guardian load from repeated requests.
 
 Fixed [consensus vectors](tests/vectors/README.md) pin v0/v1 encodings and signing
 hashes, asset IDs, all custom jet identities/types/costs, and selected execution
@@ -207,15 +194,10 @@ erase historical ciphertext. Recovery bytes are opaque public data to this modul
 the persistent wallet encrypts descriptors before use. There is no public wallet
 identifier or new guardian scanning endpoint.
 
-The persistent wallet scans existing federation session history
-to restore both current contracts and confirmed interactions, including those
-whose outputs have all been spent. It requires only compatible wallet software,
-the mnemonic, and the federation; it does not use the deprecated backup API or
-require a separate backup file. Recovery progress is resumable, and the
-Simplicity wallet becomes available for transactions only after the scan
-completes. See [ARCH-simplicity](../../specs/ARCH-simplicity.md#wallet-recovery-design)
-for the design and [REQ-simplicity-recovery](../../specs/REQ-simplicity-recovery.md)
-for its requirements and history boundary.
+The [recovery design](../../specs/ARCH-simplicity.md#wallet-recovery-design) restores
+holdings and confirmed interactions from federation history, including fully
+spent contracts. [REQ-simplicity-recovery](../../specs/REQ-simplicity-recovery.md)
+defines the mnemonic/software/federation requirement and exact history boundary.
 
 ## Persistent wallet API
 
@@ -251,20 +233,14 @@ Spending and metadata keys are derived independently from the module root secret
 federation identity, and instance ID. No backup upload or external file is used.
 
 Use the normal client `recover(..., None)` flow with the same root secret after
-losing its database, wait for recovery, then reopen the client. Recovery uses an
-ordered authenticated scan through the current accepted session prefix. It
-stores progress atomically and refuses to silently skip an unsupported owned
-descriptor. This depends on the original federation retaining its history.
+losing its database. Wait for recovery before transacting, then reopen the client.
+Required history must remain available and owned descriptors supported; missing
+or unsupported data cannot be silently skipped.
 
-Direct sends from primary-module funds to another wallet carry an encrypted sender
-receipt on the existing non-spendable action output. The 1 KiB annotation limit and
-per-byte fee apply; no extra UTXO or recovery endpoint is created. Receipts use a
-separate mnemonic-derived encryption key and bind the funding inputs, nonce,
-spending references and outputs. Public receipt bytes and creation signatures
-are normalized out of that recovery commitment to avoid circular signing.
-All receipts are finalized before creation and contract authorization; a final
-check rejects any later mutation of their committed intent. `history().sent`
-records sender activity without claiming ownership of recipient contracts.
+Sender receipts use the action output's existing 1 KiB annotation allowance and
+per-byte fee. `history().sent` records sender activity without claiming recipient
+ownership. [Receipt commitments and finalization](../../specs/ARCH-simplicity.md#wallet-recovery-design)
+are part of the wallet architecture.
 Low-level callers bypass these wallet guarantees. Arbitrary imported policies,
 local labels, failed attempts, and original operation IDs are not implicitly
 recoverable; confirmed transactions and encrypted application context are.
@@ -455,35 +431,21 @@ as accepted or rejected. Losing connectivity leaves that same attempt pending.
 
 `IntentPolicy` defaults to manual retry, at most three attempts, and at most 100
 sats of total transaction fees per attempt. Configure those limits for the app.
-The fee check runs after primary funding and denomination change, before signing
-and committing submission. New intent attempts require a primary module with
-funding-reservation support (currently Mint v2). Proven conflicts return the
-original notes locally without a reclaim transaction or fees. An optional session deadline prevents
-preparing new attempts; on-chain contract clocks govern actual acceptance.
-Automatic retry is opt-in and uses bounded exponential backoff with jitter. Both
-retry modes share the original attempt limit and immutable intent parameters.
+New intent attempts require funding-reservation support (currently Mint v2).
+An optional session deadline prevents preparing new attempts; contract clocks
+govern actual acceptance. Automatic retry is opt-in with bounded exponential
+backoff and jitter. Both modes share the original limits and immutable parameters.
+Unproven rejections pause with funds reserved; cancellation cannot release them.
 
-After a definitive rejection, the client refreshes authenticated history and
-requires proof that a different accepted transaction consumed a designated shared
-input. A timeout, an error string, or a disappeared ordinary owned input is not
-that proof. A handler rebuilds from the verified successor within the original
-request. Unknown templates, changed contract semantics, exhausted limits, and
-construction/funding errors stop further automatic action. The intent waits for
-funding release to finish before exposing a conflict, retrying, or finishing
-cancellation. An unproven rejection pauses for attention with funds still reserved;
-cancelling cannot discard that unresolved funding. There is no automatic paid
-reclaim fallback. A timeout or restart leaves the same reservation pending.
-
-The shared client exposes `TransactionBuilder::with_funding_reservations` and
-`ClientContext::release_funding_after_conflict`. The funding module owns its notes;
-the originating wallet module must authenticate permanent invalidity before
-requesting release. Reservation state, final transaction identity, and submission
-commit together; abandoned construction rolls them all back. Release requests and
-restoration are durable and idempotent. One reservation belongs to one attempt,
-so another concurrent wallet operation can select the released notes before a
-retry. Ordinary submissions and previously persisted pre-reservation attempts
-retain their original funding behavior, including possible reclaim fees. Imported
-ecash still requires reissuance; this API cannot restore arbitrary supplied notes.
+[Conflict handling](../../specs/ARCH-simplicity.md#shared-contract-conflict-handling)
+defines proof requirements, funded fee checks, durable submission, release and
+retry ordering. The shared APIs are `TransactionBuilder::with_funding_reservations`
+and `ClientContext::release_funding_after_conflict`. The originating wallet must
+authenticate permanent invalidity before requesting local release of owned notes.
+Release is durable and idempotent; a concurrent operation may select restored
+notes before retry. Ordinary submissions and older pre-reservation attempts keep
+their original funding behavior, including possible reclaim fees. Imported ecash
+still requires reissuance; these APIs cannot restore arbitrary supplied notes.
 
 The first built-in handler is `intent::MintPairs`, for buying a fixed quantity of
 binary-market pairs with independent, fixed YES and NO recipient outputs:
@@ -501,19 +463,12 @@ let id = wallet.submit_intent(intent, IntentPolicy::default()).await?;
 let record = wallet.await_intent(id).await?;
 ```
 
-`watch_market` verifies immutable asset origins and scans authenticated history to
-learn the actual vault lineage, including prior spends. It merges exactly the
-wallet's already-scanned prefix and then ordinary sync follows successors. It is
-a one-time history scan rather than a new guardian index. Matching the policy CMR
-alone does not identify a successor: the consuming transaction and exact unique
-authorities must also match. The handler refuses pair issuance after resolution.
-Recombination, redemption, and resolution retain their low-level submission APIs;
-additional semantic handlers can be registered through `SimplicityClientInit`'s
-`IntentHandlers` implementation without changing guardians.
+`watch_market` verifies asset origins and imports the vault's authenticated history
+through the wallet's scanned prefix; ordinary sync then follows successors. The
+handler refuses issuance after resolution. Recombination, redemption and resolution
+retain low-level submission APIs; register additional semantic handlers through
+`SimplicityClientInit`'s `IntentHandlers` implementation.
 
-Intent records and transaction submission/funding commit atomically. Reopening
-an existing database resumes outstanding attempts without duplicating them.
-Mnemonic-only recovery restores confirmed interactions and usable positions, but
-does not resume unfinished local intentions or recover a watch-only subscription
-that never produced an interaction. Such subscriptions can be re-added explicitly.
-No new consensus version or guardian endpoint is needed for this retry engine.
+Database restarts resume pending intents. Mnemonic recovery restores confirmed
+activity, not unfinished intentions or watch-only subscriptions without confirmed
+participation; applications can re-add those subscriptions.
