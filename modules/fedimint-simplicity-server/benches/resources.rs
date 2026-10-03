@@ -20,11 +20,38 @@ fn main() {
     // Compilation, signatures, fixture checks, DB seeding and manifest output
     // are outside measurement. --test also checks all fixture expectations.
     fixtures::check_all();
+    fixtures::adversarial::check_all();
+    if std::env::var_os("FM_SIMPLICITY_BENCH_MUTATIONS").is_some() {
+        println!("{}", fixtures::adversarial::mutations());
+        return;
+    }
     if std::env::var_os("FM_SIMPLICITY_BENCH_MANIFEST").is_some() {
-        println!("{}", fixtures::manifest());
+        let mut manifest = fixtures::manifest();
+        manifest["adversarial"] = fixtures::adversarial::manifest();
+        println!("{manifest}");
         return;
     }
     divan::main();
+}
+
+#[divan::bench(args = fixtures::adversarial::CASES)]
+fn adversarial_preflight(bencher: divan::Bencher, name: &str) {
+    let case = fixtures::adversarial::case(name);
+    bencher.bench(|| black_box(resources::check_transaction(black_box(&case.transaction))));
+}
+
+#[divan::bench(args = fixtures::adversarial::CASES)]
+fn adversarial_core(bencher: divan::Bencher, name: &str) {
+    let case = fixtures::adversarial::case(name);
+    let rt = fixtures::executor();
+    let (db, modules) = rt.block_on(case.fixture.core_database());
+    bencher.bench_local(|| {
+        black_box(rt.block_on(fixtures::process_core(
+            &db,
+            &modules,
+            black_box(&case.transaction),
+        )))
+    });
 }
 
 #[divan::bench(args = DECODE_CASES)]
