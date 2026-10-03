@@ -39,6 +39,9 @@ use simplicity::jet::Core;
 use simplicity::node::CoreConstructible;
 use simplicity::{BitWriter, ConstructNode, encode};
 
+#[path = "adversarial.rs"]
+pub mod adversarial;
+
 pub const MODULE: u16 = 4;
 const FUNDING_MODULE: u16 = 5;
 pub const EXECUTION_CASES: &[&str] = &[

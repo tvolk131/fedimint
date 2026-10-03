@@ -35,6 +35,14 @@ cargo bench --locked -p fedimint-simplicity-server --bench resources \
 cargo bench --locked -p fedimint-simplicity-server --bench resources -- \
   'transaction_preflight|core_submission' \
   --sample-count 100 --sample-size 1 --color never > caps-timing.txt
+
+# Cap-fitting workload families and early/late invalidity probes.
+cargo bench --locked -p fedimint-simplicity-server --bench resources -- \
+  'adversarial_' --sample-count 100 --sample-size 1 --color never > adversarial.txt
+
+# Deterministic bit mutations; single-sample timings rank candidates only.
+FM_SIMPLICITY_BENCH_MUTATIONS=1 cargo bench --locked \
+  -p fedimint-simplicity-server --bench resources > mutations.json
 ```
 
 Use the default optimized bench profile for measurements. `--profile dev` is
@@ -64,6 +72,8 @@ The same fixed keys, nonce, votes and contract outpoints reproduce the same case
 | `guardian_validation` | The actual `ServerModule::validate_transaction` hook: output validation/hashing, consumed-contract DB reads, conservation checks, block votes, intent hashes, environment construction, every input's runtime execution and final transaction hash. Includes current-thread executor entry and result destruction. |
 | `transaction_preflight` | Production `resources::check_transaction`: combined byte/count checks, creation-signature charges and sequential redemption decoding/static cost accumulation. Stops on the first error, before VM execution or database access. |
 | `core_submission` | Production `process_transaction_with_dbtx` in submission mode: kind-wide preflight, input verification, module validation, outer signatures, native funding checks and processing hooks. Includes creation of a fresh warm MemDatabase transaction and dropping all writes after each iteration. |
+| `adversarial_preflight` | The same stateless resource checker, on the funded and possibly mutated adversarial transaction. |
+| `adversarial_core` | The same core submission path and rollback methodology, on the adversarial matrix. Invalid cases must fail for their explicitly asserted reason. |
 
 Per-input stages use the first input. The guardian stage measures all inputs in
 the transaction. Its database is a small, seeded MemDatabase with a warm,
@@ -143,7 +153,40 @@ keeps peak allocation associated with one operation.
   and a trailing witness. The existing allocation regression tests remain the
   correctness checks for rejecting hostile declarations before allocation.
 
-This is a representative matrix, not an adversarial maximum search. It does not
+## Adversarial exploration
+
+The separate `adversarial` manifest array pins 34 cases' submitted transaction
+hashes, outer/redemption sizes, per-input cost/cell/frame bounds and expected
+outcomes. Their unmutated workloads all fit both aggregate caps. Cases cover:
+
+- Constants packed to exactly 16 KiB, plus different constant sizes/input counts.
+- Deep composition chains and balanced graphs with unique constants, separately
+  and in pairs; wide intermediate values; and witness-heavy SHA256 workloads.
+- 38 signature checks near the weight cap, and mixtures of constants plus 33
+  signature checks near both caps. Fixed-message signatures are synthetic work,
+  not application authorization examples.
+- Missing/duplicate inputs, wrong CMRs, invalid output versions, trailing witness
+  bytes, invalid or missing outer signatures, and insufficient native funding.
+- First/last failing signature jets and creation signatures, and an invalid
+  creation-authority destination with otherwise valid signatures.
+
+Before timing, every case asserts its outcome in both submission and consensus
+modes. Both modes discard the transaction; full database snapshots verify that
+no writes escaped. This is an in-memory drop check, not a crash-durability test.
+Malformed-witness cases reserve room below the byte cap but have no valid static
+cost themselves; their unmutated baselines have valid bounded costs. The mixed
+late-failure case needs a larger signature program, so it removes another small
+constant to stay under the byte cap. Compare its manifest, not just its label.
+
+The mutation mode flips individual encoded-program bits at deterministic strides
+across five workload families (668 probes at this revision). Each probe invokes
+the production stateless checker; a successful result means only that preflight
+accepted, not that the changed transaction is authorized. It does not execute
+mutated programs. One timing sample per probe is for triage, not a benchmark or
+a worst-case bound. Source case plus bit index reproduces each mutation; bit zero
+is the least significant bit of byte zero. No PR fuzz/smoke job is added.
+
+This is a targeted exploration, not an exhaustive adversarial maximum search. It does not
 exercise every combination of frame/cell/type limits, worst-case canonical
 sharing/type inference, all market branches, large historical databases,
 recovery scans or multiple module instances at once.
@@ -157,6 +200,8 @@ first optimization against that unchanged fixture matrix.
 The [aggregate-cap measurements](REPORT-2026-10-02-transaction-caps.md) add
 preflight and core submission measurements, including accepted and rejected
 workloads near the new transaction budgets.
+The [cap-fitting adversarial report](REPORT-2026-10-03-adversarial.md) records
+expensive accepted/rejected workloads and suggestions for validation ordering.
 Keep the harness, fixtures and methodology as regression tools. Retain selected
 comparison reports; routine raw runs need not all be committed.
 Fee coefficients or limit changes should be reviewed separately after examining
