@@ -10,7 +10,9 @@ use simplicity::ConstructNode;
 use simplicity::node::CoreConstructible;
 
 use super::*;
-use crate::assets::{AssetActions, AssetCreation, AssetExtension};
+use crate::assets::{AssetActions, AssetBundle, AssetCreation, AssetExtension};
+
+mod structure;
 
 fn input(program: Vec<u8>) -> ContractInput {
     ContractInput {
@@ -56,7 +58,7 @@ fn units(mut count: usize) -> Vec<u8> {
     })
 }
 
-fn creations(count: usize) -> ContractOutput {
+fn creations(count: usize, destination: u32) -> ContractOutput {
     ContractOutput {
         version: 1,
         amount: Amount::ZERO,
@@ -64,16 +66,30 @@ fn creations(count: usize) -> ContractOutput {
         state: [0; 32],
         recovery: vec![],
         extension: Some(AssetExtension::Actions(AssetActions {
-            creations: vec![
-                AssetCreation {
-                    key: input(vec![]).claim_key,
-                    authority_outputs: vec![0],
+            creations: (0..count)
+                .map(|index| AssetCreation {
+                    key: Keypair::from_secret_key(
+                        SECP256K1,
+                        &SecretKey::from_slice(&[(index + 1) as u8; 32]).unwrap(),
+                    )
+                    .public_key(),
+                    authority_outputs: vec![destination],
                     signature: Signature::from_slice(&[0; 64]).unwrap(),
-                };
-                count
-            ],
+                })
+                .collect(),
             ..Default::default()
         })),
+    }
+}
+
+fn bundle() -> ContractOutput {
+    ContractOutput {
+        version: 1,
+        amount: fedimint_core::Amount::ZERO,
+        cmr: [0; 32],
+        state: [0; 32],
+        recovery: vec![],
+        extension: Some(AssetExtension::Bundle(AssetBundle::default())),
     }
 }
 
@@ -87,7 +103,8 @@ fn cost_is_exact_inclusive_and_shared_across_instances() {
         (1810, Err(ContractError::Limit)),
     ] {
         let first = input(units(8192));
-        let second = input(units(tail));
+        let mut second = input(units(tail));
+        second.outpoint.out_idx = 1;
         let cost = runtime::decode_program(&first).unwrap().bounds().cost
             + runtime::decode_program(&second).unwrap().bounds().cost;
         assert_eq!(
@@ -156,13 +173,15 @@ fn creation_signatures_share_the_execution_budget_including_output_only_instance
     let tx = transaction(
         vec![],
         vec![
-            DynOutput::from_typed(4, creations(10)),
-            DynOutput::from_typed(7, creations(10)),
+            DynOutput::from_typed(4, creations(10, 2)),
+            DynOutput::from_typed(7, creations(10, 3)),
+            DynOutput::from_typed(4, bundle()),
+            DynOutput::from_typed(7, bundle()),
         ],
     );
     assert_eq!(check_transaction(&tx), Ok(()));
     let mut over = tx.clone();
-    over.outputs[1] = DynOutput::from_typed(7, creations(11));
+    over.outputs[1] = DynOutput::from_typed(7, creations(11, 3));
     assert_eq!(check_transaction(&over), Err(ContractError::Limit));
     // Even the minimum valid input costs something: there is no separate
     // allowance for programs after spending the entire budget on creation.
@@ -173,7 +192,10 @@ fn creation_signatures_share_the_execution_budget_including_output_only_instance
         assert_eq!(
             check_transaction(&transaction(
                 vec![DynInput::from_typed(4, input(units(count)))],
-                vec![DynOutput::from_typed(7, creations(19))]
+                vec![
+                    DynOutput::from_typed(7, creations(19, 1)),
+                    DynOutput::from_typed(7, bundle())
+                ]
             )),
             expected
         );
@@ -200,7 +222,7 @@ fn counted_payload_excludes_recovery_and_counts_every_repeated_program() {
         )),
         Err(ContractError::Limit)
     );
-    let mut output = creations(0);
+    let mut output = bundle();
     output.recovery = vec![0; crate::MAX_RECOVERY_BYTES];
     // Recovery bytes retain their separate bounds and outer transaction limit.
     assert_eq!(

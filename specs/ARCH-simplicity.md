@@ -28,9 +28,11 @@ wire format is introduced.
 A stateless core verification hook runs once per participating module kind before
 per-input verification. Simplicity uses it to bound redemption bytes and aggregate
 static execution cost across all its instances, including creation authorization
-work, before database-dependent validation. Its decoder runs sequentially in this
-phase; other modules retain their existing per-input verification. The wallet
-checks the same budget before committing submission and funding reservations.
+work, before database-dependent validation. Cheap structural checks across all
+instances and the outer signature envelope precede sequential program decoding;
+other modules retain their existing per-input verification. The wallet shares the
+structural/resource checks before committing submission and funding reservations,
+but runs them before outer signatures are constructed.
 
 Core invokes a module validation hook against the unmodified transaction snapshot
 before processing inputs or outputs. A transaction-local, type-erased result is

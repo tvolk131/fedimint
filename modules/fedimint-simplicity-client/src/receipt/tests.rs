@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use bitcoin::hashes::sha256;
 use fedimint_client_module::transaction::{ClientOutput, ClientOutputBundle, TransactionBuilder};
+use fedimint_core::Amount;
 use fedimint_core::core::{DynInput, IntoDynInstance};
 use fedimint_core::module::Amounts;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
@@ -143,9 +144,10 @@ fn receipts_precede_creation_signatures_across_instances_in_either_order() {
         let mut plans = vec![];
         let mut keys = vec![];
         for (i, module) in modules.into_iter().enumerate() {
-            let plan = plan(module, i);
+            let plan = plan(module, 2 * i);
             let key = plan.keys.signing_key(&ContractDescriptor::owner([1; 32]));
-            let (creation, _) = assets::creation(federation(), module, &key, vec![0]).unwrap();
+            let (creation, authorities) =
+                assets::creation(federation(), module, &key, vec![(2 * i + 1) as u32]).unwrap();
             let mut output = ContractOutput::action_output(AssetActions {
                 creations: vec![creation],
                 ..Default::default()
@@ -153,10 +155,28 @@ fn receipts_precede_creation_signatures_across_instances_in_either_order() {
             output.recovery = plan.placeholder().unwrap();
             builder = builder
                 .with_outputs(
-                    ClientOutputBundle::new_no_sm(vec![ClientOutput {
-                        output,
-                        amounts: Amounts::ZERO,
-                    }])
+                    ClientOutputBundle::new_no_sm(vec![
+                        ClientOutput {
+                            output,
+                            amounts: Amounts::ZERO,
+                        },
+                        ClientOutput {
+                            output: ContractOutput {
+                                version: 1,
+                                amount: Amount::ZERO,
+                                cmr: [0; 32],
+                                state: [0; 32],
+                                recovery: vec![],
+                                extension: Some(crate::common::assets::AssetExtension::Bundle(
+                                    crate::common::assets::AssetBundle {
+                                        balances: vec![],
+                                        authorities,
+                                    },
+                                )),
+                            },
+                            amounts: Amounts::ZERO,
+                        },
+                    ])
                     .into_dyn(module),
                 )
                 .with_finalizer(
@@ -176,7 +196,7 @@ fn receipts_precede_creation_signatures_across_instances_in_either_order() {
         let (tx, _) = builder.build(SECP256K1, rand::thread_rng()).unwrap();
         for (i, plan) in plans.iter().enumerate() {
             plan.verify(&tx).unwrap();
-            let output = tx.outputs[i]
+            let output = tx.outputs[2 * i]
                 .as_any()
                 .downcast_ref::<ContractOutput>()
                 .unwrap();

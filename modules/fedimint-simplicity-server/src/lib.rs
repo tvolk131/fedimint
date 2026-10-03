@@ -217,15 +217,9 @@ impl ServerModule for Simplicity {
     ) -> Result<(), fedimint_core::transaction::TransactionError> {
         // Core calls this once across all instances. Program decoding happens
         // here rather than in the parallel per-input verification pass.
-        fedimint_simplicity_common::resources::check_transaction(context.transaction).map_err(
-            |error| {
-                fedimint_core::transaction::TransactionError::Input(
-                    fedimint_core::core::DynInputError::from_typed(
-                        context.module_instance_id,
-                        error,
-                    ),
-                )
-            },
+        fedimint_simplicity_common::resources::check_signed_transaction(
+            context.transaction,
+            context.module_instance_id,
         )
     }
     async fn process_input<'a, 'b, 'c>(

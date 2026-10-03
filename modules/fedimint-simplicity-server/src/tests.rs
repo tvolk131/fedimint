@@ -1,5 +1,6 @@
 mod assets;
 mod config;
+mod preflight;
 
 use std::collections::BTreeMap;
 
@@ -30,8 +31,8 @@ use fedimint_simplicity_client::{
     ContractProgram, TOP_UP_OR_RELEASE, placeholder_signature, sign_transaction, signature_value,
 };
 use fedimint_simplicity_common::{
-    BlockCountVote, ContractError, ContractInput, ContractOutputError, MAX_PROGRAM_BYTES,
-    MAX_RECOVERY_BYTES, MAX_WITNESS_BYTES, output_fee,
+    BlockCountVote, ContractError, ContractInput, MAX_PROGRAM_BYTES, MAX_RECOVERY_BYTES,
+    MAX_WITNESS_BYTES, output_fee,
 };
 
 use super::Simplicity;
@@ -691,8 +692,8 @@ async fn invalid_outputs_and_duplicate_spends_roll_back() {
         );
         authorize(&mut tx, &program, point, &owner, true, &[]);
         let error = fed.process(&tx, 0).await.unwrap_err();
-        let Some(TransactionError::Output(error)) = error.downcast_ref::<TransactionError>() else {
-            panic!("expected an output validation error: {error:#}");
+        let Some(TransactionError::Input(error)) = error.downcast_ref::<TransactionError>() else {
+            panic!("expected a structural preflight error: {error:#}");
         };
         let expected = if change == 0 {
             ContractError::Version
@@ -700,12 +701,8 @@ async fn invalid_outputs_and_duplicate_spends_roll_back() {
             ContractError::Limit
         };
         assert_eq!(
-            error
-                .as_any()
-                .downcast_ref::<ContractOutputError>()
-                .unwrap()
-                .0,
-            expected
+            error.as_any().downcast_ref::<ContractError>().unwrap(),
+            &expected
         );
         assert_eq!(fed.contract(point).await.unwrap().output, output);
     }

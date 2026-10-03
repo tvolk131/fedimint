@@ -146,4 +146,49 @@ fn aggregate_byte_limit_rejects_before_allocating_decoded_constants() {
         allocation < 4096,
         "oversized transaction reached the decoder: {allocation}"
     );
+
+    // A fitting transaction with the same large constant must reject cheap
+    // faults before making the decoder allocation observed by the control.
+    let mut tx = tx;
+    tx.inputs.truncate(1);
+    tx.signatures = TransactionSignature::NaiveMultisig(vec![
+        fedimint_core::secp256k1::schnorr::Signature::from_slice(&[0; 64]).unwrap(),
+    ]);
+    let mut duplicate = tx.clone();
+    duplicate.inputs.push(duplicate.inputs[0].clone());
+    let mut bad_output = tx.clone();
+    bad_output
+        .outputs
+        .push(fedimint_core::core::DynOutput::from_typed(
+            4,
+            fedimint_simplicity_common::ContractOutput {
+                version: 2,
+                amount: fedimint_core::Amount::ZERO,
+                cmr: [0; 32],
+                state: [0; 32],
+                recovery: vec![],
+                extension: None,
+            },
+        ));
+    for (tx, expected) in [
+        (duplicate, ContractError::UnknownContract),
+        (bad_output, ContractError::Version),
+    ] {
+        let (result, allocation) = measure(|| resources::check_transaction(&tx));
+        assert_eq!(result, Err(expected));
+        assert!(
+            allocation < 4096,
+            "structural fault reached decoder: {allocation}"
+        );
+    }
+    tx.signatures = TransactionSignature::NaiveMultisig(vec![]);
+    let (result, allocation) = measure(|| resources::check_signed_transaction(&tx, 4));
+    assert_eq!(
+        result,
+        Err(fedimint_core::transaction::TransactionError::InvalidWitnessLength)
+    );
+    assert!(
+        allocation < 4096,
+        "signature envelope fault reached decoder: {allocation}"
+    );
 }
