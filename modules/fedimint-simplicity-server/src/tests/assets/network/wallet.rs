@@ -30,13 +30,14 @@ async fn builder(stopped: bool) -> ClientBuilder {
     builder
 }
 async fn join(
+    make_builder: impl AsyncFn(bool) -> ClientBuilder,
     fed: &Federation,
     database: Database,
     seed: u8,
     stopped: bool,
     recover: bool,
 ) -> ClientHandle {
-    let preview = builder(stopped)
+    let preview = make_builder(stopped)
         .await
         .preview_with_existing_config(
             ConnectorRegistry::build_from_testing_env().bind().await,
@@ -54,14 +55,13 @@ async fn join(
             .unwrap();
         client.wait_for_all_recoveries().await.unwrap();
         client.shutdown().await;
-        open(database, seed).await
+        open(make_builder(false).await, database, seed).await
     } else {
         preview.join(database, root(seed)).await.unwrap()
     }
 }
-async fn open(database: Database, seed: u8) -> ClientHandle {
-    builder(false)
-        .await
+async fn open(builder: ClientBuilder, database: Database, seed: u8) -> ClientHandle {
+    builder
         .open(
             ConnectorRegistry::build_from_testing_env().bind().await,
             database,
@@ -99,7 +99,7 @@ async fn mnemonic_only_client_recovery_preserves_assets_history_and_spendability
 async fn run() {
     let mut fed = Federation::new().await;
     let alice_db = db();
-    let alice = join(&fed, alice_db.clone(), 1, true, false).await;
+    let alice = join(builder, &fed, alice_db.clone(), 1, true, false).await;
     funds(&alice).await;
     let wallet = alice.get_first_module::<SimplicityClientModule>().unwrap();
     let deposit = wallet
@@ -110,7 +110,7 @@ async fn run() {
     let (operation, deposit_id) = wallet.submit(vec![], vec![deposit], vec![]).await.unwrap();
     drop(wallet);
     alice.shutdown().await;
-    let alice = open(alice_db.clone(), 1).await;
+    let alice = open(builder(false).await, alice_db.clone(), 1).await;
     let wallet = alice.get_first_module::<SimplicityClientModule>().unwrap();
     wallet.await_operation(operation).await.unwrap();
     assert_eq!(wallet.history().await.len(), 1);
@@ -222,7 +222,7 @@ async fn run() {
     )
     .await;
 
-    let bob = join(&fed, db(), 2, false, false).await;
+    let bob = join(builder, &fed, db(), 2, false, false).await;
     let bob_wallet = bob.get_first_module::<SimplicityClientModule>().unwrap();
     let bob_output = bob_wallet
         .receive(
@@ -262,7 +262,7 @@ async fn run() {
     drop(wallet);
     alice.shutdown().await;
     drop(alice_db); // Discard the entire database, including operations and keys.
-    let restored = join(&fed, db(), 1, false, true).await;
+    let restored = join(builder, &fed, db(), 1, false, true).await;
     let recovered = restored
         .get_first_module::<SimplicityClientModule>()
         .unwrap();
@@ -274,7 +274,7 @@ async fn run() {
     let bob_expected = bob_wallet.contracts().await;
     drop(bob_wallet);
     bob.shutdown().await;
-    let bob = join(&fed, db(), 2, false, true).await;
+    let bob = join(builder, &fed, db(), 2, false, true).await;
     let bob_wallet = bob.get_first_module::<SimplicityClientModule>().unwrap();
     assert_eq!(bob_wallet.contracts().await, bob_expected);
     funds(&bob).await;
@@ -312,7 +312,7 @@ async fn run() {
     );
     drop(recovered);
     restored.shutdown().await;
-    let drained = join(&fed, db(), 1, false, true).await;
+    let drained = join(builder, &fed, db(), 1, false, true).await;
     let wallet = drained
         .get_first_module::<SimplicityClientModule>()
         .unwrap();
@@ -328,7 +328,7 @@ async fn run() {
     drained.shutdown().await;
     drop(bob_wallet);
     bob.shutdown().await;
-    let bob = join(&fed, db(), 2, false, true).await;
+    let bob = join(builder, &fed, db(), 2, false, true).await;
     assert_eq!(
         bob.get_first_module::<SimplicityClientModule>()
             .unwrap()
@@ -344,8 +344,8 @@ async fn run() {
 async fn direct_sender_receipts_restore_history_without_owning_recipient_contracts() {
     tokio::time::timeout(Duration::from_secs(180), async {
         let mut fed = Federation::new().await;
-        let alice = join(&fed, db(), 11, false, false).await;
-        let bob = join(&fed, db(), 12, false, false).await;
+        let alice = join(builder, &fed, db(), 11, false, false).await;
+        let bob = join(builder, &fed, db(), 12, false, false).await;
         funds(&alice).await;
         funds(&bob).await;
         let sender = alice.get_first_module::<SimplicityClientModule>().unwrap();
@@ -437,13 +437,13 @@ async fn direct_sender_receipts_restore_history_without_owning_recipient_contrac
         let alice_contracts = sender.contracts().await;
         drop(sender);
         alice.shutdown().await;
-        let alice = join(&fed, db(), 11, false, true).await;
+        let alice = join(builder, &fed, db(), 11, false, true).await;
         let restored = alice.get_first_module::<SimplicityClientModule>().unwrap();
         assert_eq!(restored.history().await, expected);
         assert_eq!(restored.contracts().await, alice_contracts);
         drop(recipient);
         bob.shutdown().await;
-        let bob = join(&fed, db(), 12, false, true).await;
+        let bob = join(builder, &fed, db(), 12, false, true).await;
         let restored_bob = bob.get_first_module::<SimplicityClientModule>().unwrap();
         assert_eq!(restored_bob.contracts().await, bob_contracts);
         funds(&bob).await;
@@ -461,7 +461,7 @@ async fn direct_sender_receipts_restore_history_without_owning_recipient_contrac
         assert_eq!(bob_history.len(), 3);
         drop(restored_bob);
         bob.shutdown().await;
-        let bob = join(&fed, db(), 12, false, true).await;
+        let bob = join(builder, &fed, db(), 12, false, true).await;
         assert_eq!(
             bob.get_first_module::<SimplicityClientModule>()
                 .unwrap()

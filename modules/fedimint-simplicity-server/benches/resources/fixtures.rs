@@ -413,6 +413,80 @@ fn encoded(program: Vec<u8>, witness: Vec<u8>) -> Fixture {
     fixture
 }
 
+fn constant(bytes: usize) -> Fixture {
+    assert!(bytes.is_power_of_two());
+    let mut value = simplicity::Value::u8(0x55);
+    for _ in 0..bytes.ilog2() {
+        value = simplicity::Value::product(value.clone(), value);
+    }
+    let program = simplicity::types::Context::with_context(|ctx| {
+        let node: Arc<ConstructNode> = Arc::const_word(&ctx, value.to_word().expect("word"));
+        Arc::comp(&node, &Arc::unit(&ctx))
+            .expect("discard constant")
+            .finalize_types()
+            .expect("closed types")
+            .to_vec_without_witness()
+    });
+    encoded(program, vec![])
+}
+
+fn hash_blocks(count: usize) -> Fixture {
+    let program = fedimint_simplicity_client::compiler::compile(
+        &format!("fn hash(block: (u256, u256), acc: u256) -> u256 {{ let (a, b): (u256, u256) = block; jet::sha_256_block(acc, a, b) }} fn main() {{ let hash: u256 = array_fold::<hash, {count}>(witness::DATA, jet::sha_256_iv()); }}"),
+        arguments([]),
+    ).expect("hash workload compiles");
+    let block = Value::tuple([market::word([0; 32]), market::word([0; 32])]);
+    let data = Value::array(vec![block.clone(); count], block.ty().clone());
+    let satisfied = program
+        .satisfy(witnesses([("DATA", data)]))
+        .expect("hash workload satisfies");
+    let (program, witness) = satisfied.redeem().to_vec_with_witness();
+    encoded(program, witness)
+}
+
+fn signature_node<'brand>(
+    ctx: &simplicity::types::Context<'brand>,
+    wrong_message: bool,
+) -> Arc<ConstructNode<'brand>> {
+    let mut bytes = [0; 128];
+    bytes[..32].copy_from_slice(&key().x_only_public_key().0.serialize());
+    bytes[64..].copy_from_slice(
+        SECP256K1
+            .sign_schnorr_no_aux_rand(&Message::from_digest([0; 32]), &key())
+            .as_ref(),
+    );
+    // Change only the message, leaving a well-formed signature.
+    bytes[32] = u8::from(wrong_message);
+    Arc::comp(
+        &Arc::const_word(
+            ctx,
+            simplicity::Value::from_byte_array(bytes)
+                .to_word()
+                .expect("signature word"),
+        ),
+        &Arc::jet(ctx, &FedimintJet::Core(Core::Bip0340Verify)),
+    )
+    .expect("signature check")
+}
+
+fn compose_balanced<'brand>(
+    mut nodes: Vec<Arc<ConstructNode<'brand>>>,
+) -> Arc<ConstructNode<'brand>> {
+    while nodes.len() > 1 {
+        nodes = nodes
+            .chunks(2)
+            .map(|pair| {
+                if pair.len() == 1 {
+                    pair[0].clone()
+                } else {
+                    Arc::comp(&pair[0], &pair[1]).expect("unit composition")
+                }
+            })
+            .collect();
+    }
+    nodes.pop().expect("nonempty composition")
+}
+
 fn build(name: &str) -> Fixture {
     let mut fixture = match name {
         "owner" | "late_bad_signature" => owner(name == "late_bad_signature"),
@@ -439,21 +513,7 @@ fn build(name: &str) -> Fixture {
         | "signature_budget_over"
         | "signature_split_budget" => {
             let program = simplicity::types::Context::with_context(|ctx| {
-                let mut bytes = [0; 128];
-                bytes[..32].copy_from_slice(&key().x_only_public_key().0.serialize());
-                bytes[64..].copy_from_slice(
-                    SECP256K1
-                        .sign_schnorr_no_aux_rand(&Message::from_digest([0; 32]), &key())
-                        .as_ref(),
-                );
-                let word = simplicity::Value::from_byte_array(bytes)
-                    .to_word()
-                    .expect("signature word");
-                let mut node: Arc<ConstructNode> = Arc::comp(
-                    &Arc::const_word(&ctx, word),
-                    &Arc::jet(&ctx, &FedimintJet::Core(Core::Bip0340Verify)),
-                )
-                .expect("verify signature");
+                let mut node = signature_node(&ctx, false);
                 let mut half = node.clone();
                 let levels = match name {
                     "signature_split_budget" => 3,
@@ -493,18 +553,7 @@ fn build(name: &str) -> Fixture {
             fixture
         }
         "large_constant" | "constants_3" | "constants_4" => {
-            let program = simplicity::types::Context::with_context(|ctx| {
-                let word = simplicity::Value::from_byte_array([0x55; 4096])
-                    .to_word()
-                    .expect("power of two word");
-                let node: Arc<ConstructNode> = Arc::const_word(&ctx, word);
-                Arc::comp(&node, &Arc::unit(&ctx))
-                    .expect("discard word")
-                    .finalize_types()
-                    .expect("closed types")
-                    .to_vec_without_witness()
-            });
-            let mut fixture = encoded(program, vec![]);
+            let mut fixture = constant(4096);
             assert_eq!(fixture.decode_error, None);
             if name != "large_constant" {
                 duplicate(
@@ -516,17 +565,8 @@ fn build(name: &str) -> Fixture {
             fixture
         }
         "large_witness" => {
-            let program = fedimint_simplicity_client::compiler::compile(
-                "fn hash(block: (u256, u256), acc: u256) -> u256 { let (a, b): (u256, u256) = block; jet::sha_256_block(acc, a, b) } fn main() { let hash: u256 = array_fold::<hash, 128>(witness::DATA, jet::sha_256_iv()); }", arguments([])
-            ).expect("large witness compiles");
-            let block = Value::tuple([market::word([0; 32]), market::word([0; 32])]);
-            let data = Value::array(vec![block.clone(); 128], block.ty().clone());
-            let satisfied = program
-                .satisfy(witnesses([("DATA", data)]))
-                .expect("large witness satisfies");
-            let (program, witness) = satisfied.redeem().to_vec_with_witness();
-            assert_eq!(witness.len(), MAX_WITNESS_BYTES);
-            let fixture = encoded(program, witness);
+            let fixture = hash_blocks(128);
+            assert_eq!(fixture.inputs[0].witness.len(), MAX_WITNESS_BYTES);
             assert_eq!(
                 fixture.decode_error, None,
                 "large witness within cost limits"

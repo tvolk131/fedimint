@@ -19,48 +19,6 @@ async fn builder(stopped: bool) -> ClientBuilder {
     builder.with_module(MintClientInit);
     builder
 }
-async fn open(database: Database, seed: u8) -> ClientHandle {
-    builder(false)
-        .await
-        .open(
-            ConnectorRegistry::build_from_testing_env().bind().await,
-            database,
-            root(seed),
-        )
-        .await
-        .unwrap()
-}
-async fn join(
-    fed: &Federation,
-    database: Database,
-    seed: u8,
-    stopped: bool,
-    recover: bool,
-) -> ClientHandle {
-    let config = fed.configs[&PeerId::from(0)]
-        .consensus
-        .to_client_config(&registry())
-        .unwrap();
-    let preview = builder(stopped)
-        .await
-        .preview_with_existing_config(
-            ConnectorRegistry::build_from_testing_env().bind().await,
-            config,
-            None,
-        )
-        .await;
-    if recover {
-        let client = preview
-            .recover(database.clone(), root(seed), None)
-            .await
-            .unwrap();
-        client.wait_for_all_recoveries().await.unwrap();
-        client.shutdown().await;
-        open(database, seed).await
-    } else {
-        preview.join(database, root(seed)).await.unwrap()
-    }
-}
 async fn funds(client: &ClientHandle) {
     let input = client
         .get_first_module::<DummyClientModule>()
@@ -189,7 +147,7 @@ async fn prepare(
     policy: IntentPolicy,
 ) -> (Database, fedimint_core::core::OperationId) {
     let database = db();
-    let client = join(fed, database.clone(), seed, false, false).await;
+    let client = join(builder, fed, database.clone(), seed, false, false).await;
     funds(&client).await;
     let owned = notes(&client).await;
     assert!(!owned.is_empty());
@@ -287,10 +245,10 @@ async fn run() {
                 .len()
     );
     offline.shutdown().await;
-    let alice = open(alice_db, 41).await;
+    let alice = open(builder(false).await, alice_db, 41).await;
     let a = alice.get_first_module::<SimplicityClientModule>().unwrap();
     completed(&await_record(&a, alice_id).await, 1);
-    let bob = open(bob_db.clone(), 42).await;
+    let bob = open(builder(false).await, bob_db.clone(), 42).await;
     let b = bob.get_first_module::<SimplicityClientModule>().unwrap();
     let conflict = await_record(&b, bob_id).await;
     assert_restored(&bob).await;
@@ -337,7 +295,7 @@ async fn run() {
     completed(&await_record(&a, second_winner).await, 1);
     drop(b);
     bob.shutdown().await;
-    let bob = open(bob_db, 42).await;
+    let bob = open(builder(false).await, bob_db, 42).await;
     let b = bob.get_first_module::<SimplicityClientModule>().unwrap();
     let second_conflict = await_record(&b, bob_id).await;
     assert_restored(&bob).await;
@@ -429,10 +387,10 @@ async fn run() {
     };
     let (carol_db, carol_id) = prepare(&fed, 43, &market, 1, auto.clone()).await;
     let (dan_db, dan_id) = prepare(&fed, 44, &market, 1, auto.clone()).await;
-    let carol = open(carol_db, 43).await;
+    let carol = open(builder(false).await, carol_db, 43).await;
     let c = carol.get_first_module::<SimplicityClientModule>().unwrap();
     completed(&await_record(&c, carol_id).await, 1);
-    let dan = open(dan_db, 44).await;
+    let dan = open(builder(false).await, dan_db, 44).await;
     let d = dan.get_first_module::<SimplicityClientModule>().unwrap();
     completed(&await_record(&d, dan_id).await, 2);
 
@@ -453,7 +411,7 @@ async fn run() {
         .await
         .unwrap();
     completed(&await_record(&a, winner).await, 1);
-    let eve = open(eve_db.clone(), 45).await;
+    let eve = open(builder(false).await, eve_db.clone(), 45).await;
     let e = eve.get_first_module::<SimplicityClientModule>().unwrap();
     let exhausted = await_record(&e, eve_id).await;
     assert_restored(&eve).await;
@@ -465,7 +423,7 @@ async fn run() {
     assert!(e.retry_intent(eve_id).await.is_err());
     drop(e);
     eve.shutdown().await;
-    let eve = open(eve_db, 45).await;
+    let eve = open(builder(false).await, eve_db, 45).await;
     assert_eq!(
         eve.get_first_module::<SimplicityClientModule>()
             .unwrap()
@@ -494,7 +452,7 @@ async fn run() {
     );
     drop(f);
     frank.shutdown().await;
-    let frank = open(frank_db, 46).await;
+    let frank = open(builder(false).await, frank_db, 46).await;
     let f = frank.get_first_module::<SimplicityClientModule>().unwrap();
     completed(&await_record(&f, frank_id).await, 1);
 
@@ -539,7 +497,7 @@ async fn run() {
         )
         .unwrap();
     submit(&a, vec![input], vec![resolved], vec![]).await;
-    let grace = open(grace_db, 47).await;
+    let grace = open(builder(false).await, grace_db, 47).await;
     let g = grace.get_first_module::<SimplicityClientModule>().unwrap();
     let closed = await_record(&g, grace_id).await;
     assert!(
@@ -551,7 +509,7 @@ async fn run() {
     // Seed recovery restores confirmed positions, not unfinished intentions.
     drop(d);
     dan.shutdown().await;
-    let dan = join(&fed, db(), 44, false, true).await;
+    let dan = join(builder, &fed, db(), 44, false, true).await;
     let restored = dan.get_first_module::<SimplicityClientModule>().unwrap();
     assert!(restored.intent(dan_id).await.is_none());
     assert!(

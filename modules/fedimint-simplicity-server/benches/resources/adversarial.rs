@@ -67,23 +67,6 @@ pub fn case(name: &str) -> &'static Case {
     CASE_DATA.get(name).expect("registered adversarial case")
 }
 
-fn constant(bytes: usize) -> Fixture {
-    assert!(bytes.is_power_of_two());
-    let mut value = simplicity::Value::u8(0x55);
-    for _ in 0..bytes.ilog2() {
-        value = simplicity::Value::product(value.clone(), value);
-    }
-    let program = simplicity::types::Context::with_context(|ctx| {
-        let node: Arc<ConstructNode> = Arc::const_word(&ctx, value.to_word().expect("word"));
-        Arc::comp(&node, &Arc::unit(&ctx))
-            .expect("discard constant")
-            .finalize_types()
-            .expect("closed types")
-            .to_vec_without_witness()
-    });
-    encoded(program, vec![])
-}
-
 fn packed() -> Fixture {
     let mut fixture = constant(4096);
     fixture.inputs.clear();
@@ -115,18 +98,7 @@ fn sequence(count: u32, balanced: bool) -> Fixture {
             })
             .collect();
         if balanced {
-            while nodes.len() > 1 {
-                nodes = nodes
-                    .chunks(2)
-                    .map(|pair| {
-                        if pair.len() == 1 {
-                            pair[0].clone()
-                        } else {
-                            Arc::comp(&pair[0], &pair[1]).expect("unit composition")
-                        }
-                    })
-                    .collect();
-            }
+            nodes = vec![compose_balanced(nodes)];
         } else {
             let first = nodes.remove(0);
             nodes = vec![
@@ -143,51 +115,11 @@ fn sequence(count: u32, balanced: bool) -> Fixture {
     encoded(program, vec![])
 }
 
-fn hash_blocks(count: usize) -> Fixture {
-    let program = fedimint_simplicity_client::compiler::compile(
-        &format!("fn hash(block: (u256, u256), acc: u256) -> u256 {{ let (a, b): (u256, u256) = block; jet::sha_256_block(acc, a, b) }} fn main() {{ let hash: u256 = array_fold::<hash, {count}>(witness::DATA, jet::sha_256_iv()); }}"),
-        arguments([]),
-    ).expect("hash workload compiles");
-    let block = Value::tuple([market::word([0; 32]), market::word([0; 32])]);
-    let data = Value::array(vec![block.clone(); count], block.ty().clone());
-    let satisfied = program
-        .satisfy(witnesses([("DATA", data)]))
-        .expect("hash workload satisfies");
-    let (program, witness) = satisfied.redeem().to_vec_with_witness();
-    encoded(program, witness)
-}
-
 fn signatures(count: usize, bad: Option<usize>) -> Fixture {
     let program = simplicity::types::Context::with_context(|ctx| {
-        let mut bytes = [0; 128];
-        bytes[..32].copy_from_slice(&key().x_only_public_key().0.serialize());
-        bytes[64..].copy_from_slice(
-            SECP256K1
-                .sign_schnorr_no_aux_rand(&Message::from_digest([0; 32]), &key())
-                .as_ref(),
-        );
-        let good: Arc<ConstructNode> = Arc::comp(
-            &Arc::const_word(
-                &ctx,
-                simplicity::Value::from_byte_array(bytes)
-                    .to_word()
-                    .expect("word"),
-            ),
-            &Arc::jet(&ctx, &FedimintJet::Core(Core::Bip0340Verify)),
-        )
-        .expect("signature check");
-        bytes[32] = 1; // Wrong message with an otherwise well-formed signature.
-        let wrong: Arc<ConstructNode> = Arc::comp(
-            &Arc::const_word(
-                &ctx,
-                simplicity::Value::from_byte_array(bytes)
-                    .to_word()
-                    .expect("word"),
-            ),
-            &Arc::jet(&ctx, &FedimintJet::Core(Core::Bip0340Verify)),
-        )
-        .expect("signature check");
-        let mut nodes: Vec<_> = (0..count)
+        let good = signature_node(&ctx, false);
+        let wrong = signature_node(&ctx, true);
+        let nodes: Vec<_> = (0..count)
             .map(|i| {
                 if bad == Some(i) {
                     wrong.clone()
@@ -196,19 +128,7 @@ fn signatures(count: usize, bad: Option<usize>) -> Fixture {
                 }
             })
             .collect();
-        while nodes.len() > 1 {
-            nodes = nodes
-                .chunks(2)
-                .map(|pair| {
-                    if pair.len() == 1 {
-                        pair[0].clone()
-                    } else {
-                        Arc::comp(&pair[0], &pair[1]).expect("unit composition")
-                    }
-                })
-                .collect();
-        }
-        nodes[0]
+        compose_balanced(nodes)
             .finalize_types()
             .expect("closed types")
             .to_vec_without_witness()

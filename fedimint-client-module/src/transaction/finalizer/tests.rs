@@ -57,6 +57,14 @@ impl IntoDynInstance for TestOutput {
     }
 }
 
+fn output_bundle(module: u16, value: u64) -> ClientOutputBundle {
+    ClientOutputBundle::new_no_sm(vec![ClientOutput {
+        output: TestOutput(value),
+        amounts: Amounts::ZERO,
+    }])
+    .into_dyn(module)
+}
+
 #[derive(Debug)]
 struct SignFinalItems;
 
@@ -116,22 +124,10 @@ fn authorization_sees_final_outputs_and_nonce_before_outer_signatures_and_states
     .into_dyn(1);
     let (tx, _) = TransactionBuilder::new()
         .with_inputs(input)
-        .with_outputs(
-            ClientOutputBundle::new_no_sm(vec![ClientOutput {
-                output: TestOutput(0),
-                amounts: Amounts::ZERO,
-            }])
-            .into_dyn(1),
-        )
+        .with_outputs(output_bundle(1, 0))
         .with_finalizer(1, Arc::new(SignFinalItems))
         // Simulates change added by the primary module after explicit items.
-        .with_outputs(
-            ClientOutputBundle::new_no_sm(vec![ClientOutput {
-                output: TestOutput(42),
-                amounts: Amounts::ZERO,
-            }])
-            .into_dyn(2),
-        )
+        .with_outputs(output_bundle(2, 42))
         .build(SECP256K1, rand::thread_rng())
         .unwrap();
     assert_eq!(
@@ -170,25 +166,13 @@ impl TransactionFinalizer for WrongOutput {
 fn finalizers_cannot_append_reassign_or_overwrite_another_modules_items() {
     for (index, module) in [(1, 1), (0, 2)] {
         let result = TransactionBuilder::new()
-            .with_outputs(
-                ClientOutputBundle::new_no_sm(vec![ClientOutput {
-                    output: TestOutput(0),
-                    amounts: Amounts::ZERO,
-                }])
-                .into_dyn(1),
-            )
+            .with_outputs(output_bundle(1, 0))
             .with_finalizer(1, Arc::new(WrongOutput { index, module }))
             .build(SECP256K1, rand::thread_rng());
         assert!(result.is_err());
     }
     let result = TransactionBuilder::new()
-        .with_outputs(
-            ClientOutputBundle::new_no_sm(vec![ClientOutput {
-                output: TestOutput(0),
-                amounts: Amounts::ZERO,
-            }])
-            .into_dyn(2),
-        )
+        .with_outputs(output_bundle(2, 0))
         .with_finalizer(
             1,
             Arc::new(WrongOutput {
@@ -243,13 +227,7 @@ fn all_metadata_is_prepared_before_authorization_and_final_checks_can_abort() {
         let mut builder = TransactionBuilder::new();
         for (index, module) in [1, 2].into_iter().enumerate() {
             builder = builder
-                .with_outputs(
-                    ClientOutputBundle::new_no_sm(vec![ClientOutput {
-                        output: TestOutput(0),
-                        amounts: Amounts::ZERO,
-                    }])
-                    .into_dyn(module),
-                )
+                .with_outputs(output_bundle(module, 0))
                 .with_finalizer(
                     module,
                     Arc::new(MetadataStages {
@@ -270,13 +248,7 @@ fn all_metadata_is_prepared_before_authorization_and_final_checks_can_abort() {
 fn preparation_obeys_module_index_and_single_writer_boundaries() {
     for (index, module, duplicate) in [(1, 1, false), (0, 2, false), (0, 1, true)] {
         let mut builder = TransactionBuilder::new()
-            .with_outputs(
-                ClientOutputBundle::new_no_sm(vec![ClientOutput {
-                    output: TestOutput(0),
-                    amounts: Amounts::ZERO,
-                }])
-                .into_dyn(1),
-            )
+            .with_outputs(output_bundle(1, 0))
             .with_finalizer(
                 1,
                 Arc::new(MetadataStages {
