@@ -4,6 +4,12 @@ This is a data-gathering harness, not a fee policy or a throughput guarantee.
 It does not change consensus limits, fees, or guardian execution. It uses Divan,
 as do existing Fedimint benchmarks. No benchmark is added to PR CI.
 
+The minimum guardian performance target is **Raspberry Pi 5**. Calibration needs
+measurements on that hardware, including the full admission/consensus path. Record
+RAM, storage, cooling, clock settings and thermal throttling alongside each Pi
+run. Results from faster machines establish comparisons, not Pi latency or safe
+production limits.
+
 ## Running
 
 From the repository root, in the normal development environment:
@@ -48,7 +54,7 @@ The same fixed keys, nonce, votes and contract outpoints reproduce the same case
 | `vm_cached` | A predecoded program: allocate a fresh BitMachine, execute, and drop the machine/result. Excludes decoding, CMR and execution-version checks. |
 | `runtime_execute` | Production `execute`, including decode, CMR/version checks, VM allocation/execution and fee calculation. |
 | `intent_hash` | One production v0/v1 transaction intent hash. |
-| `environment_clone` | Clone and drop one already constructed environment. Isolates the cost of copying its vectors, contracts, assets and recovery data. It is **not** a measurement of the entire context-building path. |
+| `environment_clone` | Clone and drop one already constructed environment. Shares immutable input/output/action data through `Arc` and copies the current contract snapshot. It is **not** a measurement of the entire context-building path. The first baseline predates sharing and copied the full context. |
 | `guardian_validation` | The actual `ServerModule::validate_transaction` hook: output validation/hashing, consumed-contract DB reads, conservation checks, block votes, intent hashes, environment construction, every input's runtime execution and final transaction hash. Includes current-thread executor entry and result destruction. |
 
 Per-input stages use the first input. The guardian stage measures all inputs in
@@ -117,5 +123,9 @@ guardian-class Linux hardware and concurrent invalid-submission load.
 
 The [2026-10-02 report](REPORT-2026-10-02.md) contains the first measured baseline,
 its raw data, and interpretation.
+The [context-sharing comparison](REPORT-2026-10-02-context-sharing.md) records the
+first optimization against that unchanged fixture matrix.
+Keep the harness, fixtures and methodology as regression tools. Retain selected
+comparison reports; routine raw runs need not all be committed.
 Fee coefficients or limit changes should be reviewed separately after examining
 the measurements.

@@ -2,14 +2,16 @@
 //! input. The resulting cache is transaction-local, never persisted or trusted
 //! from a client.
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, OnceLock};
 
 use fedimint_core::bitcoin::hashes::Hash;
-use fedimint_core::core::{DynInputError, DynOutputError};
+use fedimint_core::config::FederationId;
+use fedimint_core::core::{DynInputError, DynOutputError, ModuleInstanceId};
 use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::module::{Amounts, InputMeta, TransactionItemAmounts};
 use fedimint_core::secp256k1::{Message, SECP256K1};
-use fedimint_core::transaction::TransactionError;
+use fedimint_core::transaction::{Transaction, TransactionError};
 use fedimint_core::{OutPoint, TransactionId};
 use fedimint_server_core::ModuleTransactionContext;
 use fedimint_simplicity_common::assets::{
@@ -52,6 +54,7 @@ pub(crate) async fn validate(
         TransactionError::Input(DynInputError::from_typed(context.module_instance_id, error))
     };
     validate_shape(context).map_err(output_err)?;
+    let hashes = TransactionHashes::new(context);
     let mut outputs = Vec::new();
     let mut actions = AssetActions::default();
     let mut has_actions = false;
@@ -105,34 +108,23 @@ pub(crate) async fn validate(
         inputs.push(input);
         stored_inputs.push(stored);
     }
-    let resolved = inputs
+    let resolved: Arc<[EnvironmentInput]> = inputs
         .iter()
         .zip(&stored_inputs)
         .map(|(input, stored)| EnvironmentInput {
             outpoint: input.outpoint,
             contract: stored.output.clone(),
         })
-        .collect::<Vec<_>>();
-    let (creations, namespaces) = validate_assets(dbtx, context, &resolved, &outputs, &actions)
+        .collect();
+    let (creations, namespaces) = validate_assets(dbtx, &hashes, &resolved, &outputs, &actions)
         .await
         .map_err(output_err)?;
     let block_count = module.consensus_block_count(dbtx).await;
+    let outputs: Arc<[EnvironmentOutput]> = outputs.into();
+    let actions = Arc::new(actions);
     let mut metadata = Vec::new();
     for (index, (input, stored)) in inputs.iter().zip(&stored_inputs).enumerate() {
-        let signature_hash = if stored.output.version == 0 {
-            signature_hash(
-                context.consensus.federation_id,
-                context.module_instance_id,
-                context.transaction,
-            )
-        } else {
-            signature_hash_v1(
-                context.consensus.federation_id,
-                context.module_instance_id,
-                context.transaction,
-            )
-        }
-        .map_err(input_err)?;
+        let signature_hash = hashes.intent(stored.output.version).map_err(input_err)?;
         let environment = Environment {
             signature_hash,
             session_index: context.consensus.session_index,
@@ -156,11 +148,51 @@ pub(crate) async fn validate(
         });
     }
     Ok(ValidatedTransaction {
-        txid: context.transaction.tx_hash(),
+        txid: hashes.txid(),
         inputs: metadata,
         creations,
         namespaces,
     })
+}
+
+/// Scoped to one immutable outer transaction and one module instance. Evaluate
+/// lazily at the original validation step so rejected transactions retain their
+/// error ordering and do not incur hashes they previously skipped.
+struct TransactionHashes<'a> {
+    transaction: &'a Transaction,
+    federation_id: FederationId,
+    module_id: ModuleInstanceId,
+    legacy: OnceLock<Result<[u8; 32], ContractError>>,
+    assets: OnceLock<Result<[u8; 32], ContractError>>,
+    txid: OnceLock<TransactionId>,
+}
+
+impl<'a> TransactionHashes<'a> {
+    fn new(context: &ModuleTransactionContext<'a>) -> Self {
+        Self {
+            transaction: context.transaction,
+            federation_id: context.consensus.federation_id,
+            module_id: context.module_instance_id,
+            legacy: OnceLock::new(),
+            assets: OnceLock::new(),
+            txid: OnceLock::new(),
+        }
+    }
+
+    fn intent(&self, version: u32) -> Result<[u8; 32], ContractError> {
+        let (cache, hash) = if version == 0 {
+            (&self.legacy, signature_hash as fn(_, _, _) -> _)
+        } else {
+            (&self.assets, signature_hash_v1 as fn(_, _, _) -> _)
+        };
+        cache
+            .get_or_init(|| hash(self.federation_id, self.module_id, self.transaction))
+            .clone()
+    }
+
+    fn txid(&self) -> TransactionId {
+        *self.txid.get_or_init(|| self.transaction.tx_hash())
+    }
 }
 
 fn validate_output(output: &ContractOutput) -> Result<(), ContractError> {
@@ -220,7 +252,7 @@ type Creations = Vec<(AssetId, AssetRecord)>;
 
 async fn validate_assets(
     dbtx: &mut DatabaseTransaction<'_>,
-    context: &ModuleTransactionContext<'_>,
+    hashes: &TransactionHashes<'_>,
     inputs: &[EnvironmentInput],
     outputs: &[EnvironmentOutput],
     actions: &AssetActions,
@@ -258,20 +290,12 @@ async fn validate_assets(
     let mut creations = BTreeMap::new();
     let mut namespaces = BTreeSet::new();
     for creation in &actions.creations {
-        let namespace = namespace(
-            context.consensus.federation_id,
-            context.module_instance_id,
-            creation.key,
-        );
+        let namespace = namespace(hashes.federation_id, hashes.module_id, creation.key);
         if !namespaces.insert(namespace) || dbtx.get_value(&NamespaceKey(namespace)).await.is_some()
         {
             return Err(ContractError::NamespaceUsed);
         }
-        let message = Message::from_digest(signature_hash_v1(
-            context.consensus.federation_id,
-            context.module_instance_id,
-            context.transaction,
-        )?);
+        let message = Message::from_digest(hashes.intent(ASSET_VERSION)?);
         SECP256K1
             .verify_schnorr(
                 &creation.signature,
@@ -281,8 +305,8 @@ async fn validate_assets(
             .map_err(|_| ContractError::CreationSignature)?;
         for (ordinal, output_index) in creation.authority_outputs.iter().enumerate() {
             let id = asset_id(
-                context.consensus.federation_id,
-                context.module_instance_id,
+                hashes.federation_id,
+                hashes.module_id,
                 creation.key,
                 ordinal as u32,
             );
@@ -304,7 +328,7 @@ async fn validate_assets(
                     creation_key: creation.key,
                     ordinal: ordinal as u32,
                     authority_outpoint: OutPoint {
-                        txid: context.transaction.tx_hash(),
+                        txid: hashes.txid(),
                         out_idx: u64::from(*output_index),
                     },
                     authority_cmr: output.cmr,
