@@ -16,14 +16,14 @@ use fedimint_core::{OutPoint, TransactionId};
 use fedimint_server_core::ModuleTransactionContext;
 use fedimint_simplicity_common::assets::{
     ASSET_VERSION, AssetActions, AssetId, AssetRecord, MAX_ASSETS, asset_id, namespace,
-    signature_hash_v1, validate_amounts,
+    signature_hash_v1,
 };
+use fedimint_simplicity_common::resources::check_output;
 use fedimint_simplicity_common::runtime::{
     Environment, EnvironmentInput, EnvironmentOutput, execute,
 };
 use fedimint_simplicity_common::{
-    ContractError, ContractInput, ContractOutput, ContractOutputError, MAX_RECOVERY_BYTES,
-    signature_hash,
+    ContractError, ContractInput, ContractOutput, ContractOutputError, signature_hash,
 };
 
 use crate::db::{AssetKey, ContractKey, NamespaceKey};
@@ -64,7 +64,7 @@ pub(crate) async fn validate(
                 .as_any()
                 .downcast_ref::<ContractOutput>()
                 .ok_or_else(|| output_err(ContractError::Context))?;
-            validate_output(contract).map_err(output_err)?;
+            check_output(contract).map_err(output_err)?;
             if let Some(value) = contract.actions() {
                 if has_actions {
                     return Err(output_err(ContractError::Assets));
@@ -193,49 +193,6 @@ impl<'a> TransactionHashes<'a> {
     fn txid(&self) -> TransactionId {
         *self.txid.get_or_init(|| self.transaction.tx_hash())
     }
-}
-
-fn validate_output(output: &ContractOutput) -> Result<(), ContractError> {
-    if output.version > ASSET_VERSION
-        || (output.version == 0 && output.extension.is_some())
-        || (output.version == ASSET_VERSION && output.extension.is_none())
-    {
-        return Err(ContractError::Version);
-    }
-    if output.recovery.len() > MAX_RECOVERY_BYTES || output.amount.msats > 2_100_000_000_000_000_000
-    {
-        return Err(ContractError::Limit);
-    }
-    if let Some(bundle) = output.bundle() {
-        validate_amounts(&bundle.balances)?;
-        if bundle.authorities.len() > MAX_ASSETS
-            || !bundle.authorities.windows(2).all(|pair| pair[0] < pair[1])
-        {
-            return Err(ContractError::Assets);
-        }
-    }
-    if let Some(actions) = output.actions() {
-        if output.amount.msats != 0 || output.cmr != [0; 32] || output.state != [0; 32] {
-            return Err(ContractError::Assets);
-        }
-        validate_amounts(&actions.issuance)?;
-        validate_amounts(&actions.burns)?;
-        if actions.creations.len() > MAX_ASSETS
-            || actions.creations.iter().any(|creation| {
-                creation.authority_outputs.is_empty()
-                    || creation.authority_outputs.len() > MAX_ASSETS
-            })
-            || actions
-                .creations
-                .iter()
-                .map(|creation| creation.authority_outputs.len())
-                .sum::<usize>()
-                > MAX_ASSETS
-        {
-            return Err(ContractError::Limit);
-        }
-    }
-    Ok(())
 }
 
 #[derive(Default)]

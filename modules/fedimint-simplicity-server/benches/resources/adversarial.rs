@@ -56,7 +56,7 @@ enum Outcome {
 pub struct Case {
     pub fixture: Fixture,
     pub transaction: Transaction,
-    preflight: Option<ContractError>,
+    preflight: Outcome,
     outcome: Outcome,
 }
 
@@ -300,7 +300,7 @@ fn build_case(name: &str) -> Case {
     }
     fixture.finish();
     let mut transaction = fixture.funded_transaction();
-    let mut preflight = None;
+    let mut preflight = Outcome::Accept;
     let outcome = match name {
         "packed_missing_first" | "packed_missing_last" | "packed_duplicate" => {
             let index = if name.ends_with("first") {
@@ -315,6 +315,9 @@ fn build_case(name: &str) -> Case {
                 point(9999)
             };
             transaction.inputs[index] = DynInput::from_typed(MODULE, input);
+            if name.ends_with("duplicate") {
+                preflight = Outcome::Module(ContractError::UnknownContract);
+            }
             Outcome::Module(ContractError::UnknownContract)
         }
         "packed_bad_cmr_first" | "packed_bad_cmr_last" => {
@@ -326,6 +329,7 @@ fn build_case(name: &str) -> Case {
             transaction
                 .outputs
                 .push(DynOutput::from_typed(MODULE, output));
+            preflight = Outcome::Module(ContractError::Version);
             Outcome::Module(ContractError::Version)
         }
         "packed_trailing_witness_first" | "packed_trailing_witness_last" => {
@@ -343,7 +347,7 @@ fn build_case(name: &str) -> Case {
             transaction
                 .inputs
                 .remove(if index == last { last - 1 } else { last });
-            preflight = Some(ContractError::Program);
+            preflight = Outcome::Module(ContractError::Program);
             Outcome::Module(ContractError::Program)
         }
         "packed_bad_outer_signature" => Outcome::Signature,
@@ -378,6 +382,7 @@ fn build_case(name: &str) -> Case {
                     assets::sign_creation(&mut transaction, federation(), MODULE, &creator)
                         .expect("creation");
                 }
+                preflight = Outcome::Module(ContractError::Assets);
                 Outcome::Module(ContractError::Assets)
             } else {
                 Outcome::Module(ContractError::CreationSignature)
@@ -390,6 +395,7 @@ fn build_case(name: &str) -> Case {
     if let TransactionSignature::NaiveMultisig(sigs) = &mut transaction.signatures {
         if name == "packed_missing_outer_signature" {
             sigs.pop();
+            preflight = Outcome::SignatureCount;
         }
         if name == "packed_bad_outer_signature" {
             sigs[0] = SECP256K1.sign_schnorr_no_aux_rand(&Message::from_digest([0; 32]), &key());
@@ -401,6 +407,10 @@ fn build_case(name: &str) -> Case {
         preflight,
         outcome,
     }
+}
+
+pub fn check_preflight(transaction: &Transaction) -> Result<(), TransactionError> {
+    resources::check_signed_transaction(transaction, MODULE)
 }
 
 fn classify(result: Result<(), TransactionError>) -> Outcome {
@@ -437,7 +447,7 @@ pub fn check_all() {
             "{name}: redemption size"
         );
         assert_eq!(
-            resources::check_transaction(&case.transaction).err(),
+            classify(check_preflight(&case.transaction)),
             case.preflight,
             "{name}: preflight"
         );

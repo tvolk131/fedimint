@@ -157,10 +157,18 @@ retained as a decoder safeguard, but a spend must also fit the stricter aggregat
 budget. Fees are unchanged; resource charges do not add a second fee.
 
 Core runs stateless transaction verification once per module kind before its
-parallel per-input checks. Simplicity checks counts and lengths before decoding,
-then decodes inputs sequentially and sums their bounds before any program or
-creation authorization executes. Every instance shares the allowance. The wallet
-checks the same limits during finalization, before submission/funding state commits.
+parallel per-input checks. Simplicity checks counts, lengths and creation charges
+first, then duplicate references, output/action structure and creation destination
+indices across all its instances. Guardians check the outer signature scheme and
+count next. Only then are programs decoded sequentially and their bounds summed,
+before any program or creation authorization executes. Every instance shares the
+allowance. The wallet runs the same structural/resource checks during finalization,
+before outer signatures exist and before submission/funding state commits.
+Creation destinations must be asset-bundle outputs in their own instance; several
+assets may share a destination. State-dependent accounting, namespace checks,
+actual signatures, program commitments and funding remain later checks.
+For multiply-invalid transactions this phase order determines the first error;
+module preflight faults use the same input-error envelope as resource-limit faults.
 Outer transaction bytes, recovery annotations, assets, types, cells and frames
 retain their separate limits. These checks do not replace admission concurrency
 controls or bound a guardian's aggregate load from repeated requests.

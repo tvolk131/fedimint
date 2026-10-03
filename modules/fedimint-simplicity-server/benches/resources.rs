@@ -37,7 +37,11 @@ fn main() {
 #[divan::bench(args = fixtures::adversarial::CASES)]
 fn adversarial_preflight(bencher: divan::Bencher, name: &str) {
     let case = fixtures::adversarial::case(name);
-    bencher.bench(|| black_box(resources::check_transaction(black_box(&case.transaction))));
+    bencher.bench(|| {
+        black_box(fixtures::adversarial::check_preflight(black_box(
+            &case.transaction,
+        )))
+    });
 }
 
 #[divan::bench(args = fixtures::adversarial::CASES)]

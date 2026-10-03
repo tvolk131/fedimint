@@ -70,9 +70,9 @@ The same fixed keys, nonce, votes and contract outpoints reproduce the same case
 | `intent_hash` | One production v0/v1 transaction intent hash. |
 | `environment_clone` | Clone and drop one already constructed environment. Shares immutable input/output/action data through `Arc` and copies the current contract snapshot. It is **not** a measurement of the entire context-building path. The first baseline predates sharing and copied the full context. |
 | `guardian_validation` | The actual `ServerModule::validate_transaction` hook: output validation/hashing, consumed-contract DB reads, conservation checks, block votes, intent hashes, environment construction, every input's runtime execution and final transaction hash. Includes current-thread executor entry and result destruction. |
-| `transaction_preflight` | Production `resources::check_transaction`: combined byte/count checks, creation-signature charges and sequential redemption decoding/static cost accumulation. Stops on the first error, before VM execution or database access. |
+| `transaction_preflight` | Production `resources::check_transaction`: combined byte/count checks, creation-signature charges, structural checks and sequential redemption decoding/static cost accumulation. This unsigned client preflight omits the outer signature envelope. Stops on the first error, before VM execution or database access. |
 | `core_submission` | Production `process_transaction_with_dbtx` in submission mode: kind-wide preflight, input verification, module validation, outer signatures, native funding checks and processing hooks. Includes creation of a fresh warm MemDatabase transaction and dropping all writes after each iteration. |
-| `adversarial_preflight` | The same stateless resource checker, on the funded and possibly mutated adversarial transaction. |
+| `adversarial_preflight` | Production `resources::check_signed_transaction`, including signature scheme/count after structural checks and before decoding, on the funded and possibly mutated adversarial transaction. |
 | `adversarial_core` | The same core submission path and rollback methodology, on the adversarial matrix. Invalid cases must fail for their explicitly asserted reason. |
 
 Per-input stages use the first input. The guardian stage measures all inputs in
@@ -202,6 +202,8 @@ preflight and core submission measurements, including accepted and rejected
 workloads near the new transaction budgets.
 The [cap-fitting adversarial report](REPORT-2026-10-03-adversarial.md) records
 expensive accepted/rejected workloads and suggestions for validation ordering.
+The [structural-preflight comparison](REPORT-2026-10-03-structural-preflight.md)
+measures moving cheap structural rejection ahead of program decoding.
 Keep the harness, fixtures and methodology as regression tools. Retain selected
 comparison reports; routine raw runs need not all be committed.
 Fee coefficients or limit changes should be reviewed separately after examining
