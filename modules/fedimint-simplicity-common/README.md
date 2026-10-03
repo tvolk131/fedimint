@@ -147,6 +147,24 @@ checks canonical encoding, sharing, and types; inferred type sizes are then
 checked before decoding padded witnesses. Execution is capped by static cost,
 cell, and frame bounds; the constants are in `runtime::decode_program`.
 
+Across all Simplicity instances in one outer transaction, redemption programs and
+witnesses may total at most **16 KiB**, and static program costs plus creation
+authorization charges may total at most **2,000,000 milliweight**. Each asset
+creation signature consumes 100,000 milliweight from that budget; one signature
+can still authorize a batch of assets. These are consensus constants in
+`resources`, not local timeouts. The existing 10,000,000 per-program ceiling is
+retained as a decoder safeguard, but a spend must also fit the stricter aggregate
+budget. Fees are unchanged; resource charges do not add a second fee.
+
+Core runs stateless transaction verification once per module kind before its
+parallel per-input checks. Simplicity checks counts and lengths before decoding,
+then decodes inputs sequentially and sums their bounds before any program or
+creation authorization executes. Every instance shares the allowance. The wallet
+checks the same limits during finalization, before submission/funding state commits.
+Outer transaction bytes, recovery annotations, assets, types, cells and frames
+retain their separate limits. These checks do not replace admission concurrency
+controls or bound a guardian's aggregate load from repeated requests.
+
 Fixed [consensus vectors](tests/vectors/README.md) pin v0/v1 encodings and signing
 hashes, asset IDs, all custom jet identities/types/costs, and selected execution
 commitments/resource bounds. Direct jet tests cover the C-frame adapter boundary;

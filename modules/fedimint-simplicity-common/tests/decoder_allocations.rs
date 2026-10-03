@@ -102,3 +102,48 @@ fn impossible_node_counts_are_rejected_before_reserving_nodes() {
         assert_eq!(largest, 0, "node count {count}");
     }
 }
+
+#[test]
+fn aggregate_byte_limit_rejects_before_allocating_decoded_constants() {
+    use std::sync::Arc;
+
+    use fedimint_core::core::DynInput;
+    use fedimint_core::transaction::{Transaction, TransactionSignature};
+    use fedimint_simplicity_common::resources;
+    use simplicity::ConstructNode;
+    use simplicity::node::CoreConstructible;
+
+    let program = simplicity::types::Context::with_context(|ctx| {
+        let word = simplicity::Value::from_byte_array([0x55; 4096])
+            .to_word()
+            .unwrap();
+        let node: Arc<ConstructNode> = Arc::const_word(&ctx, word);
+        Arc::comp(&node, &Arc::unit(&ctx))
+            .unwrap()
+            .finalize_types()
+            .unwrap()
+            .to_vec_without_witness()
+    });
+    let input = input(program);
+    let (decoded, allocation) = measure(|| runtime::decode_program(&input));
+    decoded.unwrap();
+    assert!(
+        allocation >= 4096,
+        "control must exercise a large decoder allocation"
+    );
+    assert!(4 * input.program.len() > resources::MAX_TRANSACTION_REDEMPTION_BYTES);
+    let tx = Transaction {
+        inputs: (0..4)
+            .map(|index| DynInput::from_typed(4 + index % 2, input.clone()))
+            .collect(),
+        outputs: vec![],
+        nonce: [0; 8],
+        signatures: TransactionSignature::NaiveMultisig(vec![]),
+    };
+    let (result, allocation) = measure(|| resources::check_transaction(&tx));
+    assert_eq!(result, Err(ContractError::Limit));
+    assert!(
+        allocation < 4096,
+        "oversized transaction reached the decoder: {allocation}"
+    );
+}

@@ -11,6 +11,9 @@ use fedimint_core::transaction::Transaction;
 use crate::compiler::{TemplateProgramWitness, WitnessNameToValueMap, WitnessValues};
 use crate::{ContractProgram, assets, common};
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) struct PreparedSpend {
     pub outpoint: OutPoint,
     pub version: u32,
@@ -64,6 +67,9 @@ impl TransactionFinalizer for Authorization {
     }
 
     fn verify_finalized(&self, tx: &Transaction) -> Result<(), ClientModuleError> {
+        // Fail while construction/funding is still rollbackable, rather than
+        // submitting an over-budget attempt with reserved notes.
+        common::resources::check_transaction(tx).map_err(ClientModuleError::other)?;
         if let Some(plan) = &self.receipt {
             plan.verify(tx).map_err(ClientModuleError::other)?;
         }
