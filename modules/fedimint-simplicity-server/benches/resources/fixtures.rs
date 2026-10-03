@@ -7,13 +7,19 @@ use fedimint_core::core::{DynInput, DynOutput};
 use fedimint_core::db::mem_impl::MemDatabase;
 use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::encoding::Encodable;
-use fedimint_core::module::AmountUnit;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
+use fedimint_core::module::{AmountUnit, CoreConsensusVersion};
 use fedimint_core::secp256k1::{Keypair, Message, SECP256K1, SecretKey};
 use fedimint_core::transaction::{Transaction, TransactionError, TransactionSignature};
 use fedimint_core::{Amount, OutPoint, TransactionId};
-use fedimint_dummy_common::DummyOutput;
-use fedimint_server_core::{ModuleTransactionContext, ServerModule, TransactionConsensusContext};
+use fedimint_dummy_common::config::{DummyConfig, DummyConfigConsensus, DummyConfigPrivate};
+use fedimint_dummy_common::{DummyInput, DummyOutput};
+use fedimint_dummy_server::Dummy;
+use fedimint_server::consensus::transaction::{TxProcessingMode, process_transaction_with_dbtx};
+use fedimint_server_core::{
+    DynServerModule, ModuleTransactionContext, ServerModule, ServerModuleRegistry,
+    TransactionConsensusContext,
+};
 use fedimint_simplicity_client::compiler::{Value, ValueConstructible, arguments, witnesses};
 use fedimint_simplicity_client::{
     ContractProgram, assets, market, placeholder_signature, sign_transaction,
@@ -25,7 +31,7 @@ use fedimint_simplicity_common::jet::FedimintJet;
 use fedimint_simplicity_common::runtime::{self, Environment, EnvironmentInput, EnvironmentOutput};
 use fedimint_simplicity_common::{
     ContractError, ContractInput, ContractOutput, ContractOutputError, MAX_PROGRAM_BYTES,
-    MAX_WITNESS_BYTES, output_fee,
+    MAX_WITNESS_BYTES, output_fee, resources,
 };
 use fedimint_simplicity_server::Simplicity;
 use fedimint_simplicity_server::db::{AssetKey, BlockVoteKey, ContractKey, StoredContract};
@@ -34,6 +40,7 @@ use simplicity::node::CoreConstructible;
 use simplicity::{BitWriter, ConstructNode, encode};
 
 pub const MODULE: u16 = 4;
+const FUNDING_MODULE: u16 = 5;
 pub const EXECUTION_CASES: &[&str] = &[
     "unit_v0",
     "unit_v1",
@@ -84,6 +91,13 @@ pub const TRANSACTION_CASES: &[&str] = &[
     "signature_cost_32",
     "asset_failure",
     "late_bad_signature",
+    "signature_budget",
+    "signature_split_budget",
+    "signature_budget_over",
+    "constants_3",
+    "constants_4",
+    "creation_19",
+    "creation_20",
 ];
 
 pub fn federation() -> FederationId {
@@ -119,6 +133,7 @@ pub struct Fixture {
     decode_error: Option<ContractError>,
     execution_error: Option<ContractError>,
     validation_error: Option<ContractError>,
+    preflight_error: Option<ContractError>,
 }
 
 static FIXTURES: LazyLock<BTreeMap<&str, Fixture>> = LazyLock::new(|| {
@@ -153,6 +168,11 @@ impl Fixture {
 
     pub async fn database(&self) -> Database {
         let db = Database::new(MemDatabase::new(), ModuleDecoderRegistry::default());
+        self.seed(&db).await;
+        db
+    }
+
+    async fn seed(&self, db: &Database) {
         let mut dbtx = db.begin_transaction().await;
         for (input, output) in self.inputs.iter().zip(&self.consumed) {
             dbtx.insert_new_entry(
@@ -170,7 +190,60 @@ impl Fixture {
         }
         dbtx.insert_new_entry(&BlockVoteKey(0.into()), &5u64).await;
         dbtx.commit_tx().await;
-        db
+    }
+
+    pub fn funded_transaction(&self) -> Transaction {
+        let mut transaction = self.transaction.clone();
+        transaction.inputs.push(DynInput::from_typed(
+            FUNDING_MODULE,
+            DummyInput {
+                amount: Amount::from_sats(100_000),
+                unit: AmountUnit::BITCOIN,
+                pub_key: key().public_key(),
+            },
+        ));
+        // Foreign funding is excluded from all inner Simplicity signatures.
+        let keys = vec![key(); transaction.inputs.len()];
+        sign_transaction(&mut transaction, &keys).expect("funded outer signatures");
+        assert!(transaction.consensus_encode_to_vec().len() <= Transaction::MAX_TX_SIZE);
+        transaction
+    }
+
+    pub async fn core_database(&self) -> (Database, ServerModuleRegistry) {
+        let db = Database::new(
+            MemDatabase::new(),
+            ModuleDecoderRegistry::new([
+                (
+                    MODULE,
+                    fedimint_simplicity_common::KIND,
+                    Simplicity::decoder(),
+                ),
+                (
+                    FUNDING_MODULE,
+                    fedimint_dummy_common::KIND,
+                    Dummy::decoder(),
+                ),
+            ]),
+        );
+        self.seed(&db.with_prefix_module_id(MODULE).0).await;
+        let modules = ServerModuleRegistry::new([
+            (
+                MODULE,
+                fedimint_simplicity_common::KIND,
+                DynServerModule::from(
+                    Simplicity::new_for_testing(vec![0.into()]).expect("one guardian"),
+                ),
+            ),
+            (
+                FUNDING_MODULE,
+                fedimint_dummy_common::KIND,
+                DynServerModule::from(Dummy::new(DummyConfig {
+                    private: DummyConfigPrivate,
+                    consensus: DummyConfigConsensus,
+                })),
+            ),
+        ]);
+        (db, modules)
     }
 
     fn finish(&mut self) {
@@ -264,6 +337,7 @@ fn empty(program: Vec<u8>, witness: Vec<u8>, cmr: [u8; 32]) -> Fixture {
         decode_error: None,
         execution_error: None,
         validation_error: None,
+        preflight_error: None,
     }
 }
 
@@ -339,6 +413,7 @@ fn encoded(program: Vec<u8>, witness: Vec<u8>) -> Fixture {
 fn build(name: &str) -> Fixture {
     let mut fixture = match name {
         "owner" | "late_bad_signature" => owner(name == "late_bad_signature"),
+        "creation_19" | "creation_20" => creation_case(if name == "creation_19" { 19 } else { 20 }),
         "market_issue" | "market_resolve" | "bad_oracle" => market_case(name),
         "cost_near_limit" | "cost_32" | "cost_over_limit" => {
             // 3 * 2^14 unit executions fit near the cost cap; doubling does not.
@@ -355,7 +430,11 @@ fn build(name: &str) -> Fixture {
             }
             fixture
         }
-        "signature_cost_near_limit" | "signature_cost_32" => {
+        "signature_cost_near_limit"
+        | "signature_cost_32"
+        | "signature_budget"
+        | "signature_budget_over"
+        | "signature_split_budget" => {
             let program = simplicity::types::Context::with_context(|ctx| {
                 let mut bytes = [0; 128];
                 bytes[..32].copy_from_slice(&key().x_only_public_key().0.serialize());
@@ -373,11 +452,19 @@ fn build(name: &str) -> Fixture {
                 )
                 .expect("verify signature");
                 let mut half = node.clone();
-                for _ in 0..7 {
+                let levels = match name {
+                    "signature_split_budget" => 3,
+                    "signature_budget" => 5,
+                    "signature_budget_over" => 6,
+                    _ => 7,
+                };
+                for _ in 0..levels {
                     half = node.clone();
                     node = Arc::comp(&node, &node).expect("repeat signature check");
                 }
-                node = Arc::comp(&node, &half).expect("192 signature checks");
+                if name.starts_with("signature_cost") {
+                    node = Arc::comp(&node, &half).expect("192 signature checks");
+                }
                 node.finalize_types()
                     .expect("closed types")
                     .to_vec_without_witness()
@@ -386,6 +473,8 @@ fn build(name: &str) -> Fixture {
             assert_eq!(fixture.decode_error, None);
             if name == "signature_cost_32" {
                 duplicate(&mut fixture, 32, false);
+            } else if name == "signature_split_budget" {
+                duplicate(&mut fixture, 4, false);
             }
             fixture
         }
@@ -400,7 +489,7 @@ fn build(name: &str) -> Fixture {
             );
             fixture
         }
-        "large_constant" => {
+        "large_constant" | "constants_3" | "constants_4" => {
             let program = simplicity::types::Context::with_context(|ctx| {
                 let word = simplicity::Value::from_byte_array([0x55; 4096])
                     .to_word()
@@ -412,8 +501,15 @@ fn build(name: &str) -> Fixture {
                     .expect("closed types")
                     .to_vec_without_witness()
             });
-            let fixture = encoded(program, vec![]);
+            let mut fixture = encoded(program, vec![]);
             assert_eq!(fixture.decode_error, None);
+            if name != "large_constant" {
+                duplicate(
+                    &mut fixture,
+                    if name == "constants_3" { 3 } else { 4 },
+                    false,
+                );
+            }
             fixture
         }
         "large_witness" => {
@@ -528,6 +624,60 @@ fn build(name: &str) -> Fixture {
         _ => {}
     }
     fixture.finish();
+    fixture.preflight_error = match name {
+        "cost_near_limit"
+        | "cost_32"
+        | "signature_cost_near_limit"
+        | "signature_cost_32"
+        | "signature_budget_over"
+        | "wide_value"
+        | "large_witness"
+        | "constants_4"
+        | "creation_20" => Some(ContractError::Limit),
+        _ => fixture.decode_error.clone(),
+    };
+    fixture
+}
+
+fn creation_case(count: u8) -> Fixture {
+    let mut fixture = compiled("fn main() {}");
+    let mut creators = vec![];
+    let mut creations = vec![];
+    let mut ids = vec![];
+    for index in 0..count {
+        let creator = Keypair::from_secret_key(
+            SECP256K1,
+            &SecretKey::from_slice(&[index + 2; 32]).expect("fixed creator"),
+        );
+        let (creation, created) =
+            assets::creation(federation(), MODULE, &creator, vec![0]).expect("creation batch");
+        creators.push(creator);
+        creations.push(creation);
+        ids.extend(created);
+    }
+    ids.sort();
+    let mut authority = fixture.consumed[0].clone();
+    authority.amount = Amount::ZERO;
+    authority.extension = Some(AssetExtension::Bundle(AssetBundle {
+        balances: vec![],
+        authorities: ids,
+    }));
+    fixture.transaction.outputs = vec![
+        DynOutput::from_typed(MODULE, authority),
+        DynOutput::from_typed(
+            MODULE,
+            assets::action_output(AssetActions {
+                creations,
+                ..Default::default()
+            })
+            .expect("creation action"),
+        ),
+    ];
+    fixture.finish();
+    for creator in creators {
+        assets::sign_creation(&mut fixture.transaction, federation(), MODULE, &creator)
+            .expect("creation authorization");
+    }
     fixture
 }
 
@@ -680,6 +830,11 @@ pub fn check_all() {
     let module = Simplicity::new_for_testing(vec![0.into()]).expect("one guardian");
     for (name, fixture) in FIXTURES.iter() {
         assert_eq!(
+            resources::check_transaction(&fixture.transaction).err(),
+            fixture.preflight_error,
+            "{name}: resource preflight"
+        );
+        assert_eq!(
             runtime::decode_program(&fixture.inputs[0]).err(),
             fixture.decode_error,
             "{name}: decode"
@@ -732,15 +887,29 @@ pub fn check_all() {
                 error, fixture.validation_error,
                 "{name}: guardian validation"
             );
+            let transaction = fixture.funded_transaction();
+            let (db, modules) = fixture.core_database().await;
+            let expected = fixture
+                .preflight_error
+                .clone()
+                .or_else(|| fixture.validation_error.clone());
+            let error = process_core(&db, &modules, &transaction)
+                .await
+                .err()
+                .map(contract_error);
+            assert_eq!(error, expected, "{name}: funded core submission");
         });
     }
 }
 
 pub fn manifest() -> serde_json::Value {
     serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "allocation_profiler": cfg!(feature = "bench-alloc"),
         "max_transaction_bytes": Transaction::MAX_TX_SIZE,
+        "max_redemption_bytes": resources::MAX_TRANSACTION_REDEMPTION_BYTES,
+        "max_transaction_milliweight": resources::MAX_TRANSACTION_MILLIWEIGHT,
+        "creation_signature_milliweight": resources::CREATION_SIGNATURE_MILLIWEIGHT,
         "fixtures": FIXTURES.iter().map(|(name, fixture)| {
             let program = runtime::decode_program(&fixture.inputs[0]).ok();
             let bounds = program.as_ref().map(|program| program.bounds());
@@ -748,6 +917,8 @@ pub fn manifest() -> serde_json::Value {
                 "name": name,
                 "transaction_sha256": fixture.transaction.tx_hash().to_string(),
                 "transaction_bytes": fixture.transaction.consensus_encode_to_vec().len(),
+                "funded_transaction_sha256": fixture.funded_transaction().tx_hash().to_string(),
+                "funded_transaction_bytes": fixture.funded_transaction().consensus_encode_to_vec().len(),
                 "inputs": fixture.inputs.len(), "outputs": fixture.transaction.outputs.len(),
                 "first_program_bytes": fixture.inputs[0].program.len(),
                 "first_witness_bytes": fixture.inputs[0].witness.len(),
@@ -758,7 +929,47 @@ pub fn manifest() -> serde_json::Value {
                 "output_fee_msat": fixture.transaction.outputs.iter().filter_map(|output| output.as_any().downcast_ref::<ContractOutput>()).map(|output| output_fee(output).msats).sum::<u64>(),
                 "decode_error": fixture.decode_error.as_ref().map(ToString::to_string),
                 "validation_error": fixture.validation_error.as_ref().map(ToString::to_string),
+                "preflight_error": fixture.preflight_error.as_ref().map(ToString::to_string),
             })
         }).collect::<Vec<_>>()
     })
+}
+
+pub async fn process_core(
+    db: &Database,
+    modules: &ServerModuleRegistry,
+    transaction: &Transaction,
+) -> Result<(), TransactionError> {
+    // Each iteration starts from the same snapshot and drops all changes. This
+    // includes MemDatabase snapshot creation and processing, but no commit/I/O.
+    let mut dbtx = db.begin_transaction_nc().await;
+    process_transaction_with_dbtx(
+        modules.clone(),
+        &mut dbtx.to_ref_nc(),
+        transaction,
+        CoreConsensusVersion::new(2, 1),
+        TxProcessingMode::Submission,
+        TransactionConsensusContext {
+            federation_id: federation(),
+            session_index: 10,
+        },
+    )
+    .await
+}
+
+fn contract_error(error: TransactionError) -> ContractError {
+    match error {
+        TransactionError::Input(error) => error
+            .as_any()
+            .downcast_ref::<ContractError>()
+            .expect("Simplicity input error")
+            .clone(),
+        TransactionError::Output(error) => error
+            .as_any()
+            .downcast_ref::<ContractOutputError>()
+            .expect("Simplicity output error")
+            .0
+            .clone(),
+        error => panic!("unexpected core error: {error}"),
+    }
 }

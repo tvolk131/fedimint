@@ -6,6 +6,7 @@ pub mod assets;
 pub mod compiler;
 pub mod config;
 pub mod jet;
+pub mod resources;
 pub mod runtime;
 
 #[cfg(test)]

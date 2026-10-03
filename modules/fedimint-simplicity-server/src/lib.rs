@@ -31,7 +31,6 @@ use fedimint_simplicity_common::assets::{AssetId, AssetRecord};
 use fedimint_simplicity_common::config::{
     SimplicityClientConfig, SimplicityConfig, SimplicityConfigConsensus, SimplicityConfigPrivate,
 };
-use fedimint_simplicity_common::runtime::decode_program;
 use fedimint_simplicity_common::{
     BlockCountVote, ContractError, ContractInput, ContractOutcome, ContractOutput,
     ContractOutputError, MAX_CONTRACTS, MODULE_CONSENSUS_VERSION, SimplicityCommonInit,
@@ -213,8 +212,21 @@ impl ServerModule for Simplicity {
         dbtx.insert_entry(&BlockVoteKey(peer), &item.0).await;
         Ok(())
     }
-    fn verify_input(&self, input: &ContractInput) -> Result<(), ContractError> {
-        decode_program(input).map(|_| ())
+    fn verify_transaction(
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<(), fedimint_core::transaction::TransactionError> {
+        // Core calls this once across all instances. Program decoding happens
+        // here rather than in the parallel per-input verification pass.
+        fedimint_simplicity_common::resources::check_transaction(context.transaction).map_err(
+            |error| {
+                fedimint_core::transaction::TransactionError::Input(
+                    fedimint_core::core::DynInputError::from_typed(
+                        context.module_instance_id,
+                        error,
+                    ),
+                )
+            },
+        )
     }
     async fn process_input<'a, 'b, 'c>(
         &'a self,

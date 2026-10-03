@@ -8,10 +8,10 @@ use futures::StreamExt;
 use super::*;
 use crate::db::{AssetKey, NamespaceKey};
 
-const OTHER: u16 = 7;
+pub(super) const OTHER: u16 = 7;
 const INSTANCES: [u16; 2] = [SIMP, OTHER];
 
-fn harness() -> Harness {
+pub(super) fn harness() -> Harness {
     let mut decoders = ModuleDecoderRegistry::default();
     let mut modules = ServerModuleRegistry::default();
     for id in INSTANCES {
@@ -37,7 +37,7 @@ fn harness() -> Harness {
     }
 }
 
-async fn snapshot(fed: &Harness) -> Vec<(Vec<u8>, Vec<u8>)> {
+pub(super) async fn snapshot(fed: &Harness) -> Vec<(Vec<u8>, Vec<u8>)> {
     fed.db
         .begin_transaction_nc()
         .await

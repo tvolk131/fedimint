@@ -31,6 +31,30 @@ pub async fn process_transaction_with_dbtx(
         CONSENSUS_TX_PROCESSED_OUTPUTS.observe(out_count as f64);
     });
 
+    let module_ids = transaction
+        .inputs
+        .iter()
+        .map(|input| input.module_instance_id())
+        .chain(
+            transaction
+                .outputs
+                .iter()
+                .map(|output| output.module_instance_id()),
+        )
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut verified_kinds = std::collections::BTreeSet::new();
+    for &module_instance_id in &module_ids {
+        let module = modules.get_expect(module_instance_id);
+        if verified_kinds.insert(module.module_kind()) {
+            module.verify_transaction(&ModuleTransactionContext {
+                transaction,
+                consensus,
+                module_instance_id,
+                validation: None,
+            })?;
+        }
+    }
+
     // We can not return the error here as errors are not returned in a
     // specified order and the client still expects consensus on the error.
     // Since the error is not extensible at the moment we need to
@@ -46,17 +70,6 @@ pub async fn process_transaction_with_dbtx(
         })
         .map_err(|_| TransactionError::InvalidWitnessLength)?;
 
-    let module_ids = transaction
-        .inputs
-        .iter()
-        .map(|input| input.module_instance_id())
-        .chain(
-            transaction
-                .outputs
-                .iter()
-                .map(|output| output.module_instance_id()),
-        )
-        .collect::<std::collections::BTreeSet<_>>();
     let mut validations = std::collections::BTreeMap::new();
     for module_instance_id in module_ids {
         let validation = modules

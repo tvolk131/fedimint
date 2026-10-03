@@ -25,6 +25,13 @@ replay uses the session being replayed. Existing modules retain their original
 validation behavior through default hook implementations. No new core transaction
 wire format is introduced.
 
+A stateless core verification hook runs once per participating module kind before
+per-input verification. Simplicity uses it to bound redemption bytes and aggregate
+static execution cost across all its instances, including creation authorization
+work, before database-dependent validation. Its decoder runs sequentially in this
+phase; other modules retain their existing per-input verification. The wallet
+checks the same budget before committing submission and funding reservations.
+
 Core invokes a module validation hook against the unmodified transaction snapshot
 before processing inputs or outputs. A transaction-local, type-erased result is
 passed only to that module's processing hooks. Simplicity resolves every consumed

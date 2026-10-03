@@ -127,6 +127,18 @@ pub trait ServerModule: Debug + Sized {
         peer_id: PeerId,
     ) -> anyhow::Result<()>;
 
+    /// Stateless checks across all instances of this module kind, before any
+    /// per-input verification or database access. Core calls this once per
+    /// kind, using the lowest participating instance ID for the context.
+    /// Inspect all this kind's decoded inputs/outputs, not only that
+    /// instance. The default preserves existing modules' behavior. Outer
+    /// signatures are not yet checked.
+    fn verify_transaction(
+        _context: &ModuleTransactionContext<'_>,
+    ) -> Result<(), fedimint_core::transaction::TransactionError> {
+        Ok(())
+    }
+
     // Use this function to parallelise stateless cryptographic verification of
     // inputs across a transaction. All inputs of a transaction are verified
     // before any input is processed.
@@ -315,6 +327,12 @@ pub trait IServerModule: Debug {
     // before any input is processed.
     fn verify_input(&self, input: &DynInput) -> Result<(), DynInputError>;
 
+    /// See [`ServerModule::verify_transaction`].
+    fn verify_transaction(
+        &self,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<(), fedimint_core::transaction::TransactionError>;
+
     async fn validate_transaction(
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
@@ -488,6 +506,13 @@ where
         context: &ModuleTransactionContext<'_>,
     ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
         <Self as ServerModule>::validate_transaction(self, dbtx, context).await
+    }
+
+    fn verify_transaction(
+        &self,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<(), fedimint_core::transaction::TransactionError> {
+        <Self as ServerModule>::verify_transaction(context)
     }
 
     /// Try to spend a transaction input. On success all necessary updates will

@@ -2,6 +2,7 @@ mod context;
 mod instances;
 mod market_hardening;
 mod network;
+mod resources;
 
 use fedimint_core::secp256k1::Message;
 use fedimint_simplicity_client::{assets, market};

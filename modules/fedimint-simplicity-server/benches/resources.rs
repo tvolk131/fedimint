@@ -7,7 +7,7 @@ use std::hint::black_box;
 
 use fedimint_core::db::DatabaseTransaction;
 use fedimint_server_core::{ModuleTransactionContext, ServerModule, TransactionConsensusContext};
-use fedimint_simplicity_common::runtime;
+use fedimint_simplicity_common::{resources, runtime};
 use fedimint_simplicity_server::Simplicity;
 use fixtures::{DECODE_CASES, EXECUTION_CASES, TRANSACTION_CASES, case};
 use simplicity::BitMachine;
@@ -84,6 +84,31 @@ fn guardian_validation(bencher: divan::Bencher, name: &str) {
     // Use the production module hook, with a warm read-only DB transaction.
     rt.block_on(validate(&module, &mut dbtx, fixture));
     bencher.bench_local(|| rt.block_on(validate(&module, &mut dbtx, fixture)));
+}
+
+#[divan::bench(args = TRANSACTION_CASES)]
+fn transaction_preflight(bencher: divan::Bencher, name: &str) {
+    let fixture = case(name);
+    bencher.bench(|| {
+        black_box(resources::check_transaction(black_box(
+            &fixture.transaction,
+        )))
+    });
+}
+
+#[divan::bench(args = TRANSACTION_CASES)]
+fn core_submission(bencher: divan::Bencher, name: &str) {
+    let fixture = case(name);
+    let rt = fixtures::executor();
+    let transaction = fixture.funded_transaction();
+    let (db, modules) = rt.block_on(fixture.core_database());
+    bencher.bench_local(|| {
+        black_box(rt.block_on(fixtures::process_core(
+            &db,
+            &modules,
+            black_box(&transaction),
+        )))
+    });
 }
 
 async fn validate(
