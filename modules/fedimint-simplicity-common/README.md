@@ -162,6 +162,8 @@ The [resource benchmark harness](../fedimint-simplicity-server/benches/resources
 measures decoding, execution, context costs and guardian validation separately,
 with representative, near-limit and rejected inputs. Its measurements inform
 future calibration; they do not set or change the experimental coefficients.
+Raspberry Pi 5 is the minimum guardian performance target. Production calibration
+requires measurements on that hardware; faster-machine results alone are insufficient.
 
 Spending removes the live UTXO and recovery annotation. Any state needed by a
 successor must be carried forward. Fedimint's existing transaction/session history

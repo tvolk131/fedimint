@@ -26,8 +26,10 @@ pub struct EnvironmentInput {
 
 #[derive(Debug, Clone)]
 pub struct Environment {
-    pub inputs: Vec<EnvironmentInput>,
-    pub actions: crate::assets::AssetActions,
+    /// Transaction-wide data is shared across input executions. Only the
+    /// current contract, its clocks/index, and versioned intent hash vary.
+    pub inputs: Arc<[EnvironmentInput]>,
+    pub actions: Arc<crate::assets::AssetActions>,
     pub signature_hash: [u8; 32],
     pub session_index: u64,
     pub block_count: u64,
@@ -36,7 +38,7 @@ pub struct Environment {
     pub creation_block_count: u64,
     pub input_index: u32,
     pub input_count: u32,
-    pub outputs: Vec<EnvironmentOutput>,
+    pub outputs: Arc<[EnvironmentOutput]>,
 }
 
 pub fn decode_program(input: &ContractInput) -> Result<Arc<RedeemNode>, ContractError> {

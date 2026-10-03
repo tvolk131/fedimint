@@ -103,8 +103,9 @@ fn environment() -> Environment {
                 outpoint: input().outpoint,
                 contract: legacy(),
             },
-        ],
-        actions: actions(),
+        ]
+        .into(),
+        actions: actions().into(),
         signature_hash: [0xab; 32],
         session_index: 0x0123456789abcdef,
         block_count: 0x1020304050607080,
@@ -134,6 +135,7 @@ fn environment() -> Environment {
                 hash: [0xdd; 32],
                 contract: Some(ContractOutput::action_output(actions())),
             },
-        ],
+        ]
+        .into(),
     }
 }

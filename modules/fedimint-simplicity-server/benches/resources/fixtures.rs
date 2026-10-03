@@ -184,7 +184,7 @@ impl Fixture {
             .expect("outer signatures");
         // Every case, including adversarial cases, fits the actual outer limit.
         assert!(self.transaction.consensus_encode_to_vec().len() <= Transaction::MAX_TX_SIZE);
-        let outputs: Vec<_> = self
+        let outputs: Arc<[_]> = self
             .transaction
             .outputs
             .iter()
@@ -200,13 +200,14 @@ impl Fixture {
                 }),
             })
             .collect();
-        let actions = outputs
+        let actions: Arc<AssetActions> = outputs
             .iter()
             .filter_map(|output| output.contract.as_ref()?.actions())
             .next()
             .cloned()
-            .unwrap_or_default();
-        let inputs: Vec<_> = self
+            .unwrap_or_default()
+            .into();
+        let inputs: Arc<[_]> = self
             .inputs
             .iter()
             .zip(&self.consumed)
