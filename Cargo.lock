@@ -4908,6 +4908,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "bitcoin",
+ "divan",
  "erased-serde",
  "fedimint-api-client",
  "fedimint-client",
@@ -4933,6 +4934,7 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_json",
+ "simplicity-lang",
  "tempfile",
  "tokio",
 ]
