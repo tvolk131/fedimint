@@ -8,6 +8,14 @@ readme = { workspace = true }
 repository = { workspace = true }
 version = { workspace = true }
 
+[features]
+# Only installs an allocation profiler in the resources benchmark executable.
+bench-alloc = []
+
+[[bench]]
+harness = false
+name = "resources"
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -21,6 +29,7 @@ serde = { workspace = true }
 [dev-dependencies]
 axum = { workspace = true }
 bitcoin = { workspace = true }
+divan = "0.1.21"
 fedimint-api-client = { workspace = true }
 fedimint-client = { workspace = true }
 fedimint-connectors = { workspace = true }
@@ -39,6 +48,9 @@ fedimint-simplicity-client = { workspace = true }
 fedimint-testing-core = { workspace = true }
 rand = { workspace = true }
 serde_json = { workspace = true }
+simplicity-lang = { version = "=0.9.0", default-features = false, features = [
+    "bitcoin",
+] }
 tbs = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }

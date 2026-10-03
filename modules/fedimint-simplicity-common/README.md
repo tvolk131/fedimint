@@ -158,6 +158,11 @@ recovery byte. These are experimental fixed coefficients, not a benchmarked
 production fee policy. The submitted redemption program's static bound determines
 the fee; guardians do not time execution or charge script cost on creation.
 
+The [resource benchmark harness](../fedimint-simplicity-server/benches/resources/README.md)
+measures decoding, execution, context costs and guardian validation separately,
+with representative, near-limit and rejected inputs. Its measurements inform
+future calibration; they do not set or change the experimental coefficients.
+
 Spending removes the live UTXO and recovery annotation. Any state needed by a
 successor must be carried forward. Fedimint's existing transaction/session history
 may retain all original bytes indefinitely: removing the live record does **not**
