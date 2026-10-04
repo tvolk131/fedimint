@@ -1,3 +1,4 @@
+mod api;
 mod assets;
 mod config;
 mod preflight;

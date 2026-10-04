@@ -96,6 +96,17 @@ Module API version 0.0 exposes `contract(OutPoint) -> Option<StoredContract>` an
 clocks. Neither response by itself is a proof of federation consensus; clients
 must use the normal federation query/transaction confirmation mechanisms.
 
+`contract` and the v0.1 `asset` endpoint each perform one database point lookup.
+`block_count` reads at most one vote per configured guardian and sorts that bounded
+set. None compiles or executes a program, enumerates contracts, or scans history.
+Regression tests exercise the real endpoint wrappers with maximum-shaped records:
+compact JSON result budgets are 16 KiB for a contract, 1 KiB for an asset origin,
+and 20 bytes for the block count, excluding the transport envelope. These are
+regression budgets, not additional runtime response limits. Tests also cover
+malformed parameters, missing/spent contracts, and retained asset origins.
+Per-request work stays bounded by record/configuration limits; simultaneous calls,
+transport parsing, and core history downloads are outside these module API bounds.
+
 ## Execution environment v0
 
 | Jet | Result / indexing |
