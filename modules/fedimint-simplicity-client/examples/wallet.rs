@@ -15,7 +15,9 @@ use fedimint_core::core::OperationId;
 use fedimint_core::db::Database;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_core::{Amount, OutPoint, TransactionId};
-use fedimint_mintv2_client::{FinalReceiveOperationState, MintClientInit, MintClientModule};
+use fedimint_mintv2_client::{
+    FinalReceiveOperationState, MintClientInit, MintClientModule, MintOperationMeta,
+};
 use fedimint_rocksdb::RocksDb;
 use fedimint_simplicity_client::common::assets::AssetBundle;
 use fedimint_simplicity_client::states::OperationStatus;
@@ -218,6 +220,26 @@ async fn run(client: &ClientHandle, command: Command) -> anyhow::Result<()> {
                     == FinalReceiveOperationState::Success,
                 "ecash reissuance rejected"
             );
+            let MintOperationMeta::Receive {
+                change_outpoint_range,
+                ..
+            } = client
+                .operation_log()
+                .get_operation(operation)
+                .await
+                .context("missing receive operation")?
+                .meta::<MintOperationMeta>()
+            else {
+                anyhow::bail!("expected receive operation");
+            };
+            // Acceptance precedes note issuance. Wait until the replacement
+            // notes are spendable before shutting down the client.
+            client
+                .await_primary_bitcoin_module_outputs(
+                    operation,
+                    change_outpoint_range.into_iter().collect(),
+                )
+                .await?;
             println!("received");
         }
         Command::Lock { msats } => {
