@@ -21,6 +21,33 @@ whose one-bit sum witness would expand its unselected branch to tens of MiB;
 the existing type guard rejects it before any 128 KiB allocation request, while
 smaller encodings decode successfully. No consensus limit or fee changed.
 
+## Concurrent follow-up
+
+Two fresh-process passes per workload/backend/concurrency cell ran 80 iterations
+per caller at 1/2/4/8/16 callers. This includes warm RocksDB and a real Mint v2
+control but drops all writes. Selected RocksDB results:
+
+| Workload | 1 caller p95 | 16 callers p95 | Throughput, 1 → 16 callers |
+| --- | ---: | ---: | ---: |
+| Packed constants | 18.4–19.8 ms | 48.5–49.1 ms | 53–56 → 485–515/s |
+| Two deep decoder chains | 15.1–16.9 ms | 42.7–43.5 ms | 62–68 → 517–520/s |
+| Mixed workload failing its last signature | 21.6–22.5 ms | 50.5–58.4 ms | 46–47 → 410–450/s |
+| Repeated missing asset lookup | 1.71 ms | 4.91–5.44 ms | 635–637 → 4,581–5,421/s |
+| Mint v2 alone | 1.80–1.85 ms | 8.58–9.18 ms | 585–590 → 5,091–5,248/s |
+| Mint v2 within the alternating mixed workload | 1.86–1.87 ms | 7.99–10.55 ms | — |
+
+Four-caller packed/late-failure p95 stayed around 19.6–22.6 ms. At sixteen,
+packed/late-failure runs consumed roughly 9.6–11 process CPU seconds per elapsed
+second: bounded attempts still saturate this machine. These runs do not establish
+queue fairness or consensus liveness; even the Mint-only control saturates.
+Packed/late-failure process peaks were about 15–17 MiB with MemDatabase and
+81–83 MiB with RocksDB, including setup/cache memory. The baseline differs by
+backend; these are not incremental allocation or production guardian RSS limits.
+The decoder-heavy chain workload does accumulate substantially more memory:
+MemDatabase lifetime peaks rose from 19.6–19.9 MiB at one caller to 57–64 MiB at
+sixteen; RocksDB rose from 85–86 MiB to 122–127 MiB. A per-attempt retention
+budget is not a bound on concurrent guardian memory.
+
 ## Evidence and method
 
 The published tag `codex/simplicity-benchmarks-2026-10-03` preserves the original

@@ -228,6 +228,10 @@ impl Fixture {
                 ),
             ]),
         );
+        self.core_database_on(db).await
+    }
+
+    pub async fn core_database_on(&self, db: Database) -> (Database, ServerModuleRegistry) {
         self.seed(&db.with_prefix_module_id(MODULE).0).await;
         let modules = ServerModuleRegistry::new([
             (
@@ -487,7 +491,7 @@ fn compose_balanced<'brand>(
     nodes.pop().expect("nonempty composition")
 }
 
-fn build(name: &str) -> Fixture {
+pub fn build(name: &str) -> Fixture {
     let mut fixture = match name {
         "owner" | "late_bad_signature" => owner(name == "late_bad_signature"),
         "creation_19" | "creation_20" => creation_case(if name == "creation_19" { 19 } else { 20 }),
@@ -992,7 +996,7 @@ pub async fn process_core(
     .await
 }
 
-fn contract_error(error: TransactionError) -> ContractError {
+pub fn contract_error(error: TransactionError) -> ContractError {
     match error {
         TransactionError::Input(error) => error
             .as_any()

@@ -2,6 +2,8 @@
 //! resources/README.md.
 #[path = "resources/fixtures.rs"]
 mod fixtures;
+#[path = "resources/load.rs"]
+mod load;
 
 use std::hint::black_box;
 
@@ -16,6 +18,10 @@ use simplicity::BitMachine;
 static ALLOC: divan::AllocProfiler = divan::AllocProfiler::system();
 
 fn main() {
+    if let Ok(spec) = std::env::var("FM_SIMPLICITY_BENCH_LOAD") {
+        load::run(&spec);
+        return;
+    }
     // Compilation, signatures, fixture checks, DB seeding and manifest output
     // are outside measurement. --test also checks all fixture expectations.
     fixtures::check_all();

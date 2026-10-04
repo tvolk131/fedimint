@@ -253,7 +253,7 @@ fn context_access(name: &str) -> Fixture {
     fixture
 }
 
-fn build_case(name: &str) -> Case {
+pub fn build_case(name: &str) -> Case {
     let mut fixture = match name {
         "constants_256x32" | "constants_1024x15" | "constants_2048x7" | "constants_4096x3" => {
             let (size, count) = match name {

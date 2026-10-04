@@ -60,6 +60,38 @@ the fully signed transaction's
 encoded size against `Transaction::MAX_TX_SIZE` (49,968 bytes at this revision).
 The same fixed keys, nonce, votes and contract outpoints reproduce the same cases.
 
+## Concurrent validation
+
+`FM_SIMPLICITY_BENCH_LOAD=workload,workers,iterations,backend` runs one fresh
+process and prints JSON. For example:
+
+```sh
+FM_SIMPLICITY_BENCH_LOAD=mixed,4,80,rocks cargo bench --locked \
+  -p fedimint-simplicity-server --bench resources
+```
+
+Workloads: `owner`, `constants_packed`, `chain_768x2`, `mixed_33_bad_last`,
+`context_asset_missing`, `mint`, `mixed`. Backends: `mem`, `rocks`. Caller threads
+are bounded to 1–16; each runs 10–2,000 validations sequentially, starting at a
+barrier. The mixed case alternates packed constants and a real Mint v2 one-note
+input/output transaction (zero mint fees, coherent seeded issuance state).
+Every result must match its prechecked outcome. Writes are always dropped.
+
+This is closed-loop core validation against a small warm database, excluding
+network queues, repeated pending-submission revalidation, consensus scheduling,
+database commits and sustained history growth. Scoped caller threads drive a
+shared two-worker Tokio runtime; this does not reproduce the production API
+executor. Mint config generation, selected fixture construction and warm-up are
+outside timing. CPU seconds include all process threads during the measured
+interval. Nearest-rank latency percentiles are reported separately for Mint and
+Simplicity. Short runs and small per-class samples do not establish tail bounds.
+
+On Unix, `getrusage` supplies process CPU and lifetime peak RSS. RSS includes
+setup, warm-up, database caches, stacks and C allocations; the two peak readings
+must not be subtracted to claim incremental validation memory. Only the selected
+workload is constructed. Use the normal allocator, run cells sequentially in
+fresh processes, repeat, and retain raw JSON outside the branch.
+
 ## What each stage measures
 
 | Stage | Scope |
