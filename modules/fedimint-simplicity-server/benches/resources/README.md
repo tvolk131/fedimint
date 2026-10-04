@@ -94,7 +94,7 @@ fresh processes, repeat, and retain raw JSON outside the branch.
 
 ## Persistent storage
 
-`FM_SIMPLICITY_BENCH_STORAGE=scenario,count` commits 1–10,000 operations to a
+`FM_SIMPLICITY_BENCH_STORAGE=scenario,count` commits 1–1,000,000 operations to a
 fresh RocksDB and prints JSON. For example:
 
 ```sh
@@ -120,6 +120,60 @@ compression and metadata after flushing; they are not fully compacted steady-sta
 sizes or a production disk bound. Session occupancy and real funding change the
 overhead. Only annotations are randomized: shared fixture policies/state may
 compress more than real contracts. Retain raw results outside the branch.
+
+After population and full record scans, storage runs sample up to 1,024
+contract/origin lookups and missing-contract lookups, then 100 core validations
+of the same sampled outpoint with writes dropped. These measure warm/scanned
+state, not cold random I/O, sustained writes, or large-transaction execution.
+Record accounting streams the database instead of collecting all records in RAM.
+
+## Large-history recovery
+
+```sh
+FM_SIMPLICITY_BENCH_SCALE=100000,100 cargo bench --locked \
+  -p fedimint-simplicity-server --bench resources
+```
+
+Arguments are operations (100–1,000,000) and wallet ownership stride (1–1,000).
+The count must be a multiple of four times the stride. Each selected operation
+cycles through an owned live contract, a terminal spend, a foreign-recipient
+contract with a sender receipt, and creation/issuance of two independent assets.
+Other operations create foreign contracts with encrypted annotations; those at
+indices divisible by four also contain 800 bytes of application data. Terminal/issuance operations add a
+second transaction. All transactions pass real core validation, pay exact module
+fees through dummy funding, and enter signed 100-transaction history batches.
+The receipt fixture uses the public commitment and pinned v1 envelope/KDF; real
+submission-finalizer integration is covered by the existing network tests.
+
+Three fresh child processes recover cleanly, exit abruptly halfway through the
+committed session prefix, and reopen/resume that wallet. This simulates a process
+crash, not power loss or interrupted storage hardware. Recovery calls production
+`WalletStore::sync` using a fixed mnemonic-derived module root, built-in templates,
+and the real quorum-query/cache layer. Four simulated peer identities read one
+RocksDB through an in-process raw API. This exercises ordered module replay, not
+network transport, peer disagreement, Aleph consensus, full `Client::recover`
+bootstrap, or other modules' recovery. The separate expected-state file is read
+only after recovery for verification; it supplies no recovery data.
+
+Assertions compare all live/spent records and complete confirmed transaction
+encodings (including witnesses/signatures), sender-only receipts and asset
+successors; check idempotent resync; ensure a
+restarted process does not fetch sessions before its saved cursor; and validate
+native and asset-authority spends built from recovered descriptors/keys. Recovery
+RSS is captured before materializing the wallet's complete history; enumeration
+has a separate time/RSS measurement. RSS includes the simulated guardian database,
+JSON transport, quorum cache and wallet, so it is not standalone client memory.
+Fresh processes reset process/database caches, but the OS page cache remains warm
+from generation and preceding phases. These are not cold-device measurements.
+
+Response-byte counts sum serialized JSON returned across quorum peers, including
+hex encoding and repeated responses, but omit network/TLS envelopes. Counting
+serializes responses an extra time; that overhead is included in recovery timing.
+Timings also include wallet opening, but exclude generator setup, guardian API
+setup, oracle comparisons and post-recovery spend checks. Checkpoint bytes are
+flushed snapshots, not compacted steady-state or lifetime storage bounds. Use the
+normal allocator and run cells sequentially without competing builds. Keep raw
+JSON outside the branch; preserve compact comparisons in `RESULTS.md`.
 
 ## What each stage measures
 
@@ -255,8 +309,8 @@ is the least significant bit of byte zero. No PR fuzz/smoke job is added.
 
 This is a targeted exploration, not an exhaustive adversarial maximum search. It does not
 exercise every combination of frame/cell/type limits, worst-case canonical
-sharing/type inference, all market branches, large historical databases,
-recovery scans or multiple module instances at once.
+sharing/type inference, all market branches or multiple module instances at once. Large-state and
+recovery coverage above uses separate workloads and a controlled transport.
 Those remain relevant before production calibration, alongside measurements on
 guardian-class Linux hardware and concurrent invalid-submission load.
 

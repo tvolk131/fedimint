@@ -100,6 +100,80 @@ and wallet-recovery measurements remain necessary to assess record-count costs.
 No rent, expiry, pruning or refunds are introduced. Coefficients are deterministic
 and must agree across guardians.
 
+## Large-state and recovery follow-up
+
+The opt-in scale harness uses real validation, durable RocksDB commits, signed
+100-transaction session histories and production wallet replay. A controlled
+four-peer transport reads one guardian database through the real quorum/cache
+layer. These measurements are module replay, not full client bootstrap or real
+network recovery. Same M4 Pro (14 cores, 48 GiB), macOS 26.6.2, Rust 1.98.1,
+optimized bench profile and normal allocator; cells ran sequentially without
+competing builds. See [methodology](README.md#large-history-recovery) for scope.
+
+| Operations | Wallet records / interactions | Clean replay | Combined process peak RSS | Response JSON | Guardian checkpoint |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 10,000, 1% selected | 100 / 150 | 0.35 s | 160 MiB | 28.1 MB | 8.50 MB |
+| 100,000, 1% selected | 1,000 / 1,500 | 3.22–3.35 s | 211 MiB | 281 MB | 84.8 MB |
+| 1,000,000, 1% selected | 10,000 / 15,000 | 38.30 s | 221 MiB | 2.81 GB | 854 MB |
+| 10,000, all selected | 10,000 / 15,000 | 2.13–2.18 s | 179–184 MiB | 39.9 MB | 8.59 MB |
+| 100,000, all selected | 100,000 / 150,000 | 23.22 s | 241 MiB | 399 MB | 83.7 MB |
+
+Ranges reflect two runs; other rows are single runs. MB/GB are decimal and MiB
+is binary. Raw JSON remains outside the branch.
+
+Selected operations cycle through live native holdings, terminal spends,
+sender-only receipts, and two-asset creation/issuance with successors. Half the
+wallet's contract records are spent. Extra spends make the million-operation
+case 1,005,000 accepted transactions across 10,050 completed sessions. It recovered
+all records/history; validated native and asset-authority spends using recovered
+keys; and passed interruption/resume and idempotent resync checks. Restart began
+at session 5,025, downloaded no earlier session, and finished in 16.15 s. Its two
+interrupted/resumed halves returned the same total JSON bytes as the clean scan.
+This is a process-crash check, not a power-loss test.
+
+In this corpus, replay time scales roughly with federation history and owned
+activity. The million-operation scan's JSON payload is about six times its
+470 MB encoded signed history: hex encoding and three quorum responses dominate
+that difference. Real network bandwidth could therefore dominate recovery time.
+No network timing, compression savings or Pi 5 performance is inferred here.
+RSS includes the simulated guardian, wallet and query cache; process caches are
+fresh but OS pages remain warm. Enumerating all wallet records/history is measured
+separately because those APIs materialize complete vectors in memory. For the
+100,000-owned-operation case, enumeration took 0.95 s and raised lifetime peak RSS
+to 520 MiB. Its wallet checkpoint was 87.6 MB. Paginated client reads could avoid
+loading all these records at once without discarding recovered history.
+
+One million bare live contracts occupied 377 MB logically and a 196 MB flushed
+checkpoint. Their sampled lookup p95 was 155 µs, versus 7.8–8.7 µs at 100,000; repeated
+simple core-spend p95 rose from 0.086–0.114 ms to 1.073 ms. At 100,000 operations,
+whole-database checkpoint sizes were 245 MB for annotated live contracts, 139 MB
+for churn (no remaining live contracts), and 52.5 MB for one-asset creation
+(including 100,000 namespaces and 100,000 origins). Sampled asset-origin p95 was
+17.0–17.8 µs. These post-scan probes repeatedly validate one
+outpoint and include whatever RocksDB background work remains after generation;
+they establish neither cold-read latency nor a steady-state tail bound. Large
+state has a visible access penalty despite the transaction's fixed lookup count.
+
+Before designing a new recovery endpoint, evaluate the
+[existing signed/base64 session API](../../../../fedimint-api-client/src/api/global_api/with_cache.rs).
+It authenticates completed history fetched from one peer and falls back to quorum
+queries for unsigned open-session state. Our wallet currently passes API version
+0.0 without broadcast keys, selecting the older quorum path. Negotiated use of
+the existing path is a module-client follow-up; it needs compatibility, signature
+failure/failover and unknown-module decoding tests. Its savings are not measured
+here. Larger/full sessions and transaction sizes can also increase cache memory;
+the observed RSS plateau is not a memory bound.
+
+All scale cells passed clean recovery, abrupt interruption/resume, holdings/history
+oracle checks, idempotent resync and recovered spend validation. Final reruns at
+100,000 sparse and 10,000/100,000 owned operations also checked full transaction
+encoding digests and full-value resync equality. The final sampler caps sampled outpoints at
+1,024; the initial storage pass used a floor stride (1,025–1,112 samples in the
+reported large cells). The corrected 100,000-contract/origin reruns are included
+in the ranges above. The benchmark smoke suite, shared resource-workload regression,
+formatting and scoped Clippy passed; Clippy retained six existing common-crate
+`map_unwrap_or` warnings. These changes add measurements, not production behavior.
+
 ## Evidence and method
 
 The published tag `codex/simplicity-benchmarks-2026-10-03` preserves the original
@@ -290,9 +364,10 @@ earlier checks and scoped lint exceptions; these counts describe those revisions
 
 Production calibration still needs Raspberry Pi 5 measurements with recorded
 RAM, storage, cooling, clocks and throttling; full admission/consensus costs,
-cold/large databases, real funding/storage workloads, and broader decoder/type/VM
-shapes. The module-local concurrency and storage probes above do not measure
-production queueing or recovery scans/downloads. The agreed fees above have not
+cold-device behavior, real funding/storage workloads, and broader decoder/type/VM
+shapes. The module-local probes above do not measure production queueing or real
+network recovery. The scale run measures module replay and serialized response
+volume through a controlled transport. The agreed fees above have not
 been calibrated for lifetime operating cost. Rejected transactions pay no accepted-transaction
 fee, and per-transaction caps do not bound repeated or simultaneous submissions.
 Earlier outer authorization/funding checks, bounded admission and duplicate-work

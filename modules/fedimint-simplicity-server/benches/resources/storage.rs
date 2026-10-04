@@ -19,7 +19,7 @@ pub fn run(spec: &str) {
     };
     assert!(["bare", "live", "receipt", "assets1", "assets32", "churn"].contains(scenario));
     let count: u32 = count.parse().expect("count");
-    assert!((1..=10_000).contains(&count));
+    assert!((1..=1_000_000).contains(&count));
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -48,6 +48,7 @@ async fn measure(scenario: &str, count: u32) {
     let mut history = vec![];
     let mut accepted = 0u64;
     let mut fees_msat = 0u64;
+    let mut samples = vec![];
     for index in 0..count {
         let mut output = fixture.environments[0].current.clone();
         output.amount = Amount::ZERO;
@@ -113,6 +114,15 @@ async fn measure(scenario: &str, count: u32) {
             txid: tx.tx_hash(),
             out_idx: 0,
         };
+        if index.is_multiple_of(count.div_ceil(1024)) {
+            let asset = tx.outputs[0]
+                .as_any()
+                .downcast_ref::<ContractOutput>()
+                .and_then(ContractOutput::bundle)
+                .and_then(|b| b.authorities.first())
+                .copied();
+            samples.push((point, asset));
+        }
         commit(&db, &modules, tx, &mut history, &mut accepted).await;
         fees_msat += fee;
         if scenario == "churn" {
@@ -133,19 +143,7 @@ async fn measure(scenario: &str, count: u32) {
     if !history.is_empty() {
         save_history(&db, &mut history, (accepted - 1) / 100).await;
     }
-    let module_rows = rows(&module_db).await;
-    let mut records = BTreeMap::<&str, (usize, usize)>::new();
-    for (key, value) in module_rows {
-        let class = match key[0] {
-            1 => "live_contracts",
-            3 => "namespaces",
-            4 => "asset_origins",
-            _ => "other",
-        };
-        let entry = records.entry(class).or_default();
-        entry.0 += 1;
-        entry.1 += key.len() + value.len();
-    }
+    let records = summarize(&module_db, true).await;
     let record_count = |class| records.get(class).map_or(0, |(count, _)| *count);
     let expected_live = if ["receipt", "churn"].contains(&scenario) {
         0
@@ -163,35 +161,44 @@ async fn measure(scenario: &str, count: u32) {
         record_count("asset_origins"),
         expected_namespaces * if scenario == "assets32" { 32 } else { 1 }
     );
-    let mut database_records = BTreeMap::<&str, (usize, usize)>::new();
-    for (key, value) in rows(&db).await {
-        let class = if key[0] == fedimint_server::db::DbKeyPrefix::SignedSessionOutcome as u8 {
-            "signed_history"
-        } else if key[0] == fedimint_server::db::DbKeyPrefix::AcceptedTransaction as u8 {
-            "accepted_index"
-        } else {
-            "module_and_other"
-        };
-        let entry = database_records.entry(class).or_default();
-        entry.0 += 1;
-        entry.1 += key.len() + value.len();
-    }
+    let database_records = summarize(&db, false).await;
     assert_eq!(database_records["accepted_index"].0 as u64, accepted);
     assert_eq!(
         database_records["signed_history"].0 as u64,
         accepted.div_ceil(100)
     );
     let logical_bytes: usize = database_records.values().map(|(_, bytes)| bytes).sum();
+    let mut valid_spend = transaction(
+        vec![DynInput::from_typed(
+            MODULE,
+            ContractInput {
+                outpoint: samples[0].0,
+                ..fixture.inputs[0].clone()
+            },
+        )],
+        vec![],
+        runtime::input_fee(&fixture.inputs[0]).expect("fee").msats,
+        count,
+    );
+    sign_transaction(&mut valid_spend, &[key(), key()]).expect("spend signatures");
+    let probes = probe(
+        &db,
+        &modules,
+        &samples,
+        &valid_spend,
+        !["receipt", "churn"].contains(&scenario),
+    )
+    .await;
     let checkpoint = directory.path().join("checkpoint");
     db.checkpoint(&checkpoint).expect("flushed checkpoint");
     let (checkpoint_bytes, sst_bytes) = directory_size(&checkpoint);
     println!(
         "{}",
-        serde_json::json!({"scenario": scenario, "operations": count, "accepted_transactions": accepted, "module_fees_msat": fees_msat, "module_records_count_and_bytes": records, "database_logical_bytes": logical_bytes, "database_records_count_and_bytes": database_records, "checkpoint_bytes": checkpoint_bytes, "checkpoint_sst_bytes": sst_bytes})
+        serde_json::json!({"scenario": scenario, "operations": count, "probes": probes, "accepted_transactions": accepted, "module_fees_msat": fees_msat, "module_records_count_and_bytes": records, "database_logical_bytes": logical_bytes, "database_records_count_and_bytes": database_records, "checkpoint_bytes": checkpoint_bytes, "checkpoint_sst_bytes": sst_bytes})
     );
 }
 
-fn transaction(
+pub(super) fn transaction(
     mut inputs: Vec<DynInput>,
     outputs: Vec<DynOutput>,
     fee: u64,
@@ -213,7 +220,7 @@ fn transaction(
     }
 }
 
-async fn commit(
+pub(super) async fn commit(
     db: &Database,
     modules: &ServerModuleRegistry,
     tx: Transaction,
@@ -253,7 +260,7 @@ async fn commit(
     }
 }
 
-async fn save_history(db: &Database, history: &mut Vec<AcceptedItem>, index: u64) {
+pub(super) async fn save_history(db: &Database, history: &mut Vec<AcceptedItem>, index: u64) {
     let keys: BTreeMap<fedimint_core::PeerId, _> = (0..4u8)
         .map(|peer| {
             (
@@ -295,17 +302,102 @@ async fn save_history(db: &Database, history: &mut Vec<AcceptedItem>, index: u64
     dbtx.commit_tx().await;
 }
 
-async fn rows(db: &Database) -> Vec<(Vec<u8>, Vec<u8>)> {
-    db.begin_transaction_nc()
-        .await
-        .raw_find_by_prefix(&[])
-        .await
-        .expect("record scan")
-        .collect()
-        .await
+pub(super) async fn summarize(
+    db: &Database,
+    module: bool,
+) -> BTreeMap<&'static str, (usize, usize)> {
+    let mut dbtx = db.begin_transaction_nc().await;
+    let mut rows = dbtx.raw_find_by_prefix(&[]).await.expect("record scan");
+    let mut records = BTreeMap::<&str, (usize, usize)>::new();
+    while let Some((key, value)) = rows.next().await {
+        let class = if module {
+            match key[0] {
+                1 => "live_contracts",
+                3 => "namespaces",
+                4 => "asset_origins",
+                _ => "other",
+            }
+        } else if key[0] == fedimint_server::db::DbKeyPrefix::SignedSessionOutcome as u8 {
+            "signed_history"
+        } else if key[0] == fedimint_server::db::DbKeyPrefix::AcceptedTransaction as u8 {
+            "accepted_index"
+        } else {
+            "module_and_other"
+        };
+        let entry = records.entry(class).or_default();
+        entry.0 += 1;
+        entry.1 += key.len() + value.len();
+    }
+    records
 }
 
-fn directory_size(path: &Path) -> (u64, u64) {
+pub(super) fn latency(mut seconds: Vec<f64>) -> serde_json::Value {
+    seconds.sort_by(f64::total_cmp);
+    serde_json::json!({"samples": seconds.len(), "p50_ms": seconds[(seconds.len() * 50).div_ceil(100) - 1] * 1000.0, "p95_ms": seconds[(seconds.len() * 95).div_ceil(100) - 1] * 1000.0})
+}
+
+pub(super) async fn probe(
+    db: &Database,
+    modules: &ServerModuleRegistry,
+    samples: &[(OutPoint, Option<AssetId>)],
+    spend: &Transaction,
+    exists: bool,
+) -> serde_json::Value {
+    use std::time::Instant;
+    let module = db.with_prefix_module_id(MODULE).0;
+    let mut found = vec![];
+    let mut absent = vec![];
+    let mut origins = vec![];
+    for (point, asset) in samples {
+        let begin = Instant::now();
+        let value = module
+            .begin_transaction_nc()
+            .await
+            .get_value(&ContractKey(*point))
+            .await;
+        found.push(Instant::now().duration_since(begin).as_secs_f64());
+        assert_eq!(value.is_some(), exists);
+        let missing = OutPoint {
+            txid: TransactionId::from_raw_hash((point, "missing").consensus_hash_sha256()),
+            out_idx: 0,
+        };
+        let begin = Instant::now();
+        let value = module
+            .begin_transaction_nc()
+            .await
+            .get_value(&ContractKey(missing))
+            .await;
+        absent.push(Instant::now().duration_since(begin).as_secs_f64());
+        assert!(value.is_none());
+        if let Some(asset) = asset {
+            let begin = Instant::now();
+            let value = module
+                .begin_transaction_nc()
+                .await
+                .get_value(&AssetKey(*asset))
+                .await;
+            origins.push(Instant::now().duration_since(begin).as_secs_f64());
+            assert!(value.is_some());
+        }
+    }
+    let mut validation = vec![];
+    for _ in 0..100 {
+        let begin = Instant::now();
+        let result = process_core(db, modules, spend).await;
+        validation.push(Instant::now().duration_since(begin).as_secs_f64());
+        if exists {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert_eq!(
+                contract_error(result.expect_err("spent or action")),
+                ContractError::UnknownContract
+            );
+        }
+    }
+    serde_json::json!({"contract": latency(found), "missing_contract": latency(absent), "asset": (!origins.is_empty()).then(|| latency(origins)), "core_spend": latency(validation)})
+}
+
+pub(super) fn directory_size(path: &Path) -> (u64, u64) {
     let mut result = (0, 0);
     for entry in std::fs::read_dir(path).expect("checkpoint directory") {
         let entry = entry.expect("checkpoint entry");

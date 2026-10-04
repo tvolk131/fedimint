@@ -33,6 +33,7 @@ simplicity-lang = { version = "=0.9.0", default-features = false, features = [
 axum = { workspace = true }
 bitcoin = { workspace = true }
 divan = "0.1.21"
+fedimint-aead = { workspace = true }
 fedimint-api-client = { workspace = true }
 fedimint-client = { workspace = true }
 fedimint-connectors = { workspace = true }

@@ -41,6 +41,8 @@ use simplicity::{BitWriter, ConstructNode, encode};
 
 #[path = "adversarial.rs"]
 pub mod adversarial;
+#[path = "scale.rs"]
+pub mod scale;
 #[path = "storage.rs"]
 pub mod storage;
 
@@ -235,23 +237,7 @@ impl Fixture {
 
     pub async fn core_database_on(&self, db: Database) -> (Database, ServerModuleRegistry) {
         self.seed(&db.with_prefix_module_id(MODULE).0).await;
-        let modules = ServerModuleRegistry::new([
-            (
-                MODULE,
-                fedimint_simplicity_common::KIND,
-                DynServerModule::from(
-                    Simplicity::new_for_testing(vec![0.into()]).expect("one guardian"),
-                ),
-            ),
-            (
-                FUNDING_MODULE,
-                fedimint_dummy_common::KIND,
-                DynServerModule::from(Dummy::new(DummyConfig {
-                    private: DummyConfigPrivate,
-                    consensus: DummyConfigConsensus,
-                })),
-            ),
-        ]);
+        let modules = core_modules();
         (db, modules)
     }
 
@@ -1040,4 +1026,24 @@ pub async fn validate_module(
     )?;
     context.preparation = Some(&prepared);
     module.validate_transaction(dbtx, &context).await
+}
+
+pub fn core_modules() -> ServerModuleRegistry {
+    ServerModuleRegistry::new([
+        (
+            MODULE,
+            fedimint_simplicity_common::KIND,
+            DynServerModule::from(
+                Simplicity::new_for_testing(vec![0.into()]).expect("one guardian"),
+            ),
+        ),
+        (
+            FUNDING_MODULE,
+            fedimint_dummy_common::KIND,
+            DynServerModule::from(Dummy::new(DummyConfig {
+                private: DummyConfigPrivate,
+                consensus: DummyConfigConsensus,
+            })),
+        ),
+    ])
 }

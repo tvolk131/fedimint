@@ -17,6 +17,17 @@ use simplicity::BitMachine;
 static ALLOC: divan::AllocProfiler = divan::AllocProfiler::system();
 
 fn main() {
+    if let Some(path) = std::env::var_os("FM_SIMPLICITY_BENCH_RECOVER") {
+        fixtures::scale::worker(
+            std::path::Path::new(&path),
+            &std::env::var("FM_SIMPLICITY_BENCH_RECOVER_PHASE").expect("phase"),
+        );
+        return;
+    }
+    if let Ok(spec) = std::env::var("FM_SIMPLICITY_BENCH_SCALE") {
+        fixtures::scale::run(&spec);
+        return;
+    }
     if let Ok(spec) = std::env::var("FM_SIMPLICITY_BENCH_STORAGE") {
         fixtures::storage::run(&spec);
         return;
