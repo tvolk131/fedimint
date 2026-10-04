@@ -25,7 +25,9 @@ use crate::common::{ContractInput, ContractOutput, SimplicityCommonInit, Simplic
 use crate::compiler::{TemplateProgramWitness, WitnessNameToValueMap, WitnessValues};
 use crate::descriptor::{BuiltinTemplates, ContractDescriptor, ContractTemplates};
 use crate::states::{OperationStatus, SimplicityState};
-use crate::wallet::{HistoryEntry, SessionHistory, WalletContract, WalletStore, db};
+use crate::wallet::{
+    HistoryEntry, SessionHistory, WalletContract, WalletCursor, WalletPage, WalletStore, db,
+};
 
 /// Applications provide non-signature witnesses; the named owner signature is
 /// installed only after core funding and change are fixed. Public covenants
@@ -188,20 +190,18 @@ impl ClientModule for SimplicityClientModule {
         if unit != AmountUnit::BITCOIN {
             return Amount::ZERO;
         }
-        let contracts = dbtx
-            .find_by_prefix(&db::ContractPrefix)
+        dbtx.find_by_prefix(&db::ContractPrefix)
             .await
-            .collect::<Vec<_>>()
-            .await;
-        contracts
-            .into_iter()
-            .filter(|(_, contract)| {
-                contract.spent_by.is_none()
+            .fold(Amount::ZERO, |total, (_, contract)| async move {
+                if contract.spent_by.is_none()
                     && self.store.templates.owns_balance(&contract.descriptor)
+                {
+                    total + contract.output.amount
+                } else {
+                    total
+                }
             })
-            .fold(Amount::ZERO, |total, (_, contract)| {
-                total + contract.output.amount
-            })
+            .await
     }
 }
 
@@ -222,11 +222,32 @@ impl SimplicityClientModule {
         )
     }
 
+    /// Allocate all contract records. Prefer `contracts_page` for large
+    /// wallets.
     pub async fn contracts(&self) -> Vec<(OutPoint, WalletContract)> {
         self.store.contracts().await
     }
+    /// Allocate the complete history. Prefer `history_page` for large wallets.
     pub async fn history(&self) -> Vec<HistoryEntry> {
         self.store.history().await
+    }
+
+    /// Bounded contract listing; see [`WalletStore::contracts_page`].
+    pub async fn contracts_page(
+        &self,
+        cursor: Option<&WalletCursor>,
+        limit: usize,
+    ) -> anyhow::Result<WalletPage<(OutPoint, WalletContract)>> {
+        self.store.contracts_page(cursor, limit).await
+    }
+
+    /// Bounded confirmed history; see [`WalletStore::history_page`].
+    pub async fn history_page(
+        &self,
+        cursor: Option<&WalletCursor>,
+        limit: usize,
+    ) -> anyhow::Result<WalletPage<HistoryEntry>> {
+        self.store.history_page(cursor, limit).await
     }
 
     /// A fresh receive policy and encrypted descriptor for a sender. The sender

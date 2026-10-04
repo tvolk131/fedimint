@@ -290,6 +290,7 @@ impl SimplicityClientModule {
         }
         let (current, _) = successor(origin, market, &chain)?;
         let mut tx = self.store.db.begin_transaction().await;
+        let mut changed = false;
         for (point, mut contract) in chain {
             if let Some(existing) = tx.get_value(&db::ContractKey(point)).await {
                 ensure!(
@@ -298,7 +299,11 @@ impl SimplicityClientModule {
                 );
                 contract.descriptor = existing.descriptor;
             }
-            tx.insert_entry(&db::ContractKey(point), &contract).await;
+            changed |= tx
+                .insert_entry(&db::ContractKey(point), &contract)
+                .await
+                .as_ref()
+                != Some(&contract);
         }
         for (key, mut entry) in additions {
             if let Some(existing) = tx.get_value(&key).await {
@@ -319,7 +324,11 @@ impl SimplicityClientModule {
                 &(),
             )
             .await;
-            tx.insert_entry(&key, &entry).await;
+            changed |= tx.insert_entry(&key, &entry).await.as_ref() != Some(&entry);
+        }
+        if changed {
+            tx.insert_entry(&db::ViewRevisionKey, &rand::random::<[u8; 32]>())
+                .await;
         }
         tx.commit_tx_result().await?;
         Ok(current)

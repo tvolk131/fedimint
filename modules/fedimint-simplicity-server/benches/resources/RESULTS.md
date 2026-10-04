@@ -140,8 +140,8 @@ RSS includes the simulated guardian, wallet and query cache; process caches are
 fresh but OS pages remain warm. Enumerating all wallet records/history is measured
 separately because those APIs materialize complete vectors in memory. For the
 100,000-owned-operation case, enumeration took 0.95 s and raised lifetime peak RSS
-to 520 MiB. Its wallet checkpoint was 87.6 MB. Paginated client reads could avoid
-loading all these records at once without discarding recovered history.
+to 520 MiB. Its wallet checkpoint was 87.6 MB. The pagination follow-up below
+measures bounded reads while retaining all recovered records.
 
 One million bare live contracts occupied 377 MB logically and a 196 MB flushed
 checkpoint. Their sampled lookup p95 was 155 µs, versus 7.8–8.7 µs at 100,000; repeated
@@ -187,6 +187,29 @@ corruption, malformed/unavailable responses, peer failover, old APIs, missing
 keys, unknown modules, quorum verification of open prefixes, and retry after all
 peers fail authentication. All 25 client tests and four guardian integration tests
 passed. Failed authentication leaves recovery pending; it cannot advance the cursor.
+
+## Paginated local reads follow-up
+
+With signed-session recovery and 100,000 owned operations, clean replay took
+18.39 s and returned 89.0 MB of response JSON. It recovered 100,000 contract
+records and 150,000 history entries. Reading those records in pages of 256 took
+1.05 s; the combined process peak stayed at 240 MiB (less than 0.3 MiB above the
+recovery high-water mark). Subsequent full-list reads took 0.80 s and raised the
+peak to 520 MiB. Counts and ordered encoding digests matched exactly.
+
+This was one normal-allocator run on the same M4 Pro with RocksDB and controlled
+transport. Pagination preceded full enumeration, warming database/OS caches;
+these timings are not an isolated throughput comparison. RSS is a lifetime
+high-water mark, not per-call allocated bytes, and includes the simulated guardian
+and API cache. The page API bounds decoded records; other database backends may
+buffer ranges internally. The run also passed abrupt interruption/resume, complete
+history oracle checks, idempotent resync and recovered native/authority spends.
+
+The client now exposes page APIs alongside the full-list helpers. Cursor tests
+cover key-encoding boundaries, database reopen/upgrade, view changes, and seeks
+past earlier records. Guardian integration tests cover market-watch invalidation,
+idempotent watching and recovered sender receipts. Balance summation streams
+records instead of collecting them. Full recovery still retains all history.
 
 ## Evidence and method
 

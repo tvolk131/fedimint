@@ -65,3 +65,10 @@ pub struct ActiveIntentKey(pub OperationId);
 pub struct ActiveIntentPrefix;
 impl_db_record!(key = ActiveIntentKey, value = (), db_prefix = 0x0b);
 impl_db_lookup!(key = ActiveIntentKey, query_prefix = ActiveIntentPrefix);
+
+/// Local listing identity, refreshed atomically whenever contracts/history
+/// change. Randomness also isolates cursors from a fresh recovery or a
+/// different wallet.
+#[derive(Debug, Clone, Encodable, Decodable, Serialize)]
+pub struct ViewRevisionKey;
+impl_db_record!(key = ViewRevisionKey, value = [u8; 32], db_prefix = 0x0c);

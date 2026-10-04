@@ -1,4 +1,5 @@
 mod history;
+mod pages;
 
 use bitcoin::hashes::{Hash, sha256};
 use fedimint_core::core::{DynInput, DynOutput};
@@ -195,6 +196,10 @@ async fn stored_history_preserves_foreign_modules_unknown_to_this_wallet() {
     let reopened = wallet(store.db.clone()).await;
     let history = reopened.history().await;
     assert_eq!(history.len(), 1);
+    assert_eq!(
+        reopened.history_page(None, 1).await.unwrap().entries,
+        history
+    );
     assert_eq!(history[0].transaction, receive);
     assert_eq!(
         history[0].transaction.consensus_encode_to_vec(),

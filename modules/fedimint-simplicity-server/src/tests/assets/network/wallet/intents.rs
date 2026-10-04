@@ -248,6 +248,31 @@ async fn run() {
     let alice = open(builder(false).await, alice_db, 41).await;
     let a = alice.get_first_module::<SimplicityClientModule>().unwrap();
     completed(&await_record(&a, alice_id).await, 1);
+
+    // Watching another market enriches the local view without an owned receipt.
+    // Existing page cursors expire; watching the same market again is idempotent.
+    let (other_market, _, _) = genesis(&fed).await;
+    a.sync().await.unwrap();
+    let contracts_cursor = a.contracts_page(None, 1).await.unwrap().next.unwrap();
+    let history_cursor = a.history_page(None, 1).await.unwrap().next.unwrap();
+    a.watch_market(&other_market).await.unwrap();
+    for error in [
+        a.contracts_page(Some(&contracts_cursor), 1)
+            .await
+            .unwrap_err(),
+        a.history_page(Some(&history_cursor), 1).await.unwrap_err(),
+    ] {
+        assert!(matches!(
+            error.downcast_ref(),
+            Some(fedimint_simplicity_client::wallet::PageError::StaleCursor)
+        ));
+    }
+    let contracts_cursor = a.contracts_page(None, 1).await.unwrap().next.unwrap();
+    let history_cursor = a.history_page(None, 1).await.unwrap().next.unwrap();
+    a.watch_market(&other_market).await.unwrap();
+    a.contracts_page(Some(&contracts_cursor), 1).await.unwrap();
+    a.history_page(Some(&history_cursor), 1).await.unwrap();
+
     let bob = open(builder(false).await, bob_db.clone(), 42).await;
     let b = bob.get_first_module::<SimplicityClientModule>().unwrap();
     let conflict = await_record(&b, bob_id).await;

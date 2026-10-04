@@ -321,6 +321,11 @@ guardian-class Linux hardware and concurrent invalid-submission load.
 context sharing, aggregate caps, adversarial exploration and validation ordering.
 Keep the harness, fixtures and methodology as regression tools. Retain key
 comparisons and archive their evidence; routine raw runs need not all be committed.
+The scale probe walks recovered records in pages of 256 before exercising the
+full-list helpers. It compares counts and ordered encoding digests between both
+paths, then checks the independent oracle. Pagination and full enumeration RSS
+are successive process high-water marks, not isolated allocation measurements.
+
 Fee coefficients or limit changes should be reviewed separately after examining
 the measurements.
 

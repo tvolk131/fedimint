@@ -4,6 +4,7 @@
 //! Simplicity holdings.
 pub(crate) mod db;
 mod history;
+mod pages;
 
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ use fedimint_core::{OutPoint, TransactionId};
 use fedimint_derive_secret::DerivableSecret;
 use futures::StreamExt as _;
 pub use history::SessionHistory;
+pub use pages::{MAX_WALLET_PAGE_SIZE, PageError, WalletCursor, WalletPage};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -95,6 +97,10 @@ impl WalletStore {
             );
         } else {
             dbtx.insert_new_entry(&db::IdentityKey, &identity).await;
+        }
+        if dbtx.get_value(&db::ViewRevisionKey).await.is_none() {
+            dbtx.insert_new_entry(&db::ViewRevisionKey, &rand::random::<[u8; 32]>())
+                .await;
         }
         dbtx.commit_tx_result().await?;
         Ok(Self {
@@ -182,6 +188,8 @@ impl WalletStore {
             .is_some()
     }
 
+    /// Allocate all contract records. Prefer `contracts_page` for large
+    /// wallets.
     pub async fn contracts(&self) -> Vec<(OutPoint, WalletContract)> {
         self.db
             .begin_transaction_nc()
@@ -193,6 +201,7 @@ impl WalletStore {
             .await
     }
 
+    /// Allocate the complete history. Prefer `history_page` for large wallets.
     pub async fn history(&self) -> Vec<HistoryEntry> {
         let mut entries = self
             .db
@@ -247,6 +256,7 @@ impl WalletStore {
                 "history prefix changed"
             );
         }
+        let mut changed = false;
         for (position, item) in session.items.iter().enumerate().skip(seen as usize) {
             let ConsensusItem::Transaction(tx) = &item.item else {
                 continue;
@@ -348,6 +358,7 @@ impl WalletStore {
                 received.push(outpoint);
             }
             if !consumed.is_empty() || !received.is_empty() || sent.is_some() {
+                changed = true;
                 dbtx.insert_new_entry(&db::ObservedTransactionKey(txid), &())
                     .await;
                 dbtx.insert_new_entry(
@@ -362,6 +373,10 @@ impl WalletStore {
                 )
                 .await;
             }
+        }
+        if changed {
+            dbtx.insert_entry(&db::ViewRevisionKey, &rand::random::<[u8; 32]>())
+                .await;
         }
         if complete {
             dbtx.insert_entry(

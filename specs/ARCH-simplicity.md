@@ -120,6 +120,12 @@ history. Unknown modules retain their original bytes for signature verification
 and later interpretation. Recovery, ongoing sync, and market discovery share
 this access path; no new guardian recovery endpoint is required.
 
+Local contract and history reads support bounded pages without dropping spent
+contracts or older activity. A continuation token belongs to one wallet view;
+a sync or market-discovery change requires restarting the listing, so callers
+cannot silently combine pages from different states. Existing full-list helpers
+remain available. Pagination does not change the complete recovery scan.
+
 Wallet software owns versioned contract templates, descriptors, key derivation,
 annotation encryption, recognition of its historical activity, and reconstruction
 of usable state. Wallet-specific information that cannot be derived must be

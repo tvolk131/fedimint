@@ -8,7 +8,9 @@ use fedimint_core::module::CommonModuleInit;
 use fedimint_derive_secret::DerivableSecret;
 use fedimint_simplicity_client::descriptor::{BuiltinTemplates, ContractDescriptor, WalletKeys};
 use fedimint_simplicity_client::receipt::{ReceiptContext, SenderReceipt};
-use fedimint_simplicity_client::wallet::{SessionHistory, WalletContract, WalletStore};
+use fedimint_simplicity_client::wallet::{
+    MAX_WALLET_PAGE_SIZE, SessionHistory, WalletContract, WalletStore,
+};
 use serde::{Deserialize, Serialize};
 
 use super::*;
@@ -513,11 +515,58 @@ async fn recover(path: &Path, phase: &str) {
     let requests = stats.requests.load(Ordering::Relaxed);
     assert!(!wallet.is_recovering().await);
     assert_eq!(stats.min_index.load(Ordering::Relaxed), start);
+    let enumerate_pages = Instant::now();
+    let mut contract_digest = sha256::Hash::engine();
+    let mut history_digest = sha256::Hash::engine();
+    let mut paged_counts = [0; 2];
+    let mut cursor = None;
+    loop {
+        let page = wallet
+            .contracts_page(cursor.as_ref(), MAX_WALLET_PAGE_SIZE)
+            .await
+            .expect("contract page");
+        paged_counts[0] += page.entries.len();
+        for entry in page.entries {
+            entry
+                .consensus_encode(&mut contract_digest)
+                .expect("digest");
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    loop {
+        let page = wallet
+            .history_page(cursor.as_ref(), MAX_WALLET_PAGE_SIZE)
+            .await
+            .expect("history page");
+        paged_counts[1] += page.entries.len();
+        for entry in page.entries {
+            entry.consensus_encode(&mut history_digest).expect("digest");
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let pagination_seconds = Instant::now().duration_since(enumerate_pages).as_secs_f64();
+    let pagination_rss = peak_rss();
     let enumerate = Instant::now();
     let contracts = wallet.contracts().await;
     let history = wallet.history().await;
     let enumeration_seconds = Instant::now().duration_since(enumerate).as_secs_f64();
     let enumeration_rss = peak_rss();
+    assert_eq!(paged_counts, [contracts.len(), history.len()]);
+    assert_eq!(
+        sha256::Hash::from_engine(contract_digest),
+        records_digest(&contracts)
+    );
+    assert_eq!(
+        sha256::Hash::from_engine(history_digest),
+        records_digest(&history)
+    );
+
     let expected: Expected =
         serde_json::from_slice(&std::fs::read(path.join("expected.json")).expect("oracle file"))
             .expect("oracle");
@@ -587,8 +636,16 @@ async fn recover(path: &Path, phase: &str) {
         .expect("wallet checkpoint");
     println!(
         "{}",
-        serde_json::json!({"phase":phase,"seconds":seconds,"start_session":start,"end_session":wallet.next_session().await,"owned_contracts":contracts.len(),"owned_history":history.len(),"response_json_bytes":response_json_bytes,"requests":requests,"peak_rss_bytes":recovery_rss,"enumeration_seconds":enumeration_seconds,"enumeration_peak_rss_bytes":enumeration_rss,"wallet_checkpoint_bytes":storage::directory_size(&checkpoint).0})
+        serde_json::json!({"phase":phase,"seconds":seconds,"start_session":start,"end_session":wallet.next_session().await,"owned_contracts":contracts.len(),"owned_history":history.len(),"response_json_bytes":response_json_bytes,"requests":requests,"peak_rss_bytes":recovery_rss,"pagination_seconds":pagination_seconds,"pagination_peak_rss_bytes":pagination_rss,"enumeration_seconds":enumeration_seconds,"enumeration_peak_rss_bytes":enumeration_rss,"wallet_checkpoint_bytes":storage::directory_size(&checkpoint).0})
     );
+}
+
+fn records_digest<T: Encodable>(entries: &[T]) -> sha256::Hash {
+    let mut engine = sha256::Hash::engine();
+    for entry in entries {
+        entry.consensus_encode(&mut engine).expect("digest");
+    }
+    sha256::Hash::from_engine(engine)
 }
 
 #[cfg(unix)]

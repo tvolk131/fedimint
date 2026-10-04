@@ -440,6 +440,10 @@ async fn direct_sender_receipts_restore_history_without_owning_recipient_contrac
         let alice = join(builder, &fed, db(), 11, false, true).await;
         let restored = alice.get_first_module::<SimplicityClientModule>().unwrap();
         assert_eq!(restored.history().await, expected);
+        assert_eq!(
+            restored.history_page(None, 256).await.unwrap().entries,
+            expected
+        );
         assert_eq!(restored.contracts().await, alice_contracts);
         drop(recipient);
         bob.shutdown().await;
