@@ -265,8 +265,9 @@ Native bitcoin contracts, public asset issuance/transfers/destruction, and a
 binary-market example are implemented, together with persistent submission,
 input reservations, encrypted descriptors, and history-based recovery. Private
 transfers, general market discovery/indexing, CLI support, and a production
-trading UI remain later work. Rejected conflicting vault spends must be rebuilt
-by the application against the accepted successor.
+trading UI remain later work. The durable intent API handles rebuilding for its
+supported market operation; other conflicting spends must be rebuilt by the
+application against the accepted successor.
 
 The runtime, compiler revision, core jet allowlist, custom jet identifiers and
 CMRs, types, and costs are consensus-critical. Custom environment jets currently
@@ -276,6 +277,46 @@ Liquid programs must be ported to this environment. Do not reinterpret existing
 v0 outputs when adding versions: migration requires an authorized spend.
 
 This is a development prototype, not an audited module for holding real funds.
+
+## Beta execution baseline
+
+This is the environment to preserve when deploying this branch. Record the exact
+Git commit, `Cargo.lock`, and `flake.lock` with the deployed artifacts; a branch
+name or the shared workspace package version is not a sufficient identity.
+
+| Component | Pinned interpretation |
+| --- | --- |
+| Module kind / consensus version | `simplicity` / `0.1` |
+| Contract execution versions | `0` (bitcoin), `1` (bitcoin and explicit assets) |
+| Guardian Rust runtime | `simplicity-lang =0.9.0` |
+| C runtime and frame adapters | `simplicity-sys =0.8.0` |
+| Wallet compiler | SimplicityHL commit `351eb068e30affc69189993739cd1b30b02b269d` |
+| Jet encoding | One family bit: `0` + upstream Core encoding, or `1` + eight-bit context-jet ID |
+| Context jet identities | SHA-256 of UTF-8 `fedimint/simplicity/jet/v0/` followed by the jet name |
+| Context jet cost | 1,000 milliweight each; allowed Core jets use the pinned runtime's costs |
+
+[The jet definitions](src/jet.rs) own the exact allowlist, IDs, types and adapters;
+the fixed [reference vectors](tests/vectors/README.md) independently pin identities
+and selected execution results. V0 rejects context IDs 16–35 and `Multiply64`;
+V1 allows those additions. The interpretation of indices, clocks, signing
+commitments, absent assets and invalid indices is specified in the execution
+sections above and below. The [limits and fees](#limits-fees-and-retention) apply
+to both versions; all guardians must run matching validity and fee rules.
+
+These are explicit prototype primitive identities, not CMRs backed by upstream
+formal jet specifications. Pinning them does not establish worst-case cost
+calibration or a security proof. Decoder allocation limits, the Core allowlist,
+static costs, context interpretation, signature normalization and fee rounding
+must all be reviewed as consensus changes when altered. A library patch release
+is not automatically safe to substitute.
+
+Wallet compatibility also includes the version-one `owner`, `top-up-or-release`
+and `binary-market` templates, their descriptors, and their compiler output.
+Keep the ability to interpret historical descriptors and reproduce existing
+policies. Do not silently reinterpret a deployed version; a policy migration
+requires an authorized spend. No migration between earlier undeployed revisions
+is required by this baseline. Deployment and recovery procedures are in the
+[native SDK runbook](../fedimint-simplicity-client/RUNBOOK.md).
 
 
 ## Explicit assets and execution version one
