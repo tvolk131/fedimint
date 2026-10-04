@@ -186,10 +186,13 @@ commitments/resource bounds. Direct jet tests cover the C-frame adapter boundary
 server tests also exercise two instances through core processing and rollback.
 
 Spending costs 100 msat plus one msat per rounded static cost weight unit and
-per encoded program/witness byte. Creation costs 100 msat plus one msat per
-recovery byte. These are experimental fixed coefficients, not a benchmarked
-production fee policy. The submitted redemption program's static bound determines
-the fee; guardians do not time execution or charge script cost on creation.
+per encoded program/witness byte. Each output costs 100 msat plus one msat per
+recovery byte; v1 also charges one msat per encoded extension byte and 100 msat
+per newly registered asset ID. The asset charge applies once at genesis, not on
+later issuance of the same asset. Rejected transactions pay no module fee.
+These are the agreed prototype coefficients, pending production calibration.
+The submitted redemption program's static bound determines the spend fee;
+guardians do not time execution or charge script cost on creation.
 
 The [resource benchmark harness](../fedimint-simplicity-server/benches/resources/README.md)
 measures decoding, execution, context costs and guardian validation separately,
@@ -353,7 +356,7 @@ Invalid contract/entry indices and foreign output inspection fail; asset output
 jets also reject action outputs. Foreign outputs remain opaque to programs.
 There are at most 32 distinct asset IDs per transition, 32 entries of either kind
 per bundle, and 32 created assets per transaction. V1 output fees add one msat per
-encoded extension byte and 10,000 msat per newly registered asset to cover permanent
+encoded extension byte and 100 msat per newly registered asset to contribute toward permanent
 records. These fees and context-jet costs still require production calibration.
 
 ## Binary prediction-market example

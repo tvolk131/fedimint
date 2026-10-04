@@ -52,7 +52,9 @@ budget is not a bound on concurrent guardian memory.
 
 Fresh RocksDB runs at 1,000 and 10,000 operations confirmed linear logical growth
 in six workloads. The table gives decimal MB at 10,000 operations, per guardian;
-fees are current Simplicity fees per operation, excluding real funding fees.
+fees are the Simplicity fees at measurement time, excluding real funding fees.
+These runs used the former 10-sat asset-creation surcharge; the agreed schedule
+below reduces that surcharge without changing the other rates.
 Churn has two transactions per operation. Signed history uses 100 transactions
 per session. These are fixture measurements, not universal disk estimates.
 
@@ -80,18 +82,23 @@ compaction change physical cost. Shared fixture policies compress particularly
 well in the bare/asset cases; unique annotations do not. No recovery scan latency
 or history download cost was measured.
 
-**Fee proposal, not implemented:** raise the fixed input/output base from 100 to
-1,000 msat (one sat), keeping existing byte/weight charges and the 10-sat per-asset
-creation fee. That prices fixed record/history overhead more meaningfully without
-introducing expiry, rent, pruning or refunds. In these fixtures the resulting
-fees would be 1.004 sats for a bare contract, 2.028 for an annotated contract,
-2.029 for a receipt, 3.030 for create-and-spend, and 12.140/323.165 for one/32-asset
-creation. One million bare contracts currently cost 104,000 sats in module fees
-for roughly 375 MB logical growth; the proposal makes that 1,004,000 sats.
-This is a conservative policy starting point, not a demonstrated lifetime-cost
+**Agreed prototype fees:** retain the 100-msat input/output bases, one-msat
+byte/weight charges, and reduce the asset-creation surcharge to 100 msat per ID.
+The same one/32-asset operations now cost 0.440/4.565 sats; all other rows' fees
+remain unchanged. Against the historical logical sizes, those asset workloads
+charge about 0.54–0.57 msat per byte, versus 0.28 for bare contracts. This supports
+a lower surcharge without making these measured asset workloads cheaper per byte
+than bare contracts. It does not establish a minimum attack cost: real funding,
+batching and different record contents change both fees and stored sizes.
+The fee change also changes transaction hashes and funding encodings; the table
+preserves historical measurements rather than claiming identical physical sizes.
+
+These coefficients are a policy starting point, not a demonstrated lifetime-cost
 price or a storage-DoS guarantee. Accepted transactions still grow history without
-a global bound, and rejected transactions still pay no fee. Keep coefficients
-deterministic and agreed by all guardians. Fee changes await a separate decision.
+a global bound, and rejected transactions still pay no fee. Large-state database
+and wallet-recovery measurements remain necessary to assess record-count costs.
+No rent, expiry, pruning or refunds are introduced. Coefficients are deterministic
+and must agree across guardians.
 
 ## Evidence and method
 
@@ -285,8 +292,8 @@ Production calibration still needs Raspberry Pi 5 measurements with recorded
 RAM, storage, cooling, clocks and throttling; full admission/consensus costs,
 cold/large databases, real funding/storage workloads, and broader decoder/type/VM
 shapes. The module-local concurrency and storage probes above do not measure
-production queueing or recovery scans/downloads. Fees remain unchanged and have
-not been calibrated for lifetime operating cost. Rejected transactions pay no accepted-transaction
+production queueing or recovery scans/downloads. The agreed fees above have not
+been calibrated for lifetime operating cost. Rejected transactions pay no accepted-transaction
 fee, and per-transaction caps do not bound repeated or simultaneous submissions.
 Earlier outer authorization/funding checks, bounded admission and duplicate-work
 coalescing remain separate work. Valid claim-key signatures alone cannot prove

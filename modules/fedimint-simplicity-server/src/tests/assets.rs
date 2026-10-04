@@ -431,6 +431,16 @@ async fn namespace_authority_and_conservation_cannot_be_bypassed() {
     })
     .unwrap();
     let (mut create, sponsor) = sponsored(vec![], vec![output(initial.clone()), output(action)]);
+    // Pin the full three-asset creation fee independently of the fee helper:
+    // two 100-msat bases, 206 extension bytes and three 100-msat asset charges.
+    create.inputs[0] = DynInput::from_typed(
+        DUMMY,
+        DummyInput {
+            amount: Amount::from_msats(706),
+            unit: AmountUnit::BITCOIN,
+            pub_key: sponsor.public_key(),
+        },
+    );
     sign_transaction(&mut create, &[sponsor]).unwrap();
     assert_error(fed.process(&create, 0).await, "creation authorization");
     assets::sign_creation(&mut create, federation_id(), SIMP, &creator).unwrap();
@@ -449,6 +459,17 @@ async fn namespace_authority_and_conservation_cannot_be_bypassed() {
     unfunded.inputs.clear();
     sign_transaction(&mut unfunded, &[]).unwrap();
     assert_error(fed.process(&unfunded, 0).await, "unbalanced");
+    let mut underfunded = create.clone();
+    underfunded.inputs[0] = DynInput::from_typed(
+        DUMMY,
+        DummyInput {
+            amount: Amount::from_msats(705),
+            unit: AmountUnit::BITCOIN,
+            pub_key: sponsor.public_key(),
+        },
+    );
+    sign_transaction(&mut underfunded, &[sponsor]).unwrap();
+    assert_error(fed.process(&underfunded, 0).await, "unbalanced");
     assert!(
         fed.db
             .with_prefix_module_id(SIMP)
