@@ -27,7 +27,12 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+clap = { workspace = true, features = ["derive"] }
+fedimint-bip39 = { workspace = true }
+fedimint-client = { workspace = true }
 fedimint-connectors = { workspace = true }
+fedimint-mintv2-client = { workspace = true }
+fedimint-rocksdb = { workspace = true }
 serde_json = { workspace = true }
 
 [lints]
