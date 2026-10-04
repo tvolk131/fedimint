@@ -953,6 +953,16 @@ in
       bin = "fedimintd";
     };
 
+    # Opt-in beta artifact; the normal daemon/packages keep their default modules.
+    fedimintd-simplicity = fedimintBuildPackageGroup {
+      pname = "fedimintd-simplicity";
+      packages = [ "fedimintd" ];
+      features = [
+        "fedimintd/experimental-simplicity"
+      ]
+      ++ lib.optionals (pkgs.stdenv.isLinux || pkgs.stdenv.isDarwin) [ "fedimintd/jemalloc" ];
+    };
+
     fedimint-cli = pickBinary {
       pkg = fedimint-pkgs;
       bin = "fedimint-cli";
