@@ -1,5 +1,4 @@
-//! Reproducible, warm, single-threaded resource measurements. See
-//! resources/README.md.
+//! Opt-in validation and storage measurements. See resources/README.md.
 #[path = "resources/fixtures.rs"]
 mod fixtures;
 #[path = "resources/load.rs"]
@@ -18,6 +17,10 @@ use simplicity::BitMachine;
 static ALLOC: divan::AllocProfiler = divan::AllocProfiler::system();
 
 fn main() {
+    if let Ok(spec) = std::env::var("FM_SIMPLICITY_BENCH_STORAGE") {
+        fixtures::storage::run(&spec);
+        return;
+    }
     if let Ok(spec) = std::env::var("FM_SIMPLICITY_BENCH_LOAD") {
         load::run(&spec);
         return;

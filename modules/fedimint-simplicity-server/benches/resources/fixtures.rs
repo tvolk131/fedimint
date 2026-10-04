@@ -41,6 +41,8 @@ use simplicity::{BitWriter, ConstructNode, encode};
 
 #[path = "adversarial.rs"]
 pub mod adversarial;
+#[path = "storage.rs"]
+pub mod storage;
 
 pub const MODULE: u16 = 4;
 const FUNDING_MODULE: u16 = 5;

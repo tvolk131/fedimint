@@ -48,6 +48,51 @@ MemDatabase lifetime peaks rose from 19.6–19.9 MiB at one caller to 57–64 Mi
 sixteen; RocksDB rose from 85–86 MiB to 122–127 MiB. A per-attempt retention
 budget is not a bound on concurrent guardian memory.
 
+## Persistent storage follow-up
+
+Fresh RocksDB runs at 1,000 and 10,000 operations confirmed linear logical growth
+in six workloads. The table gives decimal MB at 10,000 operations, per guardian;
+fees are current Simplicity fees per operation, excluding real funding fees.
+Churn has two transactions per operation. Signed history uses 100 transactions
+per session. These are fixture measurements, not universal disk estimates.
+
+| Operation | Logical database MB | Flushed checkpoint MB | Fee, sats |
+| --- | ---: | ---: | ---: |
+| Bare zero-value contract | 3.75 | 2.08 | 0.104 |
+| Live contract with 1 KiB annotation | 24.35 | 24.51 | 1.128 |
+| 1 KiB receipt, no UTXO | 13.00 | 13.03 | 1.129 |
+| Create and spend annotated contract | 16.24 | 13.99 | 1.230 |
+| Namespace with one asset | 8.21 | 5.25 | 10.340 |
+| Namespace with 32 assets | 79.92 | 61.04 | 321.365 |
+
+Bare/annotated live module records occupy 108/1,134 logical bytes each. Receipts
+and churn leave no live contract records, but their signed history alone is
+12.26/14.79 MB at 10,000 operations. Deleting live records therefore cannot bound
+permanent growth while preserving the agreed recovery contract. Namespace markers
+use 33 bytes and asset origins 164 bytes each, excluding module prefixes. Those
+records remain permanent by design even after authority destruction; authority
+destruction itself is covered by existing ledger tests, not this sizing probe.
+
+Full database totals include accepted indexes and synthetic funding bookkeeping;
+the checkpoint includes compression, metadata and uncompacted effects. Real
+funding, session occupancy, heterogeneous contracts, replication, backups and
+compaction change physical cost. Shared fixture policies compress particularly
+well in the bare/asset cases; unique annotations do not. No recovery scan latency
+or history download cost was measured.
+
+**Fee proposal, not implemented:** raise the fixed input/output base from 100 to
+1,000 msat (one sat), keeping existing byte/weight charges and the 10-sat per-asset
+creation fee. That prices fixed record/history overhead more meaningfully without
+introducing expiry, rent, pruning or refunds. In these fixtures the resulting
+fees would be 1.004 sats for a bare contract, 2.028 for an annotated contract,
+2.029 for a receipt, 3.030 for create-and-spend, and 12.140/323.165 for one/32-asset
+creation. One million bare contracts currently cost 104,000 sats in module fees
+for roughly 375 MB logical growth; the proposal makes that 1,004,000 sats.
+This is a conservative policy starting point, not a demonstrated lifetime-cost
+price or a storage-DoS guarantee. Accepted transactions still grow history without
+a global bound, and rejected transactions still pay no fee. Keep coefficients
+deterministic and agreed by all guardians. Fee changes await a separate decision.
+
 ## Evidence and method
 
 The published tag `codex/simplicity-benchmarks-2026-10-03` preserves the original
@@ -237,10 +282,11 @@ same-policy inputs with different witnesses. The archived reports retain the
 earlier checks and scoped lint exceptions; these counts describe those revisions.
 
 Production calibration still needs Raspberry Pi 5 measurements with recorded
-RAM, storage, cooling, clocks and throttling; full admission/consensus/RocksDB
-costs; concurrent valid/invalid submissions; and broader decoder/type/VM shapes.
-Recovery scans and history storage need separate measurement. Fees have not been
-calibrated by these experiments. Rejected transactions pay no accepted-transaction
+RAM, storage, cooling, clocks and throttling; full admission/consensus costs,
+cold/large databases, real funding/storage workloads, and broader decoder/type/VM
+shapes. The module-local concurrency and storage probes above do not measure
+production queueing or recovery scans/downloads. Fees remain unchanged and have
+not been calibrated for lifetime operating cost. Rejected transactions pay no accepted-transaction
 fee, and per-transaction caps do not bound repeated or simultaneous submissions.
 Earlier outer authorization/funding checks, bounded admission and duplicate-work
 coalescing remain separate work. Valid claim-key signatures alone cannot prove

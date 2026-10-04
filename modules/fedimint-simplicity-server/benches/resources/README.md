@@ -53,7 +53,7 @@ revision, compiler flags and allocator details. Do not run builds alongside the
 measurements. The manifest pins fixture transactions, not only case labels.
 
 Fixture construction, SimplicityHL compilation, signing, database seeding,
-warm-up and manifest generation are outside measurement. Every invocation first
+warm-up and manifest generation are outside timing. Ordinary Divan/manifest runs first
 checks all fixtures against the real decoder, executor, preflight, guardian hook
 and core submission processor, including exact rejection reasons. It also checks
 the fully signed transaction's
@@ -91,6 +91,35 @@ setup, warm-up, database caches, stacks and C allocations; the two peak readings
 must not be subtracted to claim incremental validation memory. Only the selected
 workload is constructed. Use the normal allocator, run cells sequentially in
 fresh processes, repeat, and retain raw JSON outside the branch.
+
+## Persistent storage
+
+`FM_SIMPLICITY_BENCH_STORAGE=scenario,count` commits 1–10,000 operations to a
+fresh RocksDB and prints JSON. For example:
+
+```sh
+FM_SIMPLICITY_BENCH_STORAGE=churn,1000 cargo bench --locked \
+  -p fedimint-simplicity-server --bench resources
+```
+
+Scenarios: `bare` creates empty contracts; `live` adds unique, incompressible
+1 KiB annotations; `receipt` puts those annotations in action outputs with no
+UTXO; `churn` creates and spends annotated contracts; `assets1`/`assets32` create
+a namespace and one/32 authorities per operation. Every transaction passes real
+core/module validation and pays exact module fees through synthetic dummy
+funding. Churn has two accepted transactions per operation. Record-count
+assertions check live contracts, namespaces, origins, accepted indexes and
+history batches. This is storage sizing, not a throughput benchmark.
+
+The harness persists the core accepted-transaction index and real signed session
+outcomes in 100-transaction batches, verifying their signatures. It does not run
+networking, Aleph consensus or a wallet recovery scan. Logical module bytes omit
+the module prefix; full database bytes include it, synthetic funding bookkeeping,
+accepted indexes and signed history. Checkpoint/SST sizes include RocksDB
+compression and metadata after flushing; they are not fully compacted steady-state
+sizes or a production disk bound. Session occupancy and real funding change the
+overhead. Only annotations are randomized: shared fixture policies/state may
+compress more than real contracts. Retain raw results outside the branch.
 
 ## What each stage measures
 
