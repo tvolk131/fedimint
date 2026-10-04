@@ -4,7 +4,7 @@ use anyhow::ensure;
 use fedimint_api_client::api::FederationApiExt as _;
 use fedimint_core::db::IDatabaseTransactionOpsCoreTyped;
 use fedimint_core::encoding::{Decodable, Encodable};
-use fedimint_core::module::{ApiRequestErased, ApiVersion};
+use fedimint_core::module::ApiRequestErased;
 use fedimint_core::session_outcome::{ConsensusItem, SessionStatus};
 use fedimint_core::{Amount, OutPoint};
 use serde::{Deserialize, Serialize};
@@ -209,15 +209,12 @@ impl SimplicityClientModule {
         // Replay exactly the prefix already scanned by this wallet, then merge
         // atomically. Future ordinary sync starts after this prefix. Inserting
         // a live API UTXO directly could miss a spend already passed by the cursor.
+        let history = self.session_history().await;
         for index in 0..=next {
             if index == next && open_len == 0 {
                 break;
             }
-            let status = self
-                .context
-                .global_api()
-                .get_session_status(index, &self.context.decoders(), ApiVersion::new(0, 0), None)
-                .await?;
+            let status = history.session(index).await?;
             let items = match status {
                 SessionStatus::Complete(session) => session.items,
                 SessionStatus::Pending(items) if index == next => items,

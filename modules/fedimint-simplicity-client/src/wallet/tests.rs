@@ -1,3 +1,5 @@
+mod history;
+
 use bitcoin::hashes::{Hash, sha256};
 use fedimint_core::core::{DynInput, DynOutput};
 use fedimint_core::db::mem_impl::MemDatabase;

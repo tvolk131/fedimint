@@ -8,7 +8,7 @@ use fedimint_core::module::CommonModuleInit;
 use fedimint_derive_secret::DerivableSecret;
 use fedimint_simplicity_client::descriptor::{BuiltinTemplates, ContractDescriptor, WalletKeys};
 use fedimint_simplicity_client::receipt::{ReceiptContext, SenderReceipt};
-use fedimint_simplicity_client::wallet::{WalletContract, WalletStore};
+use fedimint_simplicity_client::wallet::{SessionHistory, WalletContract, WalletStore};
 use serde::{Deserialize, Serialize};
 
 use super::*;
@@ -465,6 +465,22 @@ async fn recover(path: &Path, phase: &str) {
     let api = api::HistoryApi::new(guardian.clone()).await;
     let stats = api.stats.clone();
     let global = api.into_global();
+    let version = if std::env::var_os("FM_SIMPLICITY_BENCH_LEGACY_HISTORY").is_some() {
+        fedimint_core::module::ApiVersion::new(0, 0)
+    } else {
+        fedimint_api_client::api::VERSION_THAT_INTRODUCED_GET_SESSION_STATUS_V2
+    };
+    let history_api = SessionHistory::new(
+        global,
+        decoders(),
+        version,
+        Some(
+            storage::history_keys()
+                .into_iter()
+                .map(|(peer, key)| (peer, key.public_key()))
+                .collect(),
+        ),
+    );
     let wallet_path = path.join(if phase == "clean" {
         "wallet-clean"
     } else {
@@ -484,7 +500,7 @@ async fn recover(path: &Path, phase: &str) {
     let start = wallet.next_session().await;
     assert_eq!(start > 0, phase == "resume");
     assert_eq!(wallet.is_recovering().await, phase == "resume");
-    wallet.sync(&global, &decoders(), |done, total| {
+    wallet.sync(&history_api, |done, total| {
         if phase == "interrupt" && done > 0 && done == total / 2 {
             println!("{}", serde_json::json!({"phase":phase,"seconds":Instant::now().duration_since(begin).as_secs_f64(), "next_session":done, "target":total,"response_json_bytes":stats.bytes.load(Ordering::Relaxed),"peak_rss_bytes":peak_rss()}));
             // Abrupt process termination: no wallet/API/database destructor runs.
@@ -523,7 +539,7 @@ async fn recover(path: &Path, phase: &str) {
     }
     // A second sync cannot duplicate history or holdings.
     wallet
-        .sync(&global, &decoders(), |_, _| {})
+        .sync(&history_api, |_, _| {})
         .await
         .expect("idempotent sync");
     assert_eq!(wallet.history().await, history);

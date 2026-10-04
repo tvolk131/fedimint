@@ -3,22 +3,22 @@
 //! interactions are recoverable even when the wallet has no remaining
 //! Simplicity holdings.
 pub(crate) mod db;
+mod history;
 
 use std::sync::Arc;
 
 use anyhow::ensure;
-use fedimint_api_client::api::DynGlobalApi;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::ModuleInstanceId;
 use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::encoding::{Decodable, Encodable};
-use fedimint_core::module::ApiVersion;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::session_outcome::{ConsensusItem, SessionOutcome, SessionStatus};
 use fedimint_core::transaction::Transaction;
 use fedimint_core::{OutPoint, TransactionId};
 use fedimint_derive_secret::DerivableSecret;
 use futures::StreamExt as _;
+pub use history::SessionHistory;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -121,8 +121,7 @@ impl WalletStore {
     /// later syncs extend that prefix rather than skipping its remaining items.
     pub async fn sync(
         &self,
-        api: &DynGlobalApi,
-        decoders: &ModuleDecoderRegistry,
+        history: &SessionHistory,
         progress: impl Fn(u64, u64),
     ) -> anyhow::Result<()> {
         let _lock = self.sync_lock.lock().await;
@@ -132,7 +131,7 @@ impl WalletStore {
         } else {
             // Do not hold a write transaction while making network requests.
             drop(dbtx);
-            let target = api.session_count().await?;
+            let target = history.api.session_count().await?;
             dbtx = self.db.begin_transaction().await;
             dbtx.insert_entry(&db::RecoveryTargetKey, &target).await;
             target
@@ -148,11 +147,9 @@ impl WalletStore {
         );
         progress(start, target + 1);
         for index in start..=target {
-            // Use the quorum-authenticated status endpoint, including the open
-            // session's accepted prefix, without waiting for session closure.
-            let status = api
-                .get_session_status(index, decoders, ApiVersion::new(0, 0), None)
-                .await?;
+            // Completed sessions are signed; the open prefix uses quorum
+            // agreement without waiting for session closure.
+            let status = history.session(index).await?;
             match status {
                 SessionStatus::Complete(session) => {
                     self.apply_session(index, &session, true).await?

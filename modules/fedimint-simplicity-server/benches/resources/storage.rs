@@ -261,17 +261,7 @@ pub(super) async fn commit(
 }
 
 pub(super) async fn save_history(db: &Database, history: &mut Vec<AcceptedItem>, index: u64) {
-    let keys: BTreeMap<fedimint_core::PeerId, _> = (0..4u8)
-        .map(|peer| {
-            (
-                u16::from(peer).into(),
-                Keypair::from_secret_key(
-                    SECP256K1,
-                    &SecretKey::from_slice(&[peer + 10; 32]).expect("history signer"),
-                ),
-            )
-        })
-        .collect();
+    let keys = history_keys();
     let public: BTreeMap<_, _> = keys
         .iter()
         .map(|(peer, key)| (*peer, key.public_key()))
@@ -410,4 +400,18 @@ pub(super) fn directory_size(path: &Path) -> (u64, u64) {
         }
     }
     result
+}
+
+pub(super) fn history_keys() -> BTreeMap<fedimint_core::PeerId, Keypair> {
+    (0..4u8)
+        .map(|peer| {
+            (
+                u16::from(peer).into(),
+                Keypair::from_secret_key(
+                    SECP256K1,
+                    &SecretKey::from_slice(&[peer + 10; 32]).expect("history signer"),
+                ),
+            )
+        })
+        .collect()
 }

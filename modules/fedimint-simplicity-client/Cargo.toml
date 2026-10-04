@@ -25,5 +25,9 @@ serde = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+fedimint-connectors = { workspace = true }
+serde_json = { workspace = true }
+
 [lints]
 workspace = true

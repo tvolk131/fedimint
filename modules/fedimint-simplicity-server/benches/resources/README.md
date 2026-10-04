@@ -149,7 +149,10 @@ Three fresh child processes recover cleanly, exit abruptly halfway through the
 committed session prefix, and reopen/resume that wallet. This simulates a process
 crash, not power loss or interrupted storage hardware. Recovery calls production
 `WalletStore::sync` using a fixed mnemonic-derived module root, built-in templates,
-and the real quorum-query/cache layer. Four simulated peer identities read one
+and the real authenticated-query/cache layer. Completed sessions use the existing
+signed/base64 endpoint; open sessions fall back to quorum agreement. Set
+`FM_SIMPLICITY_BENCH_LEGACY_HISTORY=1` to compare the older hex/quorum path.
+Four simulated peer identities read one
 RocksDB through an in-process raw API. This exercises ordered module replay, not
 network transport, peer disagreement, Aleph consensus, full `Client::recover`
 bootstrap, or other modules' recovery. The separate expected-state file is read

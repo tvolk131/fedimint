@@ -112,7 +112,13 @@ It uses Fedimint's history-recovery infrastructure and persists progress so an
 interruption can resume. The Simplicity wallet cannot submit new transactions
 until recovery completes; other modules follow their own recovery rules. There
 is no separate live-contract scan or concurrent history backfill in this design.
-No new guardian recovery endpoint is required for the initial history scan.
+Completed sessions use the existing signed-session API when the negotiated core
+API version and trusted client-config broadcast keys support it. Open sessions,
+older APIs, and configs without those keys use quorum-authenticated history.
+Invalid signed data fails over to another peer without accepting unauthenticated
+history. Unknown modules retain their original bytes for signature verification
+and later interpretation. Recovery, ongoing sync, and market discovery share
+this access path; no new guardian recovery endpoint is required.
 
 Wallet software owns versioned contract templates, descriptors, key derivation,
 annotation encryption, recognition of its historical activity, and reconstruction

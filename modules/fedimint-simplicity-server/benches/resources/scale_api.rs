@@ -6,8 +6,9 @@ use fedimint_api_client::api::global_api::with_cache::GlobalFederationApiWithCac
 use fedimint_api_client::api::{DynGlobalApi, DynModuleApi, IRawFederationApi};
 use fedimint_connectors::{DynGuaridianConnection, PeerStatus, ServerResult};
 use fedimint_core::PeerId;
-use fedimint_core::module::{ApiRequestErased, SerdeModuleEncoding};
-use fedimint_core::session_outcome::SessionStatus;
+use fedimint_core::endpoint_constants::SESSION_STATUS_V2_ENDPOINT;
+use fedimint_core::module::{ApiRequestErased, SerdeModuleEncoding, SerdeModuleEncodingBase64};
+use fedimint_core::session_outcome::{SessionStatus, SessionStatusV2};
 use fedimint_server::consensus::db::{SignedSessionOutcomeKey, SignedSessionOutcomePrefix};
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -74,13 +75,13 @@ impl IRawFederationApi for HistoryApi {
         assert!(self.peers.contains(&peer));
         let response = match method {
             "session_count" => serde_json::json!(self.target),
-            "session_status" => {
+            "session_status" | SESSION_STATUS_V2_ENDPOINT => {
                 let index: u64 =
                     serde_json::from_value(params.params.clone()).expect("session index");
                 self.stats.min_index.fetch_min(index, Ordering::Relaxed);
                 assert!(index <= self.target);
                 let status = if index == self.target {
-                    SessionStatus::Initial
+                    SessionStatusV2::Initial
                 } else {
                     let signed = self
                         .db
@@ -89,9 +90,14 @@ impl IRawFederationApi for HistoryApi {
                         .get_value(&SignedSessionOutcomeKey(index))
                         .await
                         .expect("retained history");
-                    SessionStatus::Complete(signed.session_outcome)
+                    SessionStatusV2::Complete(signed)
                 };
-                serde_json::to_value(SerdeModuleEncoding::from(&status)).expect("wire status")
+                if method == SESSION_STATUS_V2_ENDPOINT {
+                    serde_json::to_value(SerdeModuleEncodingBase64::from(&status)).expect("wire v2")
+                } else {
+                    serde_json::to_value(SerdeModuleEncoding::from(&SessionStatus::from(status)))
+                        .expect("wire status")
+                }
             }
             _ => panic!("unexpected recovery endpoint {method}"),
         };

@@ -1,4 +1,4 @@
-# Simplicity resource results — 2026-10-02/03
+# Simplicity resource results — 2026-10-02–04
 
 These measurements motivated transaction-wide caps, shared context, early
 rejection and decoded-program reuse. The latest measured core path takes about
@@ -157,11 +157,9 @@ state has a visible access penalty despite the transaction's fixed lookup count.
 Before designing a new recovery endpoint, evaluate the
 [existing signed/base64 session API](../../../../fedimint-api-client/src/api/global_api/with_cache.rs).
 It authenticates completed history fetched from one peer and falls back to quorum
-queries for unsigned open-session state. Our wallet currently passes API version
-0.0 without broadcast keys, selecting the older quorum path. Negotiated use of
-the existing path is a module-client follow-up; it needs compatibility, signature
-failure/failover and unknown-module decoding tests. Its savings are not measured
-here. Larger/full sessions and transaction sizes can also increase cache memory;
+queries for unsigned open-session state. Those measurements used API version 0.0 without broadcast keys, selecting the
+older quorum path. The signed-history comparison below measures negotiated use
+of the existing API. Larger/full sessions and transaction sizes can also increase cache memory;
 the observed RSS plateau is not a memory bound.
 
 All scale cells passed clean recovery, abrupt interruption/resume, holdings/history
@@ -173,6 +171,22 @@ reported large cells). The corrected 100,000-contract/origin reruns are included
 in the ranges above. The benchmark smoke suite, shared resource-workload regression,
 formatting and scoped Clippy passed; Clippy retained six existing common-crate
 `map_unwrap_or` warnings. These changes add measurements, not production behavior.
+
+## Signed-session download follow-up
+
+A 100,000-operation sparse recovery comparison on the same M4 Pro, with the same
+controlled transport and fresh processes, measured 281.1 MB / 2.77 s for the
+legacy hex/quorum path and 62.7 MB / 1.40 s for signed/base64 completed sessions.
+That is about 78% less response JSON; combined peak RSS remained 210–212 MiB.
+Both paths passed full-history, spendability, interruption/resume and resync
+checks. These are single runs, not real-network or Pi 5 latency predictions.
+
+The module now uses the negotiated API and trusted client-config broadcast keys
+for recovery, normal sync and market discovery. Tests cover signature/body/index
+corruption, malformed/unavailable responses, peer failover, old APIs, missing
+keys, unknown modules, quorum verification of open prefixes, and retry after all
+peers fail authentication. All 25 client tests and four guardian integration tests
+passed. Failed authentication leaves recovery pending; it cannot advance the cursor.
 
 ## Evidence and method
 

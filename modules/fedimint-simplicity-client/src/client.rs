@@ -25,7 +25,7 @@ use crate::common::{ContractInput, ContractOutput, SimplicityCommonInit, Simplic
 use crate::compiler::{TemplateProgramWitness, WitnessNameToValueMap, WitnessValues};
 use crate::descriptor::{BuiltinTemplates, ContractDescriptor, ContractTemplates};
 use crate::states::{OperationStatus, SimplicityState};
-use crate::wallet::{HistoryEntry, WalletContract, WalletStore, db};
+use crate::wallet::{HistoryEntry, SessionHistory, WalletContract, WalletStore, db};
 
 /// Applications provide non-signature witnesses; the named owner signature is
 /// installed only after core funding and change are fixed. Public covenants
@@ -102,6 +102,7 @@ impl ClientModuleInit for SimplicityClientInit {
         .map_err(ClientModuleError::other)?;
         Ok(SimplicityClientModule {
             store,
+            core_api_version: args.core_api_version,
             context: args.context(),
             intents: self.intents.clone(),
             intent_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -123,8 +124,14 @@ impl ClientModuleInit for SimplicityClientInit {
         )
         .await
         .map_err(ClientModuleError::other)?;
+        let history = SessionHistory::new(
+            args.api.clone(),
+            args.context.decoders(),
+            args.core_api_version,
+            args.context.get_config().await.global.broadcast_public_keys,
+        );
         store
-            .sync(&args.api, &args.context.decoders(), |complete, total| {
+            .sync(&history, |complete, total| {
                 let total = total.min(u64::from(u32::MAX)) as u32;
                 args.update_recovery_progress(RecoveryProgress {
                     complete: (complete.min(u64::from(total.saturating_sub(1)))) as u32,
@@ -140,6 +147,7 @@ impl ClientModuleInit for SimplicityClientInit {
 #[derive(Debug, Clone)]
 pub struct SimplicityClientModule {
     pub(crate) store: WalletStore,
+    core_api_version: ApiVersion,
     pub(crate) context: ClientContext<Self>,
     pub(crate) intents: Arc<dyn crate::intent::IntentHandlers>,
     pub(crate) intent_lock: Arc<tokio::sync::Mutex<()>>,
@@ -201,12 +209,17 @@ impl SimplicityClientModule {
     /// Refresh holdings and confirmed history. Safe to repeat or interrupt.
     pub async fn sync(&self) -> anyhow::Result<()> {
         self.store
-            .sync(
-                &self.context.global_api(),
-                &self.context.decoders(),
-                |_, _| {},
-            )
+            .sync(&self.session_history().await, |_, _| {})
             .await
+    }
+
+    pub(crate) async fn session_history(&self) -> SessionHistory {
+        SessionHistory::new(
+            self.context.global_api(),
+            self.context.decoders(),
+            self.core_api_version,
+            self.context.get_config().await.global.broadcast_public_keys,
+        )
     }
 
     pub async fn contracts(&self) -> Vec<(OutPoint, WalletContract)> {
