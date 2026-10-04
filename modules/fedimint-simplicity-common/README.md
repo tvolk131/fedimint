@@ -229,6 +229,9 @@ module. The API is currently Rust-only:
   `SpendIntent::owner(outpoint)` installs an owner signature automatically;
   custom intents supply other witnesses and an optional signature witness name.
   Asset change and authority successors remain explicit outputs.
+- `operation_status(id)` reads local submitted/accepted/complete/rejected progress
+  without a federation request; accepted operations may still be syncing history.
+  Unknown IDs, including original IDs after mnemonic recovery, return `None`.
 - `await_operation(id)` waits for acceptance and history synchronization or
   rejection cleanup. The core executor resumes pending submissions on restart.
 - `submit_with_receipt(..., context)` explicitly includes a sender receipt with

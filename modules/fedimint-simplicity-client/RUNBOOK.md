@@ -127,7 +127,20 @@ Replacement Mint v2 notes are processed by the ordinary client state machines;
 reopening the same database resumes them. If a command is interrupted, use
 `simplicity_wallet wait OPERATION_ID` with the recorded operation ID, or inspect
 status after reopening. Do not repeat a purchase merely because a response was
-lost. The SDK's `await_operation` and `intent`/`await_intent` methods
+lost. Inspect a recorded operation without waiting for a federation-history sync:
+
+```bash
+simplicity_wallet operation OPERATION_ID
+```
+
+`submitted` means its local submission is pending; `accepted_syncing_history`
+means acceptance is known but confirmed history is still being synchronized.
+`complete` means Simplicity history is synchronized, although another module's
+change processing may still be pending. `rejected` does not by itself authorize
+funding release. `unknown_local_operation` is also normal for original operation
+IDs after mnemonic recovery; inspect confirmed history instead.
+
+The SDK's `operation_status`/`await_operation` and `intent`/`await_intent` methods
 expose durable status. A pending transaction retains its funding; cancellation
 does not prove rejection or authorize releasing notes.
 
@@ -144,8 +157,12 @@ unset simplicity_mnemonic
 ```
 
 The example passes `None` for the backup snapshot, waits for module recovery,
-then reopens the client. Compare holdings and confirmed transaction IDs with
-the original view, including transactions whose contracts have all been spent.
+then reopens the client. While waiting it displays the existing core recovery
+progress counters, suppressing duplicate/unchanged percentage updates. Progress
+alone cannot report failure or prove completion; the example also waits on the
+core's recovery outcome API and propagates failures. Compare holdings and
+confirmed transaction IDs with the original view, including transactions whose
+contracts have all been spent.
 For a spendability check, first retain a funded owner contract and release it
 from the recovered wallet. Required inputs are wallet software, mnemonic and
 the original federation; no external backup file or deprecated backup service
@@ -186,3 +203,36 @@ Monitor disk growth and consensus progress during load. Per-transaction caps do
 not limit the number of concurrent submissions. There is no module-owned global
 admission queue. Keep a coordinated rollback/upgrade plan: restoring an old
 binary or old database is not automatically safe after newer state is accepted.
+
+## Validation metrics
+
+The module uses the existing guardian Prometheus endpoint. Scrape each guardian
+process separately, including two guardians sharing a Pi; keep the existing
+metrics endpoint access controls. The module adds three metric families:
+
+- `fm_simplicity_validation_seconds`: histogram of hook wall time by `phase`.
+- `fm_simplicity_validation_calls_total`: finished/dropped hook calls by `phase`
+  and fixed `outcome` category (`ok`, `interrupted`, or a rejection category).
+- `fm_simplicity_validation_active`: calls currently inside each hook, including
+  those awaiting database access. This is not a queue-length or CPU-use gauge.
+
+The four phases are `structure` (cheap transaction checks), `resolve` (stored
+contract reads), `prepare` (decoding, commitments and aggregate cost checks), and
+`validate` (asset accounting, context construction and program execution).
+Structure/preparation run per module kind; resolution/validation run per
+instance. All instances are aggregated in these metrics.
+
+These measure work attempts in both admission and consensus, including retries;
+they are not unique transaction counts. An `ok` hook can be followed by a later
+rejection or rollback. `interrupted` means the call was dropped without returning
+an outcome, such as task cancellation. Timings include waiting and are not pure
+CPU measurements. Counters reset on process restart. No metric changes fees,
+validity, or admission behavior.
+
+Outcomes include `resource_limit`, `program`, `commitment`, `program_rejected`,
+`unknown_contract`, `assets`, and signature/context categories. In particular,
+`unknown_contract` also covers ordinary shared-contract races; rejection rate
+alone is not evidence of an attack. Labels contain no transaction IDs, asset IDs,
+contract commitments, wallet identifiers or raw error text. Compare per-guardian
+phase latency and active work with existing session progress and host CPU,
+memory, disk and thermal measurements when calibrating the Pi.

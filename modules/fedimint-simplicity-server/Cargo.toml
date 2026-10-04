@@ -21,6 +21,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 erased-serde = { workspace = true }
 fedimint-core = { workspace = true }
+fedimint-metrics = { workspace = true }
 fedimint-server-core = { workspace = true }
 fedimint-simplicity-common = { workspace = true }
 futures = { workspace = true }

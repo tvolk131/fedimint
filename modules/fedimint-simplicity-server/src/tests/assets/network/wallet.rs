@@ -108,11 +108,19 @@ async fn run() {
     // The executor is stopped: this must persist the submission before any
     // guardian can see it, then finish after reopening the same database.
     let (operation, deposit_id) = wallet.submit(vec![], vec![deposit], vec![]).await.unwrap();
+    assert_eq!(
+        wallet.operation_status(operation).await,
+        Some(fedimint_simplicity_client::states::OperationStatus::Submitted)
+    );
     drop(wallet);
     alice.shutdown().await;
     let alice = open(builder(false).await, alice_db.clone(), 1).await;
     let wallet = alice.get_first_module::<SimplicityClientModule>().unwrap();
     wallet.await_operation(operation).await.unwrap();
+    assert_eq!(
+        wallet.operation_status(operation).await,
+        Some(fedimint_simplicity_client::states::OperationStatus::Complete)
+    );
     assert_eq!(wallet.history().await.len(), 1);
     assert_eq!(wallet.contracts().await[0].0.txid, deposit_id);
 
@@ -163,6 +171,10 @@ async fn run() {
         .await
         .unwrap();
     assert!(wallet.await_operation(rejected).await.is_err());
+    assert!(matches!(
+        wallet.operation_status(rejected).await,
+        Some(fedimint_simplicity_client::states::OperationStatus::Rejected(_))
+    ));
     assert_eq!(wallet.history().await, before_rejection);
     // The rejected operation must release its reservation for a corrected spend.
     submit(&wallet, vec![top_up_spend(id, true)], vec![], vec![]).await;
@@ -268,6 +280,7 @@ async fn run() {
         .unwrap();
     assert_eq!(recovered.contracts().await, expected_contracts);
     assert_eq!(recovered.history().await, expected_history);
+    assert_eq!(recovered.operation_status(operation).await, None);
 
     // Recover Bob independently, proving the sender never needed his discovery
     // key and the receiver needs no locally saved receive request.

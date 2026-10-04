@@ -525,6 +525,38 @@ impl SimplicityClientModule {
         Ok((operation_id, range.txid()))
     }
 
+    /// Read local progress without a federation request or waiting for history.
+    /// `Accepted` means the transaction was accepted but history synchronization
+    /// is still pending. `Complete` does not imply another module's change or
+    /// funding-restoration state machines have finished. This is informational;
+    /// use the intent API for cancellation/retry and funding safety decisions.
+    /// Mnemonic recovery restores confirmed history, not local operation IDs.
+    pub async fn operation_status(&self, operation_id: OperationId) -> Option<OperationStatus> {
+        // Read active state first, then the durable result so a concurrent
+        // terminal transition cannot appear pending after we see its result.
+        let active = self
+            .context
+            .get_own_operation_active_states(operation_id)
+            .await;
+        match self
+            .store
+            .db
+            .begin_transaction_nc()
+            .await
+            .get_value(&db::OperationResultKey(operation_id))
+            .await?
+        {
+            Some(Ok(())) => Some(OperationStatus::Complete),
+            Some(Err(error)) => Some(OperationStatus::Rejected(error)),
+            None => Some(
+                active
+                    .into_iter()
+                    .next()
+                    .map_or(OperationStatus::Submitted, |(state, _)| state.status),
+            ),
+        }
+    }
+
     /// Wait for durable submission, rejection cleanup, and confirmed history.
     pub async fn await_operation(&self, operation_id: OperationId) -> anyhow::Result<()> {
         let (result, _) = self

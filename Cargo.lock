@@ -4928,6 +4928,7 @@ dependencies = [
  "fedimint-dummy-common",
  "fedimint-dummy-server",
  "fedimint-logging",
+ "fedimint-metrics",
  "fedimint-mintv2-client",
  "fedimint-mintv2-common",
  "fedimint-mintv2-server",

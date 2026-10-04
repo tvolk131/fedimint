@@ -1,6 +1,7 @@
 //! Experimental Simplicity guardian module.
 
 pub mod db;
+mod metrics;
 mod preparation;
 #[cfg(test)]
 mod tests;
@@ -216,25 +217,30 @@ impl ServerModule for Simplicity {
     fn verify_transaction(
         context: &ModuleTransactionContext<'_>,
     ) -> Result<(), fedimint_core::transaction::TransactionError> {
+        let call = metrics::VALIDATION.start(metrics::Phase::Structure);
         // State resolution and kind-wide decoding follow these cheap checks.
-        fedimint_simplicity_common::resources::check_signed_structure(
-            context.transaction,
-            context.module_instance_id,
+        call.finish(
+            fedimint_simplicity_common::resources::check_signed_structure(
+                context.transaction,
+                context.module_instance_id,
+            )
+            .map(|_| ()),
         )
-        .map(|_| ())
     }
     async fn prepare_transaction(
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
         context: &ModuleTransactionContext<'_>,
     ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
-        preparation::resolve(dbtx, context).await
+        let call = metrics::VALIDATION.start(metrics::Phase::Resolve);
+        call.finish(preparation::resolve(dbtx, context).await)
     }
     fn prepare_kind_transaction(
         context: &ModuleTransactionContext<'_>,
         instances: BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
     ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
-        preparation::prepare(context, instances)
+        let call = metrics::VALIDATION.start(metrics::Phase::Prepare);
+        call.finish(preparation::prepare(context, instances))
     }
     async fn process_input<'a, 'b, 'c>(
         &'a self,
@@ -257,9 +263,12 @@ impl ServerModule for Simplicity {
         dbtx: &mut DatabaseTransaction<'_>,
         context: &ModuleTransactionContext<'_>,
     ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
-        validation::validate(self, dbtx, context)
-            .await
-            .map(ModuleTransactionValidation::new)
+        let call = metrics::VALIDATION.start(metrics::Phase::Validate);
+        call.finish(
+            validation::validate(self, dbtx, context)
+                .await
+                .map(ModuleTransactionValidation::new),
+        )
     }
     async fn process_input_with_context<'a, 'b, 'c>(
         &'a self,

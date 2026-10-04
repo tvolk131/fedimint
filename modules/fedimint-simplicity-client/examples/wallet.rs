@@ -1,5 +1,6 @@
 //! Native SDK walkthrough; see ../RUNBOOK.md. The mnemonic is read from a pipe,
 //! never command-line arguments, and is not stored separately from wallet data.
+use std::collections::BTreeMap;
 use std::io::{self, BufRead, IsTerminal};
 use std::path::PathBuf;
 
@@ -17,7 +18,9 @@ use fedimint_core::{Amount, OutPoint, TransactionId};
 use fedimint_mintv2_client::{FinalReceiveOperationState, MintClientInit, MintClientModule};
 use fedimint_rocksdb::RocksDb;
 use fedimint_simplicity_client::common::assets::AssetBundle;
+use fedimint_simplicity_client::states::OperationStatus;
 use fedimint_simplicity_client::{SimplicityClientInit, SimplicityClientModule, SpendIntent};
+use futures::StreamExt as _;
 
 #[derive(Parser)]
 #[command(about = "Testnet-only Simplicity SDK walkthrough; mnemonic on stdin")]
@@ -37,6 +40,10 @@ enum Command {
         invite: InviteCode,
     },
     Status,
+    /// Show local operation progress without waiting for federation history.
+    Operation {
+        operation: OperationId,
+    },
     /// Read Mint v2 ecash from the second line of stdin and reissue it.
     Receive,
     /// Lock existing ecash to a recoverable owner contract (amount in msat).
@@ -112,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
     // Opening an interrupted recovery resumes its durable progress. Unusable
     // modules become available only after recovery completes and we reopen.
     if client.has_pending_recoveries() || !client.all_modules_usable() {
-        let recovery = client.wait_for_all_recoveries().await;
+        let recovery = wait_for_recovery(&client).await;
         client.shutdown().await;
         recovery?;
         client = builder().await.open(connectors, database, root).await?;
@@ -122,9 +129,45 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
+async fn wait_for_recovery(client: &ClientHandle) -> anyhow::Result<()> {
+    let mut progress = Box::pin(client.subscribe_to_recovery_progress());
+    let outcome = client.wait_for_all_recoveries();
+    tokio::pin!(outcome);
+    let mut shown = BTreeMap::new();
+    loop {
+        tokio::select! {
+            // Progress alone cannot report terminal recovery failures.
+            result = &mut outcome => return result.map_err(Into::into),
+            Some((module, value)) = progress.next() => {
+                let percent = if value.total == 0 {
+                    None
+                } else {
+                    Some(u64::from(value.complete) * 100 / u64::from(value.total))
+                };
+                // Bound output during very large history scans and suppress
+                // duplicate notifications. No wallet data enters these lines.
+                if shown.insert(module, percent) != Some(percent) {
+                    eprintln!("recovery module={module} complete={} total={}", value.complete, value.total);
+                }
+            }
+        }
+    }
+}
+
 async fn run(client: &ClientHandle, command: Command) -> anyhow::Result<()> {
     let wallet = client.get_first_module::<SimplicityClientModule>()?;
     match command {
+        Command::Operation { operation } => {
+            let status = match wallet.operation_status(operation).await {
+                None => "unknown_local_operation",
+                Some(OperationStatus::Submitted) => "submitted",
+                Some(OperationStatus::Accepted) => "accepted_syncing_history",
+                Some(OperationStatus::Complete) => "complete",
+                Some(OperationStatus::Rejected(_)) => "rejected",
+            };
+            // Keep raw rejection strings and wallet descriptors out of output.
+            println!("operation={} status={status}", operation.fmt_full());
+        }
         Command::Join { .. } | Command::Recover { .. } | Command::Status => {
             wallet.sync().await?;
             println!("ecash_msat={}", client.get_balance_for_btc().await?.msats);
