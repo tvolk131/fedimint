@@ -555,6 +555,14 @@ impl ClientModule for MintClientModule {
         reservation::request_release(dbtx, operation_id, txid).await
     }
 
+    async fn await_funding_release_progress(
+        &self,
+        operation_id: OperationId,
+        txid: fedimint_core::TransactionId,
+    ) -> Result<(), ClientModuleError> {
+        reservation::await_release_progress(self.client_ctx.module_db(), operation_id, txid).await
+    }
+
     async fn await_primary_module_output(
         &self,
         operation_id: OperationId,

@@ -159,6 +159,70 @@ async fn concurrent_restorations_cannot_commit_twice() {
     retry.commit_tx().await;
 }
 
+#[tokio::test]
+async fn release_waits_for_committed_progress_and_rejects_wrong_transactions() {
+    use futures::poll;
+    let db = Database::new(MemDatabase::new(), ModuleDecoderRegistry::default());
+    let common = common();
+    reserved(&db, &common).await;
+    let wait = await_release_progress(&db, common.operation_id, common.txid);
+    tokio::pin!(wait);
+    assert!(poll!(&mut wait).is_pending());
+    let mut tx = db.begin_transaction().await;
+    record_outcome(&mut tx.to_ref_nc(), &common, false).await;
+    assert!(poll!(&mut wait).is_pending());
+    tx.commit_tx().await;
+    assert!(wait.await.is_ok());
+
+    let mut tx = db.begin_transaction().await;
+    assert!(
+        !request_release(&mut tx.to_ref_nc(), common.operation_id, common.txid)
+            .await
+            .unwrap()
+    );
+    tx.commit_tx().await;
+    let wait = await_release_progress(&db, common.operation_id, common.txid);
+    tokio::pin!(wait);
+    assert!(poll!(&mut wait).is_pending());
+    let (balance, _) = tokio::sync::watch::channel(());
+    let mut tx = db.begin_transaction().await;
+    tx.ignore_uncommitted();
+    restore_notes(&mut tx.to_ref_nc(), &common, balance.clone()).await;
+    drop(tx);
+    assert!(poll!(&mut wait).is_pending());
+    let mut tx = db.begin_transaction().await;
+    restore_notes(&mut tx.to_ref_nc(), &common, balance).await;
+    tx.commit_tx().await;
+    assert!(wait.await.is_ok());
+
+    // Progress that happened before subscription is also observed, including
+    // reopening after release and old operations without a reservation.
+    await_release_progress(&db, common.operation_id, common.txid)
+        .await
+        .unwrap();
+    await_release_progress(&db, OperationId::new_random(), common.txid)
+        .await
+        .unwrap();
+    let wrong = TransactionId::from_raw_hash(bitcoin_hashes::Hash::from_byte_array([8; 32]));
+    assert!(
+        await_release_progress(&db, common.operation_id, wrong)
+            .await
+            .is_err()
+    );
+    let mut tx = db.begin_transaction().await;
+    tx.insert_entry(
+        &FundingReservationKey(common.operation_id),
+        &FundingReservation::Complete(common.txid),
+    )
+    .await;
+    tx.commit_tx().await;
+    assert!(
+        await_release_progress(&db, common.operation_id, common.txid)
+            .await
+            .is_err()
+    );
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Encodable, Decodable)]
 enum LegacyState {
     Pending,

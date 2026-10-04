@@ -3,7 +3,7 @@
 use fedimint_client_module::error::ClientModuleError;
 use fedimint_core::TransactionId;
 use fedimint_core::core::OperationId;
-use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
+use fedimint_core::db::{Database, DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::encoding::{Decodable, Encodable};
 
 use crate::client_db::{FundingReservationKey, SpendableNoteKey};
@@ -16,6 +16,30 @@ pub(crate) enum FundingReservation {
     ReleaseRequested(TransactionId),
     Released(TransactionId),
     Complete(TransactionId),
+}
+
+/// Waking only permits rechecking the release request. In particular, learning
+/// the rejection does not itself authorize restoring any notes.
+pub(crate) async fn await_release_progress(
+    db: &Database,
+    operation: OperationId,
+    txid: TransactionId,
+) -> Result<(), ClientModuleError> {
+    db.wait_key_check(&FundingReservationKey(operation), |record| match record {
+        None => Some(Ok(())),
+        Some(FundingReservation::AwaitingOutcome) => None,
+        Some(FundingReservation::ReleaseRequested(bound)) if bound == txid => None,
+        Some(FundingReservation::Rejected(bound) | FundingReservation::Released(bound))
+            if bound == txid =>
+        {
+            Some(Ok(()))
+        }
+        Some(_) => Some(Err(ClientModuleError::other(
+            "funding reservation was accepted or belongs to another transaction",
+        ))),
+    })
+    .await
+    .0
 }
 
 /// The caller authenticates permanent invalidity. Mint additionally requires a

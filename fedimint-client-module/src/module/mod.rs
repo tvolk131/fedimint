@@ -88,6 +88,12 @@ pub trait ClientContextIface: MaybeSend + MaybeSync {
         txid: TransactionId,
     ) -> Result<bool, ClientModuleError>;
 
+    async fn await_funding_release_progress(
+        &self,
+        operation_id: OperationId,
+        txid: TransactionId,
+    ) -> Result<(), ClientModuleError>;
+
     // TODO: unify
     async fn finalize_and_submit_transaction_inner(
         &self,
@@ -445,7 +451,8 @@ where
     /// user cancellation is insufficient. Never use this for received ecash.
     ///
     /// Returns false while funding is still pending or being released. Commit
-    /// this transaction even when false, and poll again before rebuilding. A
+    /// this transaction even when false, then wait for funding release progress
+    /// and recheck before rebuilding. A
     /// repeated call after release is harmless. With no reservation (including
     /// older operations), returns true without modifying funding.
     pub async fn release_funding_after_conflict(
@@ -461,6 +468,20 @@ where
                 operation_id,
                 txid,
             )
+            .await
+    }
+
+    /// Wait for a pending release to make progress, without holding a database
+    /// transaction. Call only after committing `release_funding_after_conflict`.
+    /// This is a wakeup, not authorization to rebuild: recheck release first.
+    pub async fn await_funding_release_progress(
+        &self,
+        operation_id: OperationId,
+        txid: TransactionId,
+    ) -> Result<(), ClientModuleError> {
+        self.client
+            .get()
+            .await_funding_release_progress(operation_id, txid)
             .await
     }
 
@@ -1199,6 +1220,18 @@ pub trait ClientModule: Debug + MaybeSend + MaybeSync + 'static {
         Ok(true)
     }
 
+    /// Wait until another release request can make progress. Reservation
+    /// providers must wait on local state notifications while the outcome or
+    /// restoration is pending, and return immediately when a recheck is useful.
+    /// Modules without reservations have nothing to wait for.
+    async fn await_funding_release_progress(
+        &self,
+        _operation_id: OperationId,
+        _txid: TransactionId,
+    ) -> Result<(), ClientModuleError> {
+        Ok(())
+    }
+
     /// Waits for the funds from an output created by
     /// [`Self::create_final_inputs_and_outputs`] to become available. This
     /// function returning typically implies a change in the output of
@@ -1370,6 +1403,12 @@ pub trait IClientModule: Debug {
         txid: TransactionId,
     ) -> Result<bool, ClientModuleError>;
 
+    async fn await_funding_release_progress(
+        &self,
+        operation_id: OperationId,
+        txid: TransactionId,
+    ) -> Result<(), ClientModuleError>;
+
     async fn await_primary_module_output(
         &self,
         operation_id: OperationId,
@@ -1526,6 +1565,14 @@ where
             txid,
         )
         .await
+    }
+
+    async fn await_funding_release_progress(
+        &self,
+        operation_id: OperationId,
+        txid: TransactionId,
+    ) -> Result<(), ClientModuleError> {
+        <T as ClientModule>::await_funding_release_progress(self, operation_id, txid).await
     }
 
     async fn await_primary_module_output(

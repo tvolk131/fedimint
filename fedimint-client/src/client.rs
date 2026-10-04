@@ -3006,6 +3006,20 @@ impl ClientContextIface for Client {
         Ok(released)
     }
 
+    async fn await_funding_release_progress(
+        &self,
+        operation_id: OperationId,
+        txid: fedimint_core::TransactionId,
+    ) -> Result<(), ClientModuleError> {
+        futures::future::try_join_all(
+            self.modules
+                .iter_modules()
+                .map(|(_, _, module)| module.await_funding_release_progress(operation_id, txid)),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn fee_quote(
         &self,
         operation_id: OperationId,

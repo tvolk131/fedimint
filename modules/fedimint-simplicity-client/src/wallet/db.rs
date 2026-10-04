@@ -72,3 +72,14 @@ impl_db_lookup!(key = ActiveIntentKey, query_prefix = ActiveIntentPrefix);
 #[derive(Debug, Clone, Encodable, Decodable, Serialize)]
 pub struct ViewRevisionKey;
 impl_db_record!(key = ViewRevisionKey, value = [u8; 32], db_prefix = 0x0c);
+
+/// Wakes intent discovery only after committed queue changes. Older wallets
+/// implicitly start at revision zero; no migration or history scan is needed.
+#[derive(Debug, Clone, Encodable, Decodable, Serialize)]
+pub struct IntentRevisionKey;
+impl_db_record!(
+    key = IntentRevisionKey,
+    value = u64,
+    db_prefix = 0x0d,
+    notify_on_modify = true
+);

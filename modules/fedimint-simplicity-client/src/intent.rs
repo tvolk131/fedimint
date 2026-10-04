@@ -16,7 +16,9 @@ use crate::client::{SimplicityClientModule, SpendIntent, Submission};
 use crate::common::ContractOutput;
 use crate::wallet::{WalletContract, db};
 
+mod driver;
 mod market;
+use driver::IntentWait;
 pub use market::MintPairs;
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize, Encodable, Decodable)]
@@ -262,6 +264,7 @@ impl SimplicityClientModule {
         )
         .await;
         tx.insert_new_entry(&db::ActiveIntentKey(id), &()).await;
+        advance_revision(&mut tx.to_ref_nc()).await;
         tx.commit_tx_result().await?;
         // The durable driver also resumes this if interrupted here. A stopped
         // core executor can still persist the first attempt for later startup.
@@ -368,46 +371,18 @@ impl SimplicityClientModule {
         Ok(())
     }
 
-    pub(crate) async fn run_intents(&self) {
-        loop {
-            let ids = self
-                .store
-                .db
-                .begin_transaction_nc()
-                .await
-                .find_by_prefix(&db::ActiveIntentPrefix)
-                .await
-                .map(|(key, ())| key.0)
-                .collect::<Vec<_>>()
-                .await;
-            for id in ids {
-                // Unavailable history must not stall cancellation or other
-                // intents. Dropping a preparation rolls back its database tx.
-                if let Ok(Err(error)) = fedimint_core::runtime::timeout(
-                    Duration::from_secs(10),
-                    self.advance_intent(id),
-                )
-                .await
-                {
-                    tracing::warn!(target: "fm::simplicity", ?id, %error, "Intent driver will retry local advancement");
-                }
-            }
-            fedimint_core::runtime::sleep(Duration::from_millis(250)).await;
-        }
-    }
-
-    async fn advance_intent(&self, id: OperationId) -> anyhow::Result<()> {
+    async fn advance_intent(&self, id: OperationId) -> anyhow::Result<IntentWait> {
         let _guard = self.intent_lock.lock().await;
         let Some(mut record) = self.intent(id).await else {
-            return Ok(());
+            return Ok(IntentWait::Changed);
         };
         let original = record.clone();
         if let IntentStatus::Backoff { until_ms } = record.status {
             if now_ms() < until_ms {
-                return Ok(());
+                return Ok(IntentWait::Backoff(until_ms));
             }
         } else if !record.status.is_running() {
-            return Ok(());
+            return Ok(IntentWait::Changed);
         }
 
         if record.status == IntentStatus::Submitted {
@@ -423,7 +398,9 @@ impl SimplicityClientModule {
                 .get_value(&db::OperationResultKey(attempt.operation))
                 .await
                 .flatten();
-            let Some(result) = result else { return Ok(()) };
+            let Some(result) = result else {
+                return Ok(IntentWait::Outcome(attempt.operation));
+            };
             if result.is_err() {
                 self.sync().await?;
             }
@@ -447,7 +424,7 @@ impl SimplicityClientModule {
                 // this idempotently; no replacement starts before completion.
                 tx.commit_tx_result().await?;
                 if !released {
-                    return Ok(());
+                    return Ok(IntentWait::Funding(attempt.operation, attempt.transaction));
                 }
             }
             record.resolve(result, &contracts);
@@ -507,7 +484,7 @@ impl SimplicityClientModule {
                                 record.status = IntentStatus::Submitted;
                                 save_record(&mut tx.to_ref_nc(), id, &record).await;
                                 tx.commit_tx_result().await?;
-                                return Ok(());
+                                return Ok(IntentWait::Changed);
                             }
                             Err(error) => {
                                 record.status = IntentStatus::Attention(format!("{error:#}"))
@@ -527,11 +504,11 @@ impl SimplicityClientModule {
         );
         save_record(&mut tx.to_ref_nc(), id, &record).await;
         tx.commit_tx_result().await?;
-        Ok(())
+        Ok(IntentWait::Changed)
     }
 }
 
-// Keep completed history out of the driver's hot polling path. Index and
+// Keep completed history out of the driver's discovery scan. Index and
 // record updates share the same transaction, including submission transitions.
 async fn save_record(tx: &mut DatabaseTransaction<'_>, id: OperationId, record: &IntentRecord) {
     tx.insert_entry(&db::IntentKey(id), record).await;
@@ -540,6 +517,13 @@ async fn save_record(tx: &mut DatabaseTransaction<'_>, id: OperationId, record: 
     } else {
         tx.remove_entry(&db::ActiveIntentKey(id)).await;
     }
+    advance_revision(tx).await;
+}
+
+async fn advance_revision(tx: &mut DatabaseTransaction<'_>) {
+    let revision = tx.get_value(&db::IntentRevisionKey).await.unwrap_or(0);
+    tx.insert_entry(&db::IntentRevisionKey, &revision.wrapping_add(1))
+        .await;
 }
 
 #[cfg(test)]

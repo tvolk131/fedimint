@@ -227,6 +227,11 @@ or automatically execute unfinished local intentions. A watch-only subscription
 with no confirmed participation is local-only state. Applications can add it again.
 These mechanisms change client behavior only, not guardian consensus rules.
 
+Local intent progress waits on committed database notifications for intent
+changes, submission outcomes and primary funding restoration. Timers implement
+semantic backoff and retry failed advancement; they do not poll local outcomes.
+Every wakeup rechecks durable state before advancing or rebuilding a transaction.
+
 ## Alternatives
 
 Compact module-specific recovery history remains a possible download
