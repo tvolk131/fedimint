@@ -640,38 +640,35 @@ impl Database {
         K: DatabaseKey + DatabaseRecord + DatabaseKeyWithNotify,
     {
         let key_bytes = key.to_bytes();
+        let mut checker = checker;
         loop {
-            // `register` is async, including through prefixed databases. Poll
-            // it before reading so a commit between the read and the wait
-            // cannot be lost before the subscription has actually started.
-            let notify = self.inner.register(&key_bytes);
-            futures::pin_mut!(notify);
-            if futures::poll!(notify.as_mut()).is_ready() {
-                continue;
+            // Move a mutable borrow into the read future so a Send checker
+            // does not also need to be Sync.
+            let checker = &mut checker;
+            let key_bytes = &key_bytes;
+            tokio::select! {
+                // Subscribe before taking the snapshot to avoid missing a commit
+                // between the read and the wait. `register` subscribes on its first poll.
+                biased;
+
+                () = self.inner.register(key_bytes) => {},
+                Some(result) = async move {
+                    let mut tx = self.inner.begin_transaction().await;
+                    let maybe_value_bytes = tx
+                        .raw_get_bytes(key_bytes)
+                        .await
+                        .expect("Unrecoverable error when reading from database")
+                        .map(|value_bytes| {
+                            decode_value_expect(&value_bytes, &self.module_decoders, key_bytes)
+                        });
+
+                    checker(maybe_value_bytes).map(|value| {
+                        (value, DatabaseTransaction::new(tx, self.module_decoders.clone()))
+                    })
+                } => return result,
+                // If the check returns None, keep waiting on the same notification.
+                // A notification restarts the loop with a fresh snapshot.
             }
-
-            // check for value in db
-            let mut tx = self.inner.begin_transaction().await;
-
-            let maybe_value_bytes = tx
-                .raw_get_bytes(&key_bytes)
-                .await
-                .expect("Unrecoverable error when reading from database")
-                .map(|value_bytes| {
-                    decode_value_expect(&value_bytes, &self.module_decoders, &key_bytes)
-                });
-
-            if let Some(value) = checker(maybe_value_bytes) {
-                return (
-                    value,
-                    DatabaseTransaction::new(tx, self.module_decoders.clone()),
-                );
-            }
-
-            // key not found, try again
-            notify.await;
-            // if miss a notification between await and next register, it is
-            // fine. because we are going check the database
         }
     }
 
