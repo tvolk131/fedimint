@@ -156,8 +156,9 @@ impl IntentContext {
 /// Handlers are trusted wallet software. They must preserve the meaning of
 /// historical template versions and enforce quantities/destinations encoded in
 /// the immutable intent. The engine handles persistence and submission safety.
+#[fedimint_core::apply(fedimint_core::async_trait_maybe_send!)]
 pub trait IntentHandlers: fmt::Debug + Send + Sync {
-    fn build(
+    async fn build(
         &self,
         wallet: &SimplicityClientModule,
         intent: &Intent,
@@ -166,6 +167,9 @@ pub trait IntentHandlers: fmt::Debug + Send + Sync {
 }
 
 pub struct IntentPlan {
+    /// A handler may narrow the immutable policy fee ceiling for this attempt.
+    /// Useful when fees must fit inside an all-in purchase budget.
+    pub max_fee: Option<Amount>,
     pub spends: Vec<SpendIntent>,
     pub outputs: Vec<ContractOutput>,
     /// Only conflicts on these inputs authorize a rebuild. Ordinary owned
@@ -174,8 +178,9 @@ pub struct IntentPlan {
 }
 #[derive(Debug)]
 pub struct BuiltinIntents;
+#[fedimint_core::apply(fedimint_core::async_trait_maybe_send!)]
 impl IntentHandlers for BuiltinIntents {
-    fn build(
+    async fn build(
         &self,
         wallet: &SimplicityClientModule,
         intent: &Intent,
@@ -510,6 +515,7 @@ impl SimplicityClientModule {
                 let plan = self
                     .intents
                     .build(self, &record.intent, &context)
+                    .await
                     .and_then(|plan| {
                         ensure!(
                             !plan.shared_inputs.is_empty()
@@ -541,7 +547,11 @@ impl SimplicityClientModule {
                                     outputs: plan.outputs,
                                     creations: vec![],
                                     requested_receipt: None,
-                                    max_fee: Some(record.policy.max_fee),
+                                    max_fee: Some(
+                                        plan.max_fee.map_or(record.policy.max_fee, |limit| {
+                                            limit.min(record.policy.max_fee)
+                                        }),
+                                    ),
                                     reserve_funding: true,
                                 },
                             )

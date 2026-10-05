@@ -102,6 +102,7 @@ impl MintPairs {
         ];
         issuance.sort_by_key(|a| a.asset);
         Ok(IntentPlan {
+            max_fee: None,
             spends: vec![SpendIntent {
                 outpoint: point,
                 signature_witness: None,

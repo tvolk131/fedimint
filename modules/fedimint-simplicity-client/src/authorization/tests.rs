@@ -49,3 +49,27 @@ fn finalization_checks_the_combined_resource_budget_before_submission() {
         }
     }
 }
+
+#[test]
+fn final_funding_fee_cannot_exceed_the_attempts_remaining_budget() {
+    let authorization = Authorization {
+        federation: FederationId(Hash::all_zeros()),
+        module: 4,
+        spends: vec![],
+        creations: vec![],
+        receipt: None,
+        max_fee: Some(fedimint_core::Amount::from_msats(317)),
+    };
+    // A point-in-time quote is not authority to spend more after note inventory
+    // changes. The finalizer checks the real funded transaction, including dust.
+    for fee in [0, 316, 317, 318, 10_000] {
+        assert_eq!(
+            authorization
+                .verify_fees(&fedimint_core::module::Amounts::new_bitcoin(
+                    fedimint_core::Amount::from_msats(fee)
+                ))
+                .is_ok(),
+            fee <= 317
+        );
+    }
+}
