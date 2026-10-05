@@ -1,3 +1,5 @@
+mod partial;
+
 use std::sync::Arc;
 
 use bitcoin::hashes::{Hash as _, sha256};

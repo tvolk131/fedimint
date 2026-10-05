@@ -1,4 +1,4 @@
-//! Complete-fill orders and a single-provider conditional-token AMM. These are
+//! Limit orders and a single-provider conditional-token AMM. These are
 //! client-authored covenants, with no exchange-specific guardian behavior.
 use anyhow::{Context as _, ensure};
 use bitcoin::hashes::Hash as _;
@@ -13,6 +13,9 @@ use crate::common::assets::{AssetAmount, AssetBundle, AssetId};
 use crate::compiler::{Value, ValueConstructible, WitnessValues, arguments, witnesses};
 use crate::market::{BinaryMarket, owner_program, word};
 use crate::{ContractProgram, placeholder_signature};
+
+mod partial;
+pub use partial::{OrderState, PartialLimitOrder};
 
 #[cfg(test)]
 mod tests;
