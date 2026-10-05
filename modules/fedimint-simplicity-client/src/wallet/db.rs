@@ -84,3 +84,12 @@ impl_db_record!(
     db_prefix = 0x0d,
     notify_on_modify = true
 );
+
+/// Authenticated template-recognized lineage, written with the history cursor.
+/// Additive index: pre-existing contracts retain their original recovery rules.
+#[derive(Debug, Clone, Encodable, Decodable, Serialize)]
+pub struct SuccessorKey(pub OutPoint);
+#[derive(Debug, Encodable, Decodable)]
+pub struct SuccessorPrefix;
+impl_db_record!(key = SuccessorKey, value = OutPoint, db_prefix = 0x0e);
+impl_db_lookup!(key = SuccessorKey, query_prefix = SuccessorPrefix);

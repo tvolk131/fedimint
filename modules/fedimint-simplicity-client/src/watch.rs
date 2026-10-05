@@ -32,6 +32,7 @@ impl SimplicityClientModule {
         let cmr = program.cmr();
         let mut chain: BTreeMap<OutPoint, WalletContract> = BTreeMap::new();
         let mut additions = vec![];
+        let mut successors = BTreeMap::new();
         let mut tx = self.store.db.begin_transaction_nc().await;
         let next = tx.get_value(&db::NextSessionKey).await.unwrap_or(0);
         let open_len = tx
@@ -66,10 +67,13 @@ impl SimplicityClientModule {
                 let txid = transaction.tx_hash();
                 let mut consumed = vec![];
                 let mut received = vec![];
-                for input in &transaction.inputs {
-                    if input.module_instance_id() != self.store.module {
-                        continue;
-                    }
+                let mut predecessors = vec![];
+                for (input_index, input) in transaction
+                    .inputs
+                    .iter()
+                    .filter(|input| input.module_instance_id() == self.store.module)
+                    .enumerate()
+                {
                     let input = input
                         .as_any()
                         .downcast_ref::<ContractInput>()
@@ -78,6 +82,7 @@ impl SimplicityClientModule {
                         ensure!(old.spent_by.is_none(), "contract history double spend");
                         old.spent_by = Some(txid);
                         consumed.push(input.outpoint);
+                        predecessors.push((input_index, input.outpoint));
                     }
                 }
                 for (out_idx, output) in transaction.outputs.iter().enumerate() {
@@ -92,16 +97,28 @@ impl SimplicityClientModule {
                         .as_any()
                         .downcast_ref::<ContractOutput>()
                         .ok_or_else(|| anyhow::anyhow!("wrong output decoder"))?;
-                    if (point == origin && output.version == version && output.cmr == cmr)
-                        || consumed.iter().any(|point| {
-                            chain.get(point).is_some_and(|old| {
-                                self.store.templates.is_successor(
-                                    &old.descriptor,
-                                    &old.output,
-                                    output,
-                                )
-                            })
+                    let predecessor = predecessors.iter().find(|(input_index, previous)| {
+                        chain.get(previous).is_some_and(|old| {
+                            self.store.templates.is_successor(
+                                &old.descriptor,
+                                &old.output,
+                                output,
+                                crate::descriptor::SuccessorPosition {
+                                    input_index: *input_index,
+                                    output_index: out_idx,
+                                },
+                            )
                         })
+                    });
+                    if let Some((_, previous)) = predecessor {
+                        let old = successors.insert(*previous, point);
+                        ensure!(
+                            old.is_none_or(|old| old == point),
+                            "ambiguous public contract successor"
+                        );
+                    }
+                    if (point == origin && output.version == version && output.cmr == cmr)
+                        || predecessor.is_some()
                     {
                         chain.insert(
                             point,
@@ -155,6 +172,14 @@ impl SimplicityClientModule {
                 .await
                 .as_ref()
                 != Some(&contract);
+        }
+        for (previous, next) in successors {
+            let old = tx.insert_entry(&db::SuccessorKey(previous), &next).await;
+            ensure!(
+                old.is_none_or(|old| old == next),
+                "contract watch lineage mismatch"
+            );
+            changed |= old.is_none();
         }
         for (key, mut entry) in additions {
             if let Some(existing) = tx.get_value(&key).await {

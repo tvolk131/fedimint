@@ -264,10 +264,12 @@ impl WalletStore {
             let txid = tx.tx_hash();
             let mut consumed = vec![];
             let mut predecessors = vec![];
-            for input in &tx.inputs {
-                if input.module_instance_id() != self.module {
-                    continue;
-                }
+            for (input_index, input) in tx
+                .inputs
+                .iter()
+                .filter(|input| input.module_instance_id() == self.module)
+                .enumerate()
+            {
                 let input = input
                     .as_any()
                     .downcast_ref::<ContractInput>()
@@ -277,7 +279,7 @@ impl WalletStore {
                         contract.spent_by.is_none(),
                         "history spends a contract twice"
                     );
-                    predecessors.push(contract.clone());
+                    predecessors.push((input_index, input.outpoint, contract.clone()));
                     contract.spent_by = Some(txid);
                     dbtx.insert_entry(&db::ContractKey(input.outpoint), &contract)
                         .await;
@@ -319,18 +321,31 @@ impl WalletStore {
                 } else {
                     None
                 };
-                let descriptor = descriptor.or_else(|| {
-                    // A public contract may be advanced by another user,
-                    // who cannot encrypt new metadata for its original creator.
-                    // Follow the preserved policy and exact authority set.
-                    predecessors
-                        .iter()
-                        .find(|old| {
-                            self.templates
-                                .is_successor(&old.descriptor, &old.output, output)
-                        })
-                        .map(|old| old.descriptor.clone())
+                let predecessor = predecessors.iter().find(|(input_index, _, old)| {
+                    self.templates.is_successor(
+                        &old.descriptor,
+                        &old.output,
+                        output,
+                        crate::descriptor::SuccessorPosition {
+                            input_index: *input_index,
+                            output_index: out_idx,
+                        },
+                    )
                 });
+                if let Some((_, previous, _)) = predecessor {
+                    let next = OutPoint {
+                        txid,
+                        out_idx: out_idx as u64,
+                    };
+                    let previous_link =
+                        dbtx.insert_entry(&db::SuccessorKey(*previous), &next).await;
+                    ensure!(
+                        previous_link.is_none_or(|link| link == next),
+                        "ambiguous public contract successor"
+                    );
+                }
+                let descriptor =
+                    descriptor.or_else(|| predecessor.map(|(_, _, old)| old.descriptor.clone()));
                 let Some(descriptor) = descriptor else {
                     continue;
                 };

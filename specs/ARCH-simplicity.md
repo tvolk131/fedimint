@@ -149,12 +149,19 @@ Receivers provide the sender with a destination contract and freshly encrypted
 annotation; the sender needs no discovery key or stable wallet identifier.
 
 Each authenticated session prefix updates recognized contracts, spent status,
-confirmed transactions, and the scan cursor in one client database transaction.
+confirmed transactions, successor links, and the scan cursor in one client database
+transaction.
 The open session's saved prefix must match later extensions exactly. Original
 spent descriptors identify terminal interactions without an extra receipt UTXO.
 A shared binary-market vault remains recognizable through successors preserving
 its policy and issuance authorities, even when another participant replaces its
 annotation. Watching that vault does not count all its collateral as wallet funds.
+Templates may also recognize successors through a contract-enforced assignment
+from module-local input index to absolute output index, as partial limit orders do.
+A copied policy alone never proves lineage. Intent builders read contracts and
+these authenticated links from one snapshot, preserving the requested quantity
+while following an order through competing fills. Known origins use the local
+index; importing a new origin replays its authenticated history.
 
 The persistent submission API adds an encrypted sender receipt when there is no
 recognized wallet input or output, enabling direct funding of someone else's

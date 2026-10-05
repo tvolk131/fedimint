@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-use anyhow::ensure;
+use anyhow::{Context as _, ensure};
 use fedimint_core::core::OperationId;
 use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::encoding::{Decodable, Encodable};
@@ -111,6 +111,48 @@ pub struct IntentRecord {
     pub cancel_requested: bool,
 }
 
+/// Contract state and authenticated successor links from one database snapshot.
+pub struct IntentContext {
+    pub contracts: BTreeMap<OutPoint, WalletContract>,
+    pub successors: BTreeMap<OutPoint, OutPoint>,
+}
+
+impl IntentContext {
+    /// Follow authenticated spends, never an unrelated output with a copied
+    /// policy.
+    pub fn current(&self, point: OutPoint) -> anyhow::Result<(OutPoint, &WalletContract)> {
+        let (point, contract) = self.latest(point)?;
+        ensure!(
+            contract.spent_by.is_none(),
+            "contract is closed or has no recognized successor"
+        );
+        Ok((point, contract))
+    }
+
+    /// Return the last recognized descendant, including a terminal spent
+    /// output.
+    pub fn latest(&self, mut point: OutPoint) -> anyhow::Result<(OutPoint, &WalletContract)> {
+        for _ in 0..=self.contracts.len() {
+            let contract = self
+                .contracts
+                .get(&point)
+                .context("unknown contract origin")?;
+            let Some(spent_by) = contract.spent_by else {
+                return Ok((point, contract));
+            };
+            let Some(next) = self.successors.get(&point) else {
+                return Ok((point, contract));
+            };
+            point = *next;
+            ensure!(
+                point.txid == spent_by,
+                "successor does not belong to consuming transaction"
+            );
+        }
+        anyhow::bail!("cyclic contract lineage")
+    }
+}
+
 /// Handlers are trusted wallet software. They must preserve the meaning of
 /// historical template versions and enforce quantities/destinations encoded in
 /// the immutable intent. The engine handles persistence and submission safety.
@@ -119,7 +161,7 @@ pub trait IntentHandlers: fmt::Debug + Send + Sync {
         &self,
         wallet: &SimplicityClientModule,
         intent: &Intent,
-        contracts: &BTreeMap<OutPoint, WalletContract>,
+        context: &IntentContext,
     ) -> anyhow::Result<IntentPlan>;
 }
 
@@ -137,14 +179,14 @@ impl IntentHandlers for BuiltinIntents {
         &self,
         wallet: &SimplicityClientModule,
         intent: &Intent,
-        contracts: &BTreeMap<OutPoint, WalletContract>,
+        context: &IntentContext,
     ) -> anyhow::Result<IntentPlan> {
         ensure!(
             intent.template == "binary-market-mint-pairs" && intent.version == 1,
             "unsupported intent template or version"
         );
         MintPairs::consensus_decode_whole(&intent.data, &Default::default())?
-            .build(wallet, contracts)
+            .build(wallet, &context.contracts)
     }
 }
 
@@ -233,6 +275,26 @@ fn backoff_ms(attempts: usize, jitter: u64) -> u64 {
 }
 
 impl SimplicityClientModule {
+    /// Read the contracts and their lineage atomically for semantic intent
+    /// builders.
+    pub async fn intent_context(&self) -> IntentContext {
+        let mut view = self.store.db.begin_transaction_nc().await;
+        IntentContext {
+            contracts: view
+                .find_by_prefix(&db::ContractPrefix)
+                .await
+                .map(|(key, value)| (key.0, value))
+                .collect()
+                .await,
+            successors: view
+                .find_by_prefix(&db::SuccessorPrefix)
+                .await
+                .map(|(key, value)| (key.0, value))
+                .collect()
+                .await,
+        }
+    }
+
     pub async fn submit_intent(
         &self,
         intent: Intent,
@@ -444,10 +506,10 @@ impl SimplicityClientModule {
             if let Err(error) = record.can_prepare(self.store.next_session().await) {
                 record.status = IntentStatus::Failed(error.to_string());
             } else {
-                let contracts = self.contracts().await.into_iter().collect();
+                let context = self.intent_context().await;
                 let plan = self
                     .intents
-                    .build(self, &record.intent, &contracts)
+                    .build(self, &record.intent, &context)
                     .and_then(|plan| {
                         ensure!(
                             !plan.shared_inputs.is_empty()

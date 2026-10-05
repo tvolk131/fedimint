@@ -67,6 +67,14 @@ impl ContractDescriptor {
     }
 }
 
+/// Matches the execution environment: input indices count only this module
+/// instance's inputs; output indices address the complete outer transaction.
+#[derive(Debug, Clone, Copy)]
+pub struct SuccessorPosition {
+    pub input_index: usize,
+    pub output_index: usize,
+}
+
 /// Wallet applications can provide additional templates without teaching
 /// guardians their policy or storing contract source outside the federation.
 pub trait ContractTemplates: fmt::Debug + Send + Sync {
@@ -77,14 +85,14 @@ pub trait ContractTemplates: fmt::Debug + Send + Sync {
     }
 
     /// Recognize a public successor only from a transaction spending the known
-    /// predecessor. Opt in only for a non-copyable identity, such as a
-    /// preserved authority capability; matching a CMR alone is
-    /// insufficient.
+    /// predecessor. Require a non-copyable authority or a covenant-enforced
+    /// input/output assignment. Matching a CMR alone is insufficient.
     fn is_successor(
         &self,
         _descriptor: &ContractDescriptor,
         _before: &common::ContractOutput,
         _after: &common::ContractOutput,
+        _position: SuccessorPosition,
     ) -> bool {
         false
     }
@@ -110,6 +118,7 @@ impl ContractTemplates for BuiltinTemplates {
         descriptor: &ContractDescriptor,
         before: &common::ContractOutput,
         after: &common::ContractOutput,
+        _position: SuccessorPosition,
     ) -> bool {
         descriptor.template == "binary-market"
             && descriptor.template_version == 1

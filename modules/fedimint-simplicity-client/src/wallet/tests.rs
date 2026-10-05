@@ -1,5 +1,6 @@
 mod history;
 mod pages;
+mod partial;
 
 use bitcoin::hashes::{Hash, sha256};
 use fedimint_core::core::{DynInput, DynOutput};
