@@ -33,12 +33,13 @@ async fn active_intents(database: &Database) -> (u64, Vec<OperationId>) {
     (revision, ids)
 }
 
-async fn changed_intents(database: &Database, revision: u64) {
+pub(super) async fn changed_intents(database: &Database, revision: Option<u64>) -> u64 {
     database
         .wait_key_check(&db::IntentRevisionKey, |value| {
-            (value.unwrap_or(0) != revision).then_some(())
+            (Some(value.unwrap_or(0)) != revision).then_some(value.unwrap_or(0))
         })
-        .await;
+        .await
+        .0
 }
 
 impl SimplicityClientModule {
@@ -58,7 +59,7 @@ impl SimplicityClientModule {
                 }
             }
             tokio::select! {
-                () = changed_intents(&self.store.db, revision) => {},
+                _ = changed_intents(&self.store.db, Some(revision)) => {},
                 Some(id) = workers.next(), if !workers.is_empty() => {
                     running.remove(&id);
                 }

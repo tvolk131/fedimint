@@ -70,6 +70,7 @@ impl State for SimplicityState {
                                     old.status = OperationStatus::Rejected(error);
                                 }
                             }
+                            crate::intent::advance_revision(&mut dbtx.module_tx()).await;
                             old
                         })
                     },
@@ -100,6 +101,7 @@ impl State for SimplicityState {
                                 )
                                 .await;
                             old.status = OperationStatus::Complete;
+                            crate::intent::advance_revision(&mut dbtx.module_tx()).await;
                             old
                         })
                     },

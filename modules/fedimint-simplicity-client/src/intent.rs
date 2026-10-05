@@ -299,6 +299,17 @@ impl SimplicityClientModule {
             .await
     }
 
+    /// Observe local operation progress without polling or federation requests.
+    /// `None` returns the current revision immediately. Subsequent calls wait
+    /// until committed intent/submission state changes. Read the displayed
+    /// records after obtaining the revision, then wait with that revision so a
+    /// commit between reading and waiting cannot be missed. The cursor is local
+    /// to this database and is only an informational wakeup, not a safety
+    /// proof.
+    pub async fn await_local_operation_change(&self, previous: Option<u64>) -> u64 {
+        driver::changed_intents(&self.store.db, previous).await
+    }
+
     /// Return at completion or when explicit user action is needed.
     pub async fn await_intent(&self, id: OperationId) -> anyhow::Result<IntentRecord> {
         let (record, _) = self
@@ -520,7 +531,7 @@ async fn save_record(tx: &mut DatabaseTransaction<'_>, id: OperationId, record: 
     advance_revision(tx).await;
 }
 
-async fn advance_revision(tx: &mut DatabaseTransaction<'_>) {
+pub(crate) async fn advance_revision(tx: &mut DatabaseTransaction<'_>) {
     let revision = tx.get_value(&db::IntentRevisionKey).await.unwrap_or(0);
     tx.insert_entry(&db::IntentRevisionKey, &revision.wrapping_add(1))
         .await;

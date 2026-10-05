@@ -539,6 +539,7 @@ impl SimplicityClientModule {
                 builder,
             )
             .await?;
+        crate::intent::advance_revision(&mut dbtx.to_ref_nc()).await;
         Ok((operation_id, range.txid()))
     }
 
