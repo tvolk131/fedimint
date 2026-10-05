@@ -6,6 +6,9 @@ that Pi 5 calibration, cross-architecture execution, or a sustained pilot has
 been completed. The [execution baseline](../fedimint-simplicity-common/README.md#beta-execution-baseline)
 defines the versions and rules all guardians must preserve.
 
+Track remaining release work and the scope of completed rehearsals in the
+[beta checklist](BETA-CHECKLIST.md).
+
 ## Build and identify the artifact
 
 Use one reviewed, clean Git commit on every guardian. Preserve its commit ID,

@@ -472,8 +472,9 @@ where
     }
 
     /// Wait for a pending release to make progress, without holding a database
-    /// transaction. Call only after committing `release_funding_after_conflict`.
-    /// This is a wakeup, not authorization to rebuild: recheck release first.
+    /// transaction. Call only after committing
+    /// `release_funding_after_conflict`. This is a wakeup, not
+    /// authorization to rebuild: recheck release first.
     pub async fn await_funding_release_progress(
         &self,
         operation_id: OperationId,

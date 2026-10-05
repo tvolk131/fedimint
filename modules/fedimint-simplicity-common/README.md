@@ -140,12 +140,55 @@ A program can inspect the same successor as another program. Applications that
 need distinct successor allocation must enforce it in their policies; the module
 does not infer exclusivity or prevent contract-author double-satisfaction bugs.
 
-Bitcoin votes are monotonic and require the configured guardian threshold to
+### Consensus clocks and expiring spend paths
+
+Both execution versions expose consensus clocks directly. Bitcoin votes are
+monotonic and require the configured guardian threshold to
 advance the clock. With insufficient votes, the exposed count is zero. Session
-indices are supplied by the core during both live consensus and replay. Admission
-checks use the current session; acceptance can still fail if state changes before
-ordering. Clocks are not wall time, and different modules' block-count votes need
-not be processed at the same point.
+indices are supplied by the core during both live consensus and replay.
+`fm_block_count()` is a federation-agreed count (tip height + 1), not a live
+Bitcoin tip that retreats on a reorganization. Neither clock measures wall time;
+different modules' block-count votes need not be processed at the same point.
+
+This deliberately differs from
+[Liquid's Simplicity timelocks](https://docs.simplicity-lang.org/documentation/timelocks/#no-maximum-time-constraints).
+Those inspect the transaction's declared locktime or sequence; chain rules then
+enforce the corresponding minimum inclusion time. Requiring a declared lock
+height below 100 does not require confirmation before height 100: a transaction
+declaring 90 can still satisfy its timelock at height 1,000. These jets cannot
+enforce expiry. Keeping timelock validity as time advances helps transaction
+relay and re-inclusion after a reorganization. This is an execution-environment
+choice, not a limitation of the Simplicity language or a claim about Blockstream's
+specific decision process.
+
+Fedimint programs can instead require `fm_block_count() < deadline` for a claim
+and `fm_block_count() >= deadline` for a refund. Advancing the agreed clock closes
+the claim path without a competing transaction; moving funds still requires a
+spend. A predicate such as an even session index can also close and reopen a path
+while its contract remains unspent. Monotonic clocks do not imply monotonic
+program validity.
+
+Under Fedimint's normal Byzantine-fault assumptions, finalized consensus history
+does not roll back when Bitcoin reorganizes. Its existing
+[Lightning v2 module](../fedimint-lnv2-server/src/lib.rs) also expires preimage
+claims and enables refunds at the deadline. These properties make genuine expiry
+a useful fit here, while changing validity and unpaid validation work still need
+care:
+
+- Deadlines apply at ordered execution, not submission. Admission can succeed
+  before a deadline and execution fail afterward, including when a block-count
+  vote precedes the transaction in the same session. Validation constructs the
+  current environment and executes again; decoded-program retention does not
+  cache an admission-time authorization result.
+- Contract authors should preserve a usable fallback and allow for outages,
+  delayed votes and inclusion delays. A deadline does not guarantee inclusion.
+- Rejection need not be permanent. The [durable intent API](#durable-shared-contract-intents)
+  keeps primary funding reserved after an unproven rejection; a timeout or error
+  string is insufficient evidence for safe reuse. A confirmed competing spend
+  can establish permanent invalidity even for a policy that would reopen later.
+- Expiring or reopening policies can cause repeated validation without an
+  accepted-transaction fee. The resource caps bound each transaction, not the
+  aggregate cost of concurrent or repeated submissions.
 
 ## Limits, fees, and retention
 

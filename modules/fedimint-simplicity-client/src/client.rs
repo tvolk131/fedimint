@@ -526,11 +526,12 @@ impl SimplicityClientModule {
     }
 
     /// Read local progress without a federation request or waiting for history.
-    /// `Accepted` means the transaction was accepted but history synchronization
-    /// is still pending. `Complete` does not imply another module's change or
-    /// funding-restoration state machines have finished. This is informational;
-    /// use the intent API for cancellation/retry and funding safety decisions.
-    /// Mnemonic recovery restores confirmed history, not local operation IDs.
+    /// `Accepted` means the transaction was accepted but history
+    /// synchronization is still pending. `Complete` does not imply another
+    /// module's change or funding-restoration state machines have finished.
+    /// This is informational; use the intent API for cancellation/retry and
+    /// funding safety decisions. Mnemonic recovery restores confirmed
+    /// history, not local operation IDs.
     pub async fn operation_status(&self, operation_id: OperationId) -> Option<OperationStatus> {
         // Read active state first, then the durable result so a concurrent
         // terminal transition cannot appear pending after we see its result.
