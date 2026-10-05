@@ -151,6 +151,32 @@ async fn test_wait_key_no_transaction() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_wait_key_commit_between_read_and_wait() {
+    let global = MemDatabase::new().into_database();
+    for db in [global.clone(), global.with_prefix_module_id(2).0] {
+        let wait = db.wait_key_check(&TestKey(1), |value| {
+            if value.is_none() {
+                // Deterministically commit after the waiter read an old value,
+                // but before it awaits its notification. Do not write again
+                // afterward: an unrelated notification could hide the race.
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let mut tx = db.begin_transaction().await;
+                        tx.insert_new_entry(&TestKey(1), &TestVal(42)).await;
+                        tx.commit_tx().await;
+                    });
+                });
+            }
+            value
+        });
+        let (value, _) = tokio::time::timeout(std::time::Duration::from_secs(1), wait)
+            .await
+            .expect("committed update must wake the waiter");
+        assert_eq!(value, TestVal(42));
+    }
+}
+
 #[tokio::test]
 async fn test_prefix_global_dbtx() {
     let module_instance_id = 10;

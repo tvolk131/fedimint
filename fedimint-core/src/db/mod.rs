@@ -315,7 +315,9 @@ where
 pub trait IDatabase: Debug + MaybeSend + MaybeSync + 'static {
     /// Start a database transaction
     async fn begin_transaction<'a>(&'a self) -> Box<dyn IDatabaseTransaction + 'a>;
-    /// Register (and wait) for `key` updates
+    /// Register (and wait) for `key` updates. The first poll must establish the
+    /// subscription before returning `Pending`, without awaiting other work.
+    /// `wait_key_check` relies on this to subscribe before reading the value.
     async fn register(&self, key: &[u8]);
     /// Notify about `key` update (creation, modification, deletion)
     async fn notify(&self, key: &[u8]);
@@ -639,8 +641,14 @@ impl Database {
     {
         let key_bytes = key.to_bytes();
         loop {
-            // register for notification
+            // `register` is async, including through prefixed databases. Poll
+            // it before reading so a commit between the read and the wait
+            // cannot be lost before the subscription has actually started.
             let notify = self.inner.register(&key_bytes);
+            futures::pin_mut!(notify);
+            if futures::poll!(notify.as_mut()).is_ready() {
+                continue;
+            }
 
             // check for value in db
             let mut tx = self.inner.begin_transaction().await;
