@@ -5,6 +5,7 @@ pub mod states;
 pub use client::{SimplicityClientInit, SimplicityClientModule, SpendIntent};
 pub mod assets;
 pub mod descriptor;
+pub mod exchange;
 pub mod market;
 pub mod receipt;
 pub mod wallet;

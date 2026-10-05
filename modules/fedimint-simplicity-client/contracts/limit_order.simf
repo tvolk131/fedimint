@@ -1,0 +1,14 @@
+// Complete fill or maker cancellation. Each order assigns its payment to its
+// own input index, preventing two co-spent orders from claiming one payment.
+fn main() {
+    match witness::CANCEL {
+        true => jet::bip_0340_verify((param::MAKER, jet::fm_sig_hash_all()), witness::SIGNATURE),
+        false => {
+            assert!(jet::lt_64(jet::fm_block_count(), param::CLOSE));
+            // This typed accessor also proves the payment belongs to this
+            // module instance. The outer hash alone permits foreign outputs.
+            assert!(jet::eq_32(jet::fm_output_version(jet::fm_current_index()), 1));
+            assert!(jet::eq_256(jet::fm_output_hash(jet::fm_current_index()), param::PAYMENT));
+        },
+    }
+}
