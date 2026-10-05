@@ -37,7 +37,7 @@ impl SessionHistory {
         }
     }
 
-    pub(crate) async fn session(&self, index: u64) -> FederationResult<SessionStatus> {
+    pub async fn session(&self, index: u64) -> FederationResult<SessionStatus> {
         self.api
             .get_session_status(
                 index,

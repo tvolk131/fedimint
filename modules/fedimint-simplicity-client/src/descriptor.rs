@@ -76,6 +76,19 @@ pub trait ContractTemplates: fmt::Debug + Send + Sync {
         false
     }
 
+    /// Recognize a public successor only from a transaction spending the known
+    /// predecessor. Opt in only for a non-copyable identity, such as a
+    /// preserved authority capability; matching a CMR alone is
+    /// insufficient.
+    fn is_successor(
+        &self,
+        _descriptor: &ContractDescriptor,
+        _before: &common::ContractOutput,
+        _after: &common::ContractOutput,
+    ) -> bool {
+        false
+    }
+
     fn compile(
         &self,
         descriptor: &ContractDescriptor,
@@ -90,6 +103,17 @@ impl ContractTemplates for BuiltinTemplates {
     fn owns_balance(&self, descriptor: &ContractDescriptor) -> bool {
         descriptor.template_version == 1
             && matches!(descriptor.template.as_str(), "owner" | "top-up-or-release")
+    }
+
+    fn is_successor(
+        &self,
+        descriptor: &ContractDescriptor,
+        before: &common::ContractOutput,
+        after: &common::ContractOutput,
+    ) -> bool {
+        descriptor.template == "binary-market"
+            && descriptor.template_version == 1
+            && preserves_authorities(before, after)
     }
 
     fn compile(
@@ -241,3 +265,19 @@ impl WalletKeys {
 
 #[cfg(test)]
 mod tests;
+
+/// Unique authorities cannot be copied. Their exact preservation under the same
+/// policy binds a successor within its authenticated consuming transaction.
+pub fn preserves_authorities(
+    before: &common::ContractOutput,
+    after: &common::ContractOutput,
+) -> bool {
+    before.cmr == after.cmr
+        && before.version == after.version
+        && before.bundle().is_some_and(|old| {
+            !old.authorities.is_empty()
+                && after
+                    .bundle()
+                    .is_some_and(|new| old.authorities == new.authorities)
+        })
+}

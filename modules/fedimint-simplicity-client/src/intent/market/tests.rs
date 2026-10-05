@@ -43,6 +43,22 @@ fn follows_the_spending_transaction_and_exact_authorities_not_just_cmr() {
         spent_by: None,
     };
     let mut initial = contract.clone();
+    for extra_authority in [false, true] {
+        let mut malformed = contract.clone();
+        let mut bundle = malformed.output.bundle().unwrap().clone();
+        if extra_authority {
+            bundle.authorities.push(AssetId([8; 32]));
+        } else {
+            bundle.balances.push(AssetAmount {
+                asset: market.yes,
+                quantity: 1,
+            });
+        }
+        malformed.output.extension = Some(crate::common::assets::AssetExtension::Bundle(bundle));
+        // Correct policy/state and asset origins alone cannot validate the
+        // vault: these authenticated funding outputs are unspendable.
+        assert!(successor(point(1), &market, &BTreeMap::from([(point(1), malformed)])).is_err());
+    }
     initial.spent_by = Some(point(2).txid);
     let mut contracts = BTreeMap::from([(point(1), initial), (point(3), contract.clone())]);
     assert!(successor(point(1), &market, &contracts).is_err());

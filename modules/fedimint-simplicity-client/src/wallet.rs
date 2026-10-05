@@ -320,21 +320,14 @@ impl WalletStore {
                     None
                 };
                 let descriptor = descriptor.or_else(|| {
-                    // A public market vault may be advanced by another user,
+                    // A public contract may be advanced by another user,
                     // who cannot encrypt new metadata for its original creator.
                     // Follow the preserved policy and exact authority set.
                     predecessors
                         .iter()
                         .find(|old| {
-                            old.descriptor.template == "binary-market"
-                                && old.output.cmr == output.cmr
-                                && old.output.version == output.version
-                                && old.output.bundle().is_some_and(|bundle| {
-                                    !bundle.authorities.is_empty()
-                                        && output.bundle().is_some_and(|new| {
-                                            new.authorities == bundle.authorities
-                                        })
-                                })
+                            self.templates
+                                .is_successor(&old.descriptor, &old.output, output)
                         })
                         .map(|old| old.descriptor.clone())
                 });

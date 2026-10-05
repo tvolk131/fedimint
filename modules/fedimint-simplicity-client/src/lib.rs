@@ -9,6 +9,7 @@ pub mod exchange;
 pub mod market;
 pub mod receipt;
 pub mod wallet;
+mod watch;
 
 #[cfg(test)]
 mod tests;

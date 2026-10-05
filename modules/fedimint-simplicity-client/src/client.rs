@@ -213,7 +213,7 @@ impl SimplicityClientModule {
             .await
     }
 
-    pub(crate) async fn session_history(&self) -> SessionHistory {
+    pub async fn session_history(&self) -> SessionHistory {
         SessionHistory::new(
             self.context.global_api(),
             self.context.decoders(),
@@ -248,6 +248,23 @@ impl SimplicityClientModule {
         limit: usize,
     ) -> anyhow::Result<WalletPage<HistoryEntry>> {
         self.store.history_page(cursor, limit).await
+    }
+
+    /// Scope all public descriptors and derived identifiers to this module.
+    pub fn scope(
+        &self,
+    ) -> (
+        fedimint_core::config::FederationId,
+        fedimint_core::core::ModuleInstanceId,
+    ) {
+        (self.store.federation, self.store.module)
+    }
+
+    /// Derive a template's wallet key. Applications use this for creator oracle
+    /// attestations and signed creation namespaces. Never log or export it;
+    /// persist only the encrypted descriptor, whose nonce restores the key.
+    pub fn descriptor_key(&self, descriptor: &ContractDescriptor) -> Keypair {
+        self.store.keys.signing_key(descriptor)
     }
 
     /// A fresh receive policy and encrypted descriptor for a sender. The sender
