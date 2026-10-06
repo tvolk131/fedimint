@@ -61,6 +61,9 @@ async fn pages_preserve_all_records_and_numeric_history_order() {
             }
         }
         assert_eq!(contracts, store.contracts().await);
+        for (point, expected) in &contracts {
+            assert_eq!(store.contract(*point).await.as_ref(), Some(expected));
+        }
         assert_eq!(contracts.last().unwrap().0.out_idx, u64::MAX);
         let mut cursor = None;
         let mut history = vec![];

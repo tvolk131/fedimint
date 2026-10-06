@@ -222,6 +222,11 @@ impl SimplicityClientModule {
         )
     }
 
+    /// Point-read an authenticated local record without allocating the wallet.
+    pub async fn contract(&self, point: OutPoint) -> Option<WalletContract> {
+        self.store.contract(point).await
+    }
+
     /// Allocate all contract records. Prefer `contracts_page` for large
     /// wallets.
     pub async fn contracts(&self) -> Vec<(OutPoint, WalletContract)> {

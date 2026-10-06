@@ -188,6 +188,16 @@ impl WalletStore {
             .is_some()
     }
 
+    /// Read one authenticated local record, including a spent contract.
+    /// This does not query guardians or change the wallet's watch set.
+    pub async fn contract(&self, point: OutPoint) -> Option<WalletContract> {
+        self.db
+            .begin_transaction_nc()
+            .await
+            .get_value(&db::ContractKey(point))
+            .await
+    }
+
     /// Allocate all contract records. Prefer `contracts_page` for large
     /// wallets.
     pub async fn contracts(&self) -> Vec<(OutPoint, WalletContract)> {
