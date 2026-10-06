@@ -6,7 +6,7 @@ use crate::exchange::{OrderState, PartialLimitOrder};
 use crate::intent::IntentContext;
 
 #[derive(Debug)]
-struct PartialTemplates;
+pub(super) struct PartialTemplates;
 impl ContractTemplates for PartialTemplates {
     fn compile(
         &self,

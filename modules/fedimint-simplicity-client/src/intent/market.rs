@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::ensure;
 use fedimint_api_client::api::FederationApiExt as _;
+use fedimint_core::db::IDatabaseTransactionOpsCoreTyped as _;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::ApiRequestErased;
 use fedimint_core::{Amount, OutPoint};
@@ -193,7 +194,22 @@ impl SimplicityClientModule {
         market.validate_genesis(&origins[0], &origins[1])?;
         let descriptor = ContractDescriptor::binary_market(rand::random(), market);
         let origin = origins[0].authority_outpoint;
-        self.watch_contract(origin, descriptor).await?;
+        // An authenticated stored genesis already has continuous scan coverage.
+        // An owned successor alone is insufficient: importing must still replay
+        // its origin to establish backing and preserve earlier public history.
+        if self
+            .store
+            .db
+            .begin_transaction_nc()
+            .await
+            .get_value(&crate::wallet::db::ContractKey(origin))
+            .await
+            .is_some()
+        {
+            self.sync().await?;
+        } else {
+            self.watch_contract(origin, descriptor).await?;
+        }
         // Asset records authenticate the genesis policy, but only the complete
         // transaction establishes its exact balances and authority set.
         let contracts = self.contracts().await.into_iter().collect();

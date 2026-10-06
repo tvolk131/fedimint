@@ -296,3 +296,166 @@ async fn authentication_failure_keeps_recovery_pending_and_retryable() {
         .unwrap();
     assert_recovered(&store, &txs).await;
 }
+
+// Use the same position-bound public-order template as the recovery tests.
+#[tokio::test]
+async fn batch_watch_matches_sequential_imports_across_the_open_prefix() {
+    use crate::exchange::{OrderState, PartialLimitOrder};
+
+    let make_store = || async {
+        WalletStore::open(
+            database(),
+            &root(),
+            federation(),
+            MODULE,
+            Arc::new(super::partial::PartialTemplates),
+        )
+        .await
+        .unwrap()
+    };
+    let batch = make_store().await;
+    let sequential = make_store().await;
+    let mut descriptor = ContractDescriptor::owner([51; 32]);
+    let order = PartialLimitOrder {
+        module: MODULE,
+        maker: batch.keys.signing_key(&descriptor).x_only_public_key().0,
+        asset: AssetId([5; 32]),
+        unit_price: Amount::from_msats(400),
+        buy: false,
+        close_block: 100,
+    };
+    descriptor.template = "partial".into();
+    descriptor.parameters = order.consensus_encode_to_vec();
+    let program = order.program().unwrap();
+    let output = |quantity| {
+        let (amount, bundle) = order.balances(OrderState::new(quantity)).unwrap();
+        program
+            .asset_output(amount, [0; 32], vec![], bundle)
+            .unwrap()
+    };
+    let creation = tx(40, &[], vec![output(10), output(20)]);
+    let origins = [
+        point(&creation),
+        OutPoint {
+            txid: creation.tx_hash(),
+            out_idx: 1,
+        },
+    ];
+    let mut fill = tx(41, &origins, vec![output(7), output(16)]);
+    fill.inputs
+        .insert(0, DynInput::from_typed(1234, DynUnknown(vec![7])));
+    let successors = [
+        point(&fill),
+        OutPoint {
+            txid: fill.tx_hash(),
+            out_idx: 1,
+        },
+    ];
+    let cancel = tx(42, &successors[..1], vec![]);
+    let api = Arc::new(Api {
+        peers: public_keys().into_keys().collect(),
+        complete: session(&[creation]),
+        pending: session(&[fill, cancel]),
+        fault: Fault::None,
+        fail_all: AtomicBool::new(false),
+        v1: AtomicUsize::new(0),
+        v2: AtomicUsize::new(0),
+    });
+    let source = api.history(
+        VERSION_THAT_INTRODUCED_GET_SESSION_STATUS_V2,
+        Some(public_keys()),
+    );
+    for store in [&batch, &sequential] {
+        store.sync(&source, |_, _| {}).await.unwrap();
+        assert!(store.contracts().await.is_empty()); // public, not wallet annotations
+    }
+    let requests = origins
+        .into_iter()
+        .map(|p| (p, descriptor.clone()))
+        .collect::<Vec<_>>();
+    let mut invalid = requests.clone();
+    invalid.push((
+        OutPoint {
+            txid: origins[0].txid,
+            out_idx: 99,
+        },
+        descriptor.clone(),
+    ));
+    assert!(batch.watch_contracts(&source, invalid).await.is_err());
+    assert!(batch.contracts().await.is_empty());
+    assert!(batch.history().await.is_empty()); // no partial merge on failure
+    let before = api.v1.load(Ordering::Relaxed);
+    let actual = batch
+        .watch_contracts(&source, requests.clone())
+        .await
+        .unwrap();
+    assert_eq!(api.v1.load(Ordering::Relaxed) - before, 3); // one open-prefix quorum
+    let mut expected = BTreeMap::new();
+    for request in requests.clone() {
+        expected.extend(
+            sequential
+                .watch_contracts(&source, vec![request])
+                .await
+                .unwrap(),
+        );
+    }
+    assert_eq!(actual, expected);
+    assert_eq!(
+        actual,
+        BTreeMap::from([(origins[0], None), (origins[1], Some(successors[1]))])
+    );
+    assert_eq!(batch.contracts().await, sequential.contracts().await);
+    assert_eq!(batch.history().await, sequential.history().await);
+    // A valid announcement can name an already announced order's successor.
+    // Batch import must coalesce it just as independent imports do.
+    let overlapping = make_store().await;
+    overlapping.sync(&source, |_, _| {}).await.unwrap();
+    let mut wrong = requests.clone();
+    wrong.push((successors[1], ContractDescriptor::owner([52; 32])));
+    assert!(overlapping.watch_contracts(&source, wrong).await.is_err());
+    assert!(overlapping.contracts().await.is_empty());
+    assert!(overlapping.history().await.is_empty());
+    let mut aliases = requests.clone();
+    aliases.push((successors[1], descriptor.clone()));
+    let alias_results = overlapping.watch_contracts(&source, aliases).await.unwrap();
+    assert_eq!(alias_results[&origins[1]], Some(successors[1]));
+    assert_eq!(alias_results[&successors[1]], Some(successors[1]));
+    assert_eq!(overlapping.contracts().await, batch.contracts().await);
+    assert_eq!(overlapping.history().await, batch.history().await);
+    // Reimport is idempotent and cannot reopen a spent predecessor.
+    assert_eq!(
+        batch
+            .watch_contracts(&source, requests.clone())
+            .await
+            .unwrap(),
+        actual
+    );
+    assert_eq!(batch.history().await, sequential.history().await);
+    let mut duplicate = requests;
+    duplicate.push((origins[0], descriptor));
+    assert!(batch.watch_contracts(&source, duplicate).await.is_err());
+    assert_eq!(batch.history().await, sequential.history().await);
+}
+
+#[tokio::test]
+async fn watch_rejects_a_changed_prefix_without_committing() {
+    let (store, api, _) = fixture(Fault::None).await;
+    let source = api.history(
+        VERSION_THAT_INTRODUCED_GET_SESSION_STATUS_V2,
+        Some(public_keys()),
+    );
+    store.sync(&source, |_, _| {}).await.unwrap();
+    let before = store.history().await;
+    let mut dbtx = store.db.begin_transaction().await;
+    // Model a previously saved prefix different from the supplied quorum body.
+    dbtx.insert_entry(&db::OpenSessionKey, &(1, Some(sha256::Hash::all_zeros())))
+        .await;
+    dbtx.commit_tx().await;
+    let origin = point(&before[0].transaction);
+    let error = store
+        .watch_contracts(&source, vec![(origin, ContractDescriptor::owner([3; 32]))])
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("prefix changed"));
+    assert_eq!(store.history().await, before);
+}
