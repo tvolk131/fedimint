@@ -109,11 +109,25 @@ impl SimplicityClientModule {
         plan: &IntentPlan,
         context: &IntentContext,
     ) -> anyhow::Result<Amount> {
+        let started = fedimint_core::time::now();
         let request = self.plan_fee_request(plan, context)?;
+        tracing::debug!(
+            target: "fedimint_simplicity_client::timing",
+            operation = "quote_plan", stage = "explicit_fee",
+            elapsed_us = started.elapsed().unwrap_or_default().as_micros() as u64,
+            "stage complete"
+        );
+        let started = fedimint_core::time::now();
         let quote = self
             .context
             .fee_quote(OperationId::new_random(), request)
             .await?;
+        tracing::debug!(
+            target: "fedimint_simplicity_client::timing",
+            operation = "quote_plan", stage = "funding_fee",
+            elapsed_us = started.elapsed().unwrap_or_default().as_micros() as u64,
+            "stage complete"
+        );
         Ok(quote
             .total()
             .get(&AmountUnit::BITCOIN)
