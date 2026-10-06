@@ -34,7 +34,12 @@ fn indexed_entry(i: u32, entry: u32) -> Vec<bool> {
 /// writer may clear bits ahead of its cursor within a machine word, so assert
 /// the exact cursor movement and *outside* guard words, not unused padding
 /// bits.
-fn run(jet: ContextJet, source: &[bool], target: usize, env: &Environment) -> Option<Vec<bool>> {
+pub(super) fn run(
+    jet: ContextJet,
+    source: &[bool],
+    target: usize,
+    env: &Environment,
+) -> Option<Vec<bool>> {
     let jet = FedimintJet::Context(jet);
     assert_eq!(jet.source_ty().to_final().bit_width(), source.len());
     assert_eq!(jet.target_ty().to_final().bit_width(), target);
@@ -72,7 +77,7 @@ fn run(jet: ContextJet, source: &[bool], target: usize, env: &Environment) -> Op
     }
 }
 
-fn cases() -> Vec<(ContextJet, Vec<bool>, Vec<bool>)> {
+pub(super) fn cases() -> Vec<(ContextJet, Vec<bool>, Vec<bool>)> {
     use ContextJet::*;
     vec![
         (SigHashAll, vec![], bits(&[0xab; 32])),

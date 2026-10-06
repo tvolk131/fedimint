@@ -1,6 +1,7 @@
 //! Fixed values from tests/vectors/reference.py; no runtime regeneration.
 mod execution;
 mod jets;
+mod mutation;
 mod wire;
 
 use bitcoin::hashes::Hash;
