@@ -50,6 +50,26 @@ impl SimplicityClientModule {
             .watch_contracts(&self.session_history().await, origins)
             .await
     }
+
+    /// Import origins whose creation is at or after `first_session`.
+    /// This is only a replay hint: every requested origin must still be found
+    /// in authenticated history, with its descriptor checked, and all later
+    /// spends are replayed. A hint after an origin fails atomically rather than
+    /// accepting an incomplete lineage. Use zero when creation is unknown.
+    pub async fn watch_contracts_from_session(
+        &self,
+        origins: Vec<(OutPoint, ContractDescriptor)>,
+        first_session: u64,
+    ) -> anyhow::Result<BTreeMap<OutPoint, Option<OutPoint>>> {
+        ensure!(origins.len() <= 2048, "too many public contract origins");
+        if origins.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        self.sync().await?;
+        self.store
+            .watch_contracts_from_session(&self.session_history().await, origins, first_session)
+            .await
+    }
 }
 
 impl WalletStore {
@@ -57,6 +77,15 @@ impl WalletStore {
         &self,
         history: &SessionHistory,
         origins: Vec<(OutPoint, ContractDescriptor)>,
+    ) -> anyhow::Result<BTreeMap<OutPoint, Option<OutPoint>>> {
+        self.watch_contracts_from_session(history, origins, 0).await
+    }
+
+    pub(crate) async fn watch_contracts_from_session(
+        &self,
+        history: &SessionHistory,
+        origins: Vec<(OutPoint, ContractDescriptor)>,
+        first_session: u64,
     ) -> anyhow::Result<BTreeMap<OutPoint, Option<OutPoint>>> {
         let _guard = self.sync_lock.lock().await;
         let mut requests = BTreeMap::new();
@@ -80,7 +109,11 @@ impl WalletStore {
         // Replay exactly the prefix already scanned by this wallet, then merge
         // atomically. Future ordinary sync starts after this prefix. Inserting
         // a live API UTXO directly could miss a spend already passed by the cursor.
-        for index in 0..=next {
+        ensure!(
+            first_session <= next,
+            "contract replay hint is beyond wallet history"
+        );
+        for index in first_session..=next {
             if index == next && open_len == 0 {
                 break;
             }

@@ -373,6 +373,18 @@ async fn batch_watch_matches_sequential_imports_across_the_open_prefix() {
         .into_iter()
         .map(|p| (p, descriptor.clone()))
         .collect::<Vec<_>>();
+    // A hint is not evidence that an origin exists. Skipping its creation,
+    // including with a future hint, must leave the wallet untouched.
+    for first_session in [1, u64::MAX] {
+        assert!(
+            batch
+                .watch_contracts_from_session(&source, requests.clone(), first_session)
+                .await
+                .is_err()
+        );
+        assert!(batch.contracts().await.is_empty());
+        assert!(batch.history().await.is_empty());
+    }
     let mut invalid = requests.clone();
     invalid.push((
         OutPoint {
@@ -431,6 +443,52 @@ async fn batch_watch_matches_sequential_imports_across_the_open_prefix() {
         actual
     );
     assert_eq!(batch.history().await, sequential.history().await);
+    // Put the complete lineage in session one. A correct hint returns exactly
+    // the genesis replay's result without even querying session zero. Use fresh
+    // API caches so request counts cannot be hidden by earlier sync calls.
+    let shifted = Arc::new(Api {
+        peers: public_keys().into_keys().collect(),
+        complete: session(&[]),
+        pending: SessionOutcome {
+            items: api
+                .complete
+                .items
+                .iter()
+                .chain(&api.pending.items)
+                .cloned()
+                .collect(),
+        },
+        fault: Fault::None,
+        fail_all: AtomicBool::new(false),
+        v1: AtomicUsize::new(0),
+        v2: AtomicUsize::new(0),
+    });
+    let fresh_source = || {
+        shifted.history(
+            VERSION_THAT_INTRODUCED_GET_SESSION_STATUS_V2,
+            Some(public_keys()),
+        )
+    };
+    let hinted = make_store().await;
+    let full = make_store().await;
+    for store in [&hinted, &full] {
+        store.sync(&fresh_source(), |_, _| {}).await.unwrap();
+    }
+    let before = shifted.v2.load(Ordering::Relaxed);
+    assert_eq!(
+        hinted
+            .watch_contracts_from_session(&fresh_source(), requests.clone(), 1)
+            .await
+            .unwrap(),
+        actual
+    );
+    assert_eq!(shifted.v2.load(Ordering::Relaxed) - before, 1);
+    full.watch_contracts(&fresh_source(), requests.clone())
+        .await
+        .unwrap();
+    assert_eq!(hinted.contracts().await, full.contracts().await);
+    assert_eq!(hinted.history().await, full.history().await);
+
     let mut duplicate = requests;
     duplicate.push((origins[0], descriptor));
     assert!(batch.watch_contracts(&source, duplicate).await.is_err());
