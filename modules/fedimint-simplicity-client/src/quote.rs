@@ -117,6 +117,15 @@ impl SimplicityClientModule {
             elapsed_us = started.elapsed().unwrap_or_default().as_micros() as u64,
             "stage complete"
         );
+        self.quote_fee_request(request).await
+    }
+
+    /// Quote total fees from an already calculated request. Route planners can
+    /// inspect the result of `plan_fee_request` before this funding dry run
+    /// without preparing and decoding every input a second time. The request
+    /// describes a quote only: it reserves no notes and authorizes no spend.
+    /// Submission still constructs and validates the actual transaction.
+    pub async fn quote_fee_request(&self, request: FeeQuoteRequest) -> anyhow::Result<Amount> {
         let started = fedimint_core::time::now();
         let quote = self
             .context
@@ -124,7 +133,7 @@ impl SimplicityClientModule {
             .await?;
         tracing::debug!(
             target: "fedimint_simplicity_client::timing",
-            operation = "quote_plan", stage = "funding_fee",
+            operation = "quote_fee_request", stage = "funding_fee",
             elapsed_us = started.elapsed().unwrap_or_default().as_micros() as u64,
             "stage complete"
         );
