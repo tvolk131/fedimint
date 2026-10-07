@@ -84,6 +84,7 @@ members = [
     "modules/fedimint-mintv2-tests",
     "modules/fedimint-simplicity-client",
     "modules/fedimint-simplicity-common",
+    "modules/fedimint-simplicity-server",
     "modules/fedimint-unknown-common",
     "modules/fedimint-unknown-server",
     "modules/fedimint-wallet-client",
@@ -244,6 +245,7 @@ fedimintd = { path = "./fedimintd", version = "=0.13.0" }
 fedimintd-envs = { path = "./fedimintd-envs", version = "=0.13.0" }
 fedimint-simplicity-common = { path = "./modules/fedimint-simplicity-common", version = "=0.13.0" }
 fedimint-simplicity-client = { path = "./modules/fedimint-simplicity-client", version = "=0.13.0" }
+fedimint-simplicity-server = { path = "./modules/fedimint-simplicity-server", version = "=0.13.0" }
 ff = "0.13.1"
 fs-lock = "=0.1.10"
 fs2 = "0.4.3"

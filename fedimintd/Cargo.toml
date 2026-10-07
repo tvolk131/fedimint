@@ -14,6 +14,7 @@ rustc-args = ["--cfg", "tokio_unstable"]
 
 [features]
 default = ["jemalloc"]
+experimental-simplicity = ["dep:fedimint-simplicity-server"]
 jemalloc = ["dep:tikv-jemallocator", "fedimint-rocksdb/jemalloc"]
 
 [[bin]]
@@ -44,6 +45,7 @@ fedimint-server = { workspace = true }
 fedimint-server-bitcoin-rpc = { workspace = true }
 fedimint-server-core = { workspace = true }
 fedimint-server-ui = { workspace = true }
+fedimint-simplicity-server = { workspace = true, optional = true }
 fedimint-unknown-common = { workspace = true }
 fedimint-unknown-server = { workspace = true }
 fedimint-wallet-server = { workspace = true }
