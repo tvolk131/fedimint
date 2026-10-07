@@ -18,11 +18,15 @@ ASan, clock/race/recovery, two-hour load, and checkpoint-restoration campaigns.
 Unchecked workstreams below are not a claim that those tests remain unrun:
 they retain the outstanding platform, operational, or candidate-specific work.
 
-1. [ ] **Native x86-64 / ARM64 consensus comparison.** Run the same pinned
-   vectors on native Linux of both architectures and compare commitments,
-   custom jets, execution costs, fees, and acceptance/rejection results.
-   Preserve revision, toolchain, commands, and results. ARM64 hardware is
-   available; this needs an x86-64 runner, such as a Linux droplet or WSL2.
+1. [x] **Native x86-64 / ARM64 consensus comparison.** Hosted Ubuntu 24.04
+   runners passed the common-module vectors and 100,000 seeded mutations at
+   `76dbcba1b3a`. Observed encodings, commitments, custom jets, execution costs,
+   fees, and acceptance/rejection results matched byte-for-byte across native
+   Linux x86-64, Linux ARM64, and the local ARM64 Mac. The workflow preserves
+   environments and compares implementation results, not just expected fixture
+   files. See the [hosted CI evidence](BETA-EVIDENCE-2026-10-07-CI.md).
+   Rerun on the chosen candidate under item 6; this is bounded vector coverage,
+   not full guardian integration or an exhaustive consensus-equivalence proof.
 
 2. [ ] **Execution fuzzing and sanitizers.** Extend the deterministic mutation
    probes into decoding, type inference, witnesses, VM execution, and the
@@ -30,10 +34,12 @@ they retain the outstanding platform, operational, or candidate-specific work.
    actionable reproducers as regression tests. This needs suitable sanitizer
    toolchains and compute time; it does not require a new protocol design.
    **Completed:** 100,000 seeded native and ASan iterations including C adapters;
-   all ordinary common vectors under ASan. **Remaining:** a supported Linux leak
-   scan (the Mac runtime hangs at shutdown), broader/coverage-guided campaigns
-   as warranted, and the chosen candidate's final checks. No memory-safety proof
-   is implied by passing a bounded campaign.
+   all ordinary common library vectors under ASan. The hosted Linux run also
+   passed with leak detection enabled and verified deliberate Rust/C overflow
+   and leak controls, resolving the Mac shutdown-scan tooling gap. See the
+   [hosted CI evidence](BETA-EVIDENCE-2026-10-07-CI.md). **Remaining:**
+   broader/coverage-guided campaigns as warranted and the chosen candidate's
+   final checks. No memory-safety proof is implied by a bounded campaign.
 
 3. [ ] **Persistent failure and conflict coverage.** Exercise crashes and lost
    responses around funding reservation, transaction submission/acceptance,
