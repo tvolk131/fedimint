@@ -5,7 +5,8 @@ use bitcoin_hashes::{Hash as _, hash160};
 use bls12_381::G1Affine;
 use fedimint_client::module_init::DynClientModuleInit;
 use fedimint_core::db::{
-    Database, DatabaseVersion, DatabaseVersionKeyV0, IDatabaseTransactionOpsCoreTyped,
+    Database, DatabaseVersion, DatabaseVersionKeyV0, IDatabaseTransactionOpsCore,
+    IDatabaseTransactionOpsCoreTyped,
 };
 use fedimint_core::secp256k1::{Keypair, SECP256K1};
 use fedimint_core::{OutPoint, TransactionId};
@@ -329,6 +330,17 @@ async fn test_client_db_migrations() -> anyhow::Result<()> {
                         ensure!(
                             notes[0].0.0 == spendable_note(1),
                             "the spendable note must round-trip unchanged"
+                        );
+                    }
+                    client_db::DbKeyPrefix::FundingReservation => {
+                        // The v0 snapshot predates reservations; migration must not create any.
+                        ensure!(
+                            dbtx.raw_find_by_prefix(&[prefix as u8])
+                                .await?
+                                .next()
+                                .await
+                                .is_none(),
+                            "migrating the v0 snapshot must not create funding reservations"
                         );
                     }
                     client_db::DbKeyPrefix::RecoveryState => {
