@@ -1,0 +1,336 @@
+{
+  "wire": {
+    "legacy_output": "00fd03e81111111111111111111111111111111111111111111111111111111111111111222222222222222222222222222222222222222222222222222222222222222202dead",
+    "asset_output": "01fe000100001111111111111111111111111111111111111111111111111111111111111111222222222222222222222222222222222222222222222222222222222222222202dead01008a024444444444444444444444444444444444444444444444444444444444444444fd00fd5555555555555555555555555555555555555555555555555555555555555555fe000100000244444444444444444444444444444444444444444444444444444444444444445555555555555555555555555555555555555555555555555555555555555555",
+    "actions_output": "010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101a8010279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980101666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666660144444444444444444444444444444444444444444444444444444444444444440a0155555555555555555555555555555555555555555555555555555555555555550b",
+    "outputs": "03044700fd03e81111111111111111111111111111111111111111111111111111111111111111222222222222222222222222222222222222222222222222222222222222222202dead04d601fe000100001111111111111111111111111111111111111111111111111111111111111111222222222222222222222222222222222222222222222222222222222222222202dead01008a024444444444444444444444444444444444444444444444444444444444444444fd00fd5555555555555555555555555555555555555555555555555555555555555555fe00010000024444444444444444444444444444444444444444444444444444444444444444555555555555555555555555555555555555555555555555555555555555555507ee010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101a8010279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980101666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666660144444444444444444444444444444444444444444444444444444444444444440a0155555555555555555555555555555555555555555555555555555555555555550b",
+    "outpoint_hash": "33a2a643eee2ebf6ce26a38b027a4ab0739dcb00e16eb4559c573be0e9ba996b",
+    "namespace": "86f457e2b2291b17e0003330c719c791e96d05b162cee19d901c051e8f6c17ea",
+    "asset_id_0": "4e61b5867c23f0fec89d871117a475ab5e459ed4d1e4a40ea5c18529eeae87a3",
+    "asset_id_253": "55869608749cb4c7732f6ac6b07a007643648293e582e1fd4374f2ec52a7c859",
+    "sighash_v0": "431964e3300db50aff681adb18c33f473262f4b350c0ee9f670ac56be5db0108",
+    "sighash_v1": "ee9e0b60548d2bfc1cfa3541ef1c59cccf55c571a69e23b8e5810ba135c51466"
+  },
+  "jets": [
+    {
+      "name": "fm_sig_hash_all",
+      "encoding": "8000",
+      "source": 0,
+      "target": 256,
+      "cmr": "d74c86c4457dfa4c93d322e406a7ec69c044c85cf1bbc3652ad6e4c05e2251f5",
+      "cost": 1000
+    },
+    {
+      "name": "fm_session_index",
+      "encoding": "8080",
+      "source": 0,
+      "target": 64,
+      "cmr": "12f3a30ade0d4b2fd796e6ddda69b9b6e2f48ddb120ed15570bffe8df8099677",
+      "cost": 1000
+    },
+    {
+      "name": "fm_block_count",
+      "encoding": "8100",
+      "source": 0,
+      "target": 64,
+      "cmr": "905dda9510de4acba9844c97107b798b1768c0a9934ccad9a7e24a4de9462248",
+      "cost": 1000
+    },
+    {
+      "name": "fm_current_amount",
+      "encoding": "8180",
+      "source": 0,
+      "target": 64,
+      "cmr": "2d350258a55a58e1fe57fb5fb9e82a79a013b5a589e6b2edfb773a83b818c915",
+      "cost": 1000
+    },
+    {
+      "name": "fm_current_cmr",
+      "encoding": "8200",
+      "source": 0,
+      "target": 256,
+      "cmr": "dd356afd31bed9b911f8cab0f88721b8a869235d3c3b0e100dd5424fe44575a8",
+      "cost": 1000
+    },
+    {
+      "name": "fm_current_state",
+      "encoding": "8280",
+      "source": 0,
+      "target": 256,
+      "cmr": "32be7f2a2bc4139c2b6c38aecb593e7b522d700050b96e17a404092902e0472d",
+      "cost": 1000
+    },
+    {
+      "name": "fm_current_index",
+      "encoding": "8300",
+      "source": 0,
+      "target": 32,
+      "cmr": "e55283cbb39ca9744af4f38882c10221c02ebdbe825d2169aeb3ee5d0c9c9b2c",
+      "cost": 1000
+    },
+    {
+      "name": "fm_input_count",
+      "encoding": "8380",
+      "source": 0,
+      "target": 32,
+      "cmr": "ff2de0f3bccd1d2980b94026b6a404feedf54106ef6197676c2f658a490586f6",
+      "cost": 1000
+    },
+    {
+      "name": "fm_output_count",
+      "encoding": "8400",
+      "source": 0,
+      "target": 32,
+      "cmr": "94e8ef0d01251052e8c46731a23ecea7466d92a887396cce1e56e7042a90d4d5",
+      "cost": 1000
+    },
+    {
+      "name": "fm_output_amount",
+      "encoding": "8480",
+      "source": 32,
+      "target": 64,
+      "cmr": "543d2aeb2f452592e041607284679d0e6c61803075b3336e61ee40f476f8caf4",
+      "cost": 1000
+    },
+    {
+      "name": "fm_output_cmr",
+      "encoding": "8500",
+      "source": 32,
+      "target": 256,
+      "cmr": "945f0e430209d37d42828cebfc21de46ca014c249fe8806f7ab948ada450ebb8",
+      "cost": 1000
+    },
+    {
+      "name": "fm_output_state",
+      "encoding": "8580",
+      "source": 32,
+      "target": 256,
+      "cmr": "7bccd28b94b3106b4ec36273e5573620dca2b85e68093dd6a3eaa52b86834099",
+      "cost": 1000
+    },
+    {
+      "name": "fm_output_hash",
+      "encoding": "8600",
+      "source": 32,
+      "target": 256,
+      "cmr": "d7ee91b8a8def71b4681f0f4a8e95a16bfc55f5137d52fa9969a40817ee114ce",
+      "cost": 1000
+    },
+    {
+      "name": "fm_output_module",
+      "encoding": "8680",
+      "source": 32,
+      "target": 16,
+      "cmr": "15b5c005357a1d20ff1ba3d7f216767e6174c5741575d23255c19f9b580f77b7",
+      "cost": 1000
+    },
+    {
+      "name": "fm_creation_session",
+      "encoding": "8700",
+      "source": 0,
+      "target": 64,
+      "cmr": "7ee8d7d925b6aea43365bc283fdbc9058be09238a7218a2d3d510f054834b8bd",
+      "cost": 1000
+    },
+    {
+      "name": "fm_creation_block_count",
+      "encoding": "8780",
+      "source": 0,
+      "target": 64,
+      "cmr": "0910c3eb926cfd4bc08ab29a63524d5bb4a03dc780465a601506bf78e6448afd",
+      "cost": 1000
+    },
+    {
+      "name": "fm_input_amount",
+      "encoding": "8800",
+      "source": 32,
+      "target": 64,
+      "cmr": "7958c18152759f4f34f0c74b18a58105b7902e64a4b35de4657a51b629a126a6",
+      "cost": 1000
+    },
+    {
+      "name": "fm_input_cmr",
+      "encoding": "8880",
+      "source": 32,
+      "target": 256,
+      "cmr": "dfecfde8fec7bedbe204d420f5de312e2c0b9220f37bf03bc53097f3124ddf15",
+      "cost": 1000
+    },
+    {
+      "name": "fm_input_state",
+      "encoding": "8900",
+      "source": 32,
+      "target": 256,
+      "cmr": "1bf685548eccd5214f0c7deb02623900ea0df9810debd3189f49be9d20b46b44",
+      "cost": 1000
+    },
+    {
+      "name": "fm_input_outpoint_hash",
+      "encoding": "8980",
+      "source": 32,
+      "target": 256,
+      "cmr": "01d2b7c3c957d30a854deca292888ccc84cbd3b58000d117694771f3d2d4b218",
+      "cost": 1000
+    },
+    {
+      "name": "fm_input_asset_quantity",
+      "encoding": "8a00",
+      "source": 288,
+      "target": 64,
+      "cmr": "4230cd76a9969d759b5e6b92b8ed10e4383825e6de70780d7d7d597f21a76172",
+      "cost": 1000
+    },
+    {
+      "name": "fm_output_asset_quantity",
+      "encoding": "8a80",
+      "source": 288,
+      "target": 64,
+      "cmr": "a0c69de47e284a7bba19df88fd1439f163d3508efefdf07390de682a952af86c",
+      "cost": 1000
+    },
+    {
+      "name": "fm_input_authority",
+      "encoding": "8b00",
+      "source": 288,
+      "target": 1,
+      "cmr": "8f3625f40b982b8887a61f10e928381a4b300bb93f7c0ec92a95742d0e218036",
+      "cost": 1000
+    },
+    {
+      "name": "fm_output_authority",
+      "encoding": "8b80",
+      "source": 288,
+      "target": 1,
+      "cmr": "7deb174454019edf59687792752fadd4419aecaebbbc6e56367a95dc73e18716",
+      "cost": 1000
+    },
+    {
+      "name": "fm_issued_quantity",
+      "encoding": "8c00",
+      "source": 256,
+      "target": 64,
+      "cmr": "bd37ff820231e69342aefe71c850dda4abb5a420641aca5b98fd6968e7a25995",
+      "cost": 1000
+    },
+    {
+      "name": "fm_burned_quantity",
+      "encoding": "8c80",
+      "source": 256,
+      "target": 64,
+      "cmr": "f0756d4876fa375556057c2d0d0405f40d15352ffac727bfeebaf5cc72fb6f1f",
+      "cost": 1000
+    },
+    {
+      "name": "fm_input_asset_count",
+      "encoding": "8d00",
+      "source": 32,
+      "target": 32,
+      "cmr": "085240b1851af36cda369acc03f37e3ddfd5e0e013db41e8ff00aa1f832099d1",
+      "cost": 1000
+    },
+    {
+      "name": "fm_output_asset_count",
+      "encoding": "8d80",
+      "source": 32,
+      "target": 32,
+      "cmr": "852e50d6065f60df42bf42c30c0d17216322315aacfaa164a22df208b3a00b39",
+      "cost": 1000
+    },
+    {
+      "name": "fm_input_authority_count",
+      "encoding": "8e00",
+      "source": 32,
+      "target": 32,
+      "cmr": "62bb0edb94d3e834d99938502d6126a10e86453d105a93ec98230b619edee711",
+      "cost": 1000
+    },
+    {
+      "name": "fm_output_authority_count",
+      "encoding": "8e80",
+      "source": 32,
+      "target": 32,
+      "cmr": "2b5676187bf6d173eeb97409b2499346103ca76e3fac0603533437e857cfa9d1",
+      "cost": 1000
+    },
+    {
+      "name": "fm_input_asset_id",
+      "encoding": "8f00",
+      "source": 64,
+      "target": 256,
+      "cmr": "0c4f49c567fbc586c7820ffccc295fb371136f8aa9e37b50f0ca9ab798754499",
+      "cost": 1000
+    },
+    {
+      "name": "fm_output_asset_id",
+      "encoding": "8f80",
+      "source": 64,
+      "target": 256,
+      "cmr": "ca68812bb1b0f201733848cf294da39bd6df0610c7af5edcf5758891dbf32d34",
+      "cost": 1000
+    },
+    {
+      "name": "fm_input_authority_id",
+      "encoding": "9000",
+      "source": 64,
+      "target": 256,
+      "cmr": "a730f37ddbb88128cf70d304d4b580be3ed5730659c8d54a4ad31b26bcebccb5",
+      "cost": 1000
+    },
+    {
+      "name": "fm_output_authority_id",
+      "encoding": "9080",
+      "source": 64,
+      "target": 256,
+      "cmr": "c9aefb51b55b6c068c59d10f2629aa60ded35fc897b4ca73e78ced00beb28d70",
+      "cost": 1000
+    },
+    {
+      "name": "fm_input_version",
+      "encoding": "9100",
+      "source": 32,
+      "target": 32,
+      "cmr": "aa499bca2f721e3dea668e92d65863d196cb6e51a77b82cfa6b15abdcf9ba2cd",
+      "cost": 1000
+    },
+    {
+      "name": "fm_output_version",
+      "encoding": "9180",
+      "source": 32,
+      "target": 32,
+      "cmr": "0ee985f2f6b5c03420bd0d04413831975e6bc7ef87f5cdc6af4f45f44c368f6e",
+      "cost": 1000
+    }
+  ],
+  "programs": [
+    {
+      "name": "unit",
+      "program": "24",
+      "witness": "",
+      "cmr": "c40a10263f7436b4160acbef1c36fba4be4d95df181a968afeab5eac247adff7",
+      "cost": 100,
+      "cells": 0,
+      "frames": 0,
+      "fee": 102
+    },
+    {
+      "name": "session",
+      "program": "bc052080",
+      "witness": "",
+      "cmr": "a2887fb810961240be810149e110bb55e86d6e15d6960eb4d9ce264ae71427e9",
+      "cost": 1364,
+      "cells": 64,
+      "frames": 1,
+      "fee": 106
+    },
+    {
+      "name": "issuance",
+      "program": "c5f8c0212080",
+      "witness": "4444444444444444444444444444444444444444444444444444444444444444",
+      "cmr": "a038939ce36f4e68ef1a62c0942987b5298fddc808b69a4fa54001f78acd4710",
+      "cost": 2076,
+      "cells": 576,
+      "frames": 2,
+      "fee": 141
+    }
+  ]
+}

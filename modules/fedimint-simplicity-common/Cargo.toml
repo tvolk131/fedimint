@@ -1,0 +1,30 @@
+[package]
+authors = { workspace = true }
+description = "Experimental Simplicity contract module: common"
+edition = { workspace = true }
+license = { workspace = true }
+name = "fedimint-simplicity-common"
+readme = { workspace = true }
+repository = { workspace = true }
+version = { workspace = true }
+
+[features]
+compiler = ["dep:simplicityhl"]
+
+[dependencies]
+anyhow = { workspace = true }
+bitcoin = { workspace = true }
+fedimint-core = { workspace = true }
+serde = { workspace = true }
+simplicity-lang = { version = "=0.9.0", default-features = false, features = [
+    "bitcoin",
+] }
+simplicity-sys = "=0.8.0"
+simplicityhl = { git = "https://github.com/BlockstreamResearch/SimplicityHL", rev = "351eb068e30affc69189993739cd1b30b02b269d", optional = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
