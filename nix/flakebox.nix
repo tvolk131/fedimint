@@ -66,6 +66,7 @@ let
     "fedimint-server/src/test_fixtures/.*"
     "docs/.*\\.md"
     "fedimint-ui-common/assets/.*"
+    "modules/fedimint-simplicity-client/contracts/.*\\.simf"
     "modules/fedimint-simplicity-common/tests/vectors/consensus\\.json"
   ];
 
@@ -124,6 +125,7 @@ let
         "scripts/.*"
         "docs/.*\\.md"
         "fedimint-ui-common/assets/.*"
+        "modules/fedimint-simplicity-client/contracts/.*\\.simf"
         "modules/fedimint-simplicity-common/tests/vectors/consensus\\.json"
       ]
     ) src;

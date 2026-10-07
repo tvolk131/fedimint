@@ -1,0 +1,140 @@
+// One position unit redeems for 1000 msat; INVALID pays 500 msat per unit.
+// Vault is module input 0 and outer output 0. Position owners authorize the
+// entire intent, including payout destinations and change, with their scripts.
+fn not(value: bool) -> bool {
+    match value { true => false, false => true, }
+}
+
+fn add(a: u64, b: u64) -> u64 {
+    let (carry, result): (bool, u64) = jet::add_64(a, b);
+    assert!(not(carry));
+    result
+}
+
+fn subtract(a: u64, b: u64) -> u64 {
+    let (borrow, result): (bool, u64) = jet::subtract_64(a, b);
+    assert!(not(borrow));
+    result
+}
+
+fn multiply(a: u64, b: u64) -> u64 {
+    let (high, low): (u64, u64) = <u128>::into(jet::multiply_64(a, b));
+    assert!(jet::eq_64(high, 0));
+    low
+}
+
+fn no_issuance() {
+    assert!(jet::eq_64(jet::fm_issued_quantity(param::YES), 0));
+    assert!(jet::eq_64(jet::fm_issued_quantity(param::NO), 0));
+}
+
+fn no_burns() {
+    assert!(jet::eq_64(jet::fm_burned_quantity(param::YES), 0));
+    assert!(jet::eq_64(jet::fm_burned_quantity(param::NO), 0));
+}
+
+fn issue() {
+    assert!(jet::eq_256(jet::fm_current_state(), 0));
+    assert!(jet::eq_256(jet::fm_output_state(0), 0));
+    assert!(jet::lt_64(jet::fm_block_count(), param::DEADLINE));
+    no_burns();
+    let quantity: u64 = jet::fm_issued_quantity(param::YES);
+    assert!(jet::lt_64(0, quantity));
+    assert!(jet::eq_64(quantity, jet::fm_issued_quantity(param::NO)));
+    let collateral: u64 = add(jet::fm_current_amount(), multiply(quantity, 1000));
+    assert!(jet::eq_64(jet::fm_output_amount(0), collateral));
+}
+
+fn recombine() {
+    assert!(jet::eq_256(jet::fm_current_state(), 0));
+    assert!(jet::eq_256(jet::fm_output_state(0), 0));
+    no_issuance();
+    let quantity: u64 = jet::fm_burned_quantity(param::YES);
+    assert!(jet::lt_64(0, quantity));
+    assert!(jet::eq_64(quantity, jet::fm_burned_quantity(param::NO)));
+    let collateral: u64 = subtract(jet::fm_current_amount(), multiply(quantity, 1000));
+    assert!(jet::eq_64(jet::fm_output_amount(0), collateral));
+}
+
+fn oracle_message(outcome: u8) -> u256 {
+    match jet::eq_8(outcome, 1) {
+        true => {
+            assert!(jet::eq_256(jet::fm_output_state(0), 1));
+            param::YES_MESSAGE
+        },
+        false => match jet::eq_8(outcome, 2) {
+            true => {
+                assert!(jet::eq_256(jet::fm_output_state(0), 2));
+                param::NO_MESSAGE
+            },
+            false => {
+                assert!(jet::eq_8(outcome, 3));
+                assert!(jet::eq_256(jet::fm_output_state(0), 3));
+                param::INVALID_MESSAGE
+            },
+        },
+    }
+}
+
+fn resolve(outcome: u8, signature: Signature) {
+    assert!(jet::eq_256(jet::fm_current_state(), 0));
+    no_issuance();
+    no_burns();
+    assert!(jet::eq_64(jet::fm_output_amount(0), jet::fm_current_amount()));
+    match jet::le_64(param::DEADLINE, jet::fm_block_count()) {
+        true => assert!(jet::eq_256(jet::fm_output_state(0), 3)),
+        false => {
+            assert!(jet::le_64(param::RESOLUTION_START, jet::fm_block_count()));
+            let message: u256 = oracle_message(outcome);
+            jet::bip_0340_verify((param::ORACLE, message), signature);
+        },
+    }
+}
+
+fn redeem() {
+    no_issuance();
+    let state: u256 = jet::fm_current_state();
+    assert!(jet::eq_256(jet::fm_output_state(0), state));
+    let yes: u64 = jet::fm_burned_quantity(param::YES);
+    let no: u64 = jet::fm_burned_quantity(param::NO);
+    let payout: u64 = match jet::eq_256(state, 1) {
+        true => multiply(yes, 1000),
+        false => match jet::eq_256(state, 2) {
+            true => multiply(no, 1000),
+            false => {
+                assert!(jet::eq_256(state, 3));
+                multiply(add(yes, no), 500)
+            },
+        },
+    };
+    assert!(jet::lt_64(0, payout));
+    assert!(jet::eq_64(jet::fm_output_amount(0), subtract(jet::fm_current_amount(), payout)));
+}
+
+fn main() {
+    assert!(jet::eq_32(jet::fm_current_index(), 0));
+    assert!(jet::eq_32(jet::fm_output_version(0), 1));
+    assert!(jet::eq_256(jet::fm_output_cmr(0), jet::fm_current_cmr()));
+    assert!(jet::eq_32(jet::fm_input_asset_count(0), 0));
+    assert!(jet::eq_32(jet::fm_output_asset_count(0), 0));
+    assert!(jet::eq_32(jet::fm_input_authority_count(0), 2));
+    assert!(jet::eq_32(jet::fm_output_authority_count(0), 2));
+    assert!(jet::fm_input_authority((0, param::YES)));
+    assert!(jet::fm_input_authority((0, param::NO)));
+    assert!(jet::fm_output_authority((0, param::YES)));
+    assert!(jet::fm_output_authority((0, param::NO)));
+    let action: u8 = witness::ACTION;
+    match jet::eq_8(action, 0) {
+        true => issue(),
+        false => match jet::eq_8(action, 1) {
+            true => recombine(),
+            false => match jet::eq_8(action, 2) {
+                true => resolve(witness::OUTCOME, witness::ORACLE_SIGNATURE),
+                false => {
+                    assert!(jet::eq_8(action, 3));
+                    redeem();
+                },
+            },
+        },
+    }
+}
