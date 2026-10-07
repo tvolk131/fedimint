@@ -74,3 +74,39 @@ locks held. The completed AddressSanitizer run used `detect_leaks=0` with
 `detect_stack_use_after_return=1:halt_on_error=1`; it does not establish absence
 of leaks. Preserve the failed-run stack sample separately from the successful
 ASan log. A supported Linux LeakSanitizer run remains useful.
+
+## Hosted native comparison and Linux sanitizers
+
+The `Simplicity consensus` workflow runs on the prototype branch and by manual
+dispatch. It uses hosted Ubuntu 24.04 x86-64 and ARM64 runners, checks their actual
+architecture, and pins Rust 1.93.0 with the committed Cargo lockfile. Ordinary
+tests still check the independent fixture; the ignored observation test writes
+actual implementation results, including wire encodings, hashes, all custom jet
+outputs/version gates, program commitments, static bounds and execution fees.
+The mutation campaign also hashes its generated inputs and observed decode/VM/
+frame results, not just pass counts. A dependent job requires identical JSON
+reports from both native architectures.
+
+To emit the same public test reports locally:
+
+```sh
+FM_SIMPLICITY_REPORT_DIR=/tmp/simplicity-observations \
+FM_SIMPLICITY_MUTATION_ROUNDS=100000 FM_SIMPLICITY_MUTATION_SEED=5065796730156482561 \
+  cargo +1.93.0 test --release --locked -p fedimint-simplicity-common \
+  --features compiler --lib -- --ignored --nocapture --test-threads=1
+```
+
+The Linux sanitizer job uses nightly-2026-02-10, Clang 21, instrumented Rust std
+and target C/C++ dependencies, and one external Clang ASan runtime. Leak detection
+stays enabled. Before running ordinary library tests and the same bounded
+campaign, `scripts/tests/simplicity-sanitizers.sh` requires deliberate C and Rust
+heap overflows and a C leak to produce their expected diagnostics. A toolchain
+setup failure must fail the job, not silently disable instrumentation or leaks.
+
+Artifacts contain only synthetic vector reports, positive-control diagnostics
+and build metadata. They exclude wallet databases, guardian secrets and live
+federation data. Native reports are compared only within one workflow revision;
+they are observations, not replacements for the independent expected fixture.
+This is a focused common-module execution check, not full guardian integration,
+full repository Nix CI, hardware performance calibration or exhaustive consensus
+equivalence. Server/SDK release-candidate checks remain separate.

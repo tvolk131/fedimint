@@ -2,6 +2,7 @@
 mod execution;
 mod jets;
 mod mutation;
+mod transcript;
 mod wire;
 
 use bitcoin::hashes::Hash;

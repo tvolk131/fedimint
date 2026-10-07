@@ -2,6 +2,9 @@
 //! Keep the seed and iteration count with sanitizer artifacts for reproduction.
 use std::sync::Arc;
 
+use bitcoin::hashes::{HashEngine as _, sha256};
+use serde_json::json;
+
 use super::*;
 use crate::{ContractError, runtime};
 
@@ -68,6 +71,7 @@ fn seeded_decode_execute_and_frame_campaign() {
     let jets = super::jets::cases();
     let mut decoded = 0;
     let mut executed = 0;
+    let mut transcript = sha256::Hash::engine();
     for iteration in 0..iterations {
         if iteration % 1000 == 0 {
             eprintln!("mutation seed={seed} iteration={iteration}/{iterations}");
@@ -105,18 +109,27 @@ fn seeded_decode_execute_and_frame_campaign() {
         // Matching the mutated commitment is intentional: otherwise nearly
         // every successfully decoded mutation stops before exercising the VM.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if let Ok(program) = runtime::decode_program(&input) {
-                decoded += 1;
-                env.current.cmr = program.cmr().to_byte_array();
-                let result = runtime::execute_decoded(&input, &env, &program);
-                executed += usize::from(result.is_ok());
-                assert_eq!(result, runtime::execute(&input, &env));
-                env.current.cmr[0] ^= 1;
-                assert_eq!(
-                    runtime::execute_decoded(&input, &env, &program),
-                    Err(ContractError::Commitment)
-                );
-            }
+            let observation = match runtime::decode_program(&input) {
+                Ok(program) => {
+                    decoded += 1;
+                    env.current.cmr = program.cmr().to_byte_array();
+                    let result = runtime::execute_decoded(&input, &env, &program);
+                    executed += usize::from(result.is_ok());
+                    assert_eq!(result, runtime::execute(&input, &env));
+                    env.current.cmr[0] ^= 1;
+                    assert_eq!(
+                        runtime::execute_decoded(&input, &env, &program),
+                        Err(ContractError::Commitment)
+                    );
+                    json!({
+                        "cmr": program.cmr().to_byte_array(),
+                        "cost_milliweight": program.bounds().cost.to_string(),
+                        "cells": program.bounds().extra_cells, "frames": program.bounds().extra_frames,
+                        "execution": super::transcript::outcome(result),
+                    })
+                }
+                Err(error) => json!({"decode_error": format!("{error:?}")}),
+            };
             // Call every adapter across the campaign, with both valid and
             // arbitrary source bits. The helper checks cursor and guard words.
             let (jet, source, target) = &jets[iteration % jets.len()];
@@ -126,7 +139,18 @@ fn seeded_decode_execute_and_frame_campaign() {
                     *bit = next(&mut random) & 1 == 1;
                 }
             }
-            let _ = super::jets::run(*jet, &source, target.len(), &env);
+            let frame = super::jets::run(*jet, &source, target.len(), &env);
+            // Commit to inputs as well as outcomes so equal summaries cannot
+            // conceal architecture-dependent case generation or VM results.
+            transcript.input(
+                &serde_json::to_vec(&json!({
+                    "iteration": iteration, "program": input.program, "witness": input.witness,
+                    "session": env.session_index, "block": env.block_count,
+                    "amount": env.current.amount.msats, "outputs": env.outputs.len(),
+                    "vm": observation, "jet": *jet as u8, "source": source, "frame": frame,
+                }))
+                .unwrap(),
+            );
         }));
         assert!(
             result.is_ok(),
@@ -138,5 +162,13 @@ fn seeded_decode_execute_and_frame_campaign() {
     assert!(decoded > 0 && executed > 0, "campaign never reached the VM");
     eprintln!(
         "mutation seed={seed} rounds={iterations} decoded={decoded} executed={executed} frame_calls={iterations}"
+    );
+    super::transcript::write_report(
+        "mutation.json",
+        &json!({
+            "schema": 1, "seed": seed, "rounds": iterations,
+            "compiler": cfg!(feature = "compiler"), "decoded": decoded, "executed": executed,
+            "frame_calls": iterations, "sha256": sha256::Hash::from_engine(transcript).to_string(),
+        }),
     );
 }

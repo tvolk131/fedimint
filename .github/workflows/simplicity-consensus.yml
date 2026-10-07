@@ -1,0 +1,131 @@
+name: Simplicity consensus
+
+on:
+  push:
+    branches: [codex/simplicity-prototype]
+    paths:
+      - '.github/workflows/simplicity-consensus.yml'
+      - 'scripts/tests/simplicity-*'
+      - 'modules/fedimint-simplicity-*/**'
+      - 'fedimint-core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: simplicity-consensus-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  RUSTFLAGS: --cfg tokio_unstable
+  FM_SIMPLICITY_MUTATION_ROUNDS: 100000
+  FM_SIMPLICITY_MUTATION_SEED: '5065796730156482561'
+
+jobs:
+  native:
+    name: Native ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 libclang-18-dev cmake pkg-config
+          rustup toolchain install 1.93.0 --profile minimal
+      - name: Record environment and verify native architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          mkdir -p evidence
+          {
+            git rev-parse HEAD
+            sha256sum Cargo.lock
+            uname -a
+            rustup run 1.93.0 rustc -vV
+            clang-18 --version
+            cmake --version
+            df -h .
+          } > evidence/environment.txt
+      - name: Check independent reference and native implementation
+        env:
+          CC: clang-18
+          CXX: clang++-18
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+          FM_SIMPLICITY_REPORT_DIR: ${{ github.workspace }}/evidence
+        run: |
+          python3 modules/fedimint-simplicity-common/tests/vectors/reference.py > evidence/reference.json
+          diff -u modules/fedimint-simplicity-common/tests/vectors/consensus.json evidence/reference.json
+          rustup run 1.93.0 cargo test --release --locked -p fedimint-simplicity-common --features compiler
+          rustup run 1.93.0 cargo test --release --locked -p fedimint-simplicity-common --features compiler --lib -- --ignored --nocapture --test-threads=1
+      - name: Preserve public test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: simplicity-native-${{ matrix.arch }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  compare:
+    name: Compare native consensus observations
+    needs: native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: simplicity-native-*
+          path: evidence
+      - name: Require identical inputs and observed results
+        run: |
+          diff -u evidence/simplicity-native-x86_64/reference.json evidence/simplicity-native-aarch64/reference.json
+          diff -u evidence/simplicity-native-x86_64/consensus.json evidence/simplicity-native-aarch64/consensus.json
+          diff -u evidence/simplicity-native-x86_64/mutation.json evidence/simplicity-native-aarch64/mutation.json
+
+  sanitizer:
+    name: Linux ASan and leak checking
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install matching LLVM 21 and nightly Rust
+        run: |
+          curl --fail --silent --show-error https://apt.llvm.org/llvm-snapshot.gpg.key -o /tmp/llvm-key.asc
+          fingerprint="$(gpg --show-keys --with-colons /tmp/llvm-key.asc | awk -F: '$1 == "fpr" { print $10; exit }')"
+          test "$fingerprint" = 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+          gpg --dearmor < /tmp/llvm-key.asc | sudo tee /usr/share/keyrings/simplicity-llvm.gpg > /dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/simplicity-llvm.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' | sudo tee /etc/apt/sources.list.d/simplicity-llvm.list
+          sudo apt-get update
+          sudo apt-get install -y clang-21 libclang-21-dev libclang-rt-21-dev llvm-21 cmake pkg-config
+          rustup toolchain install nightly-2026-02-10 --profile minimal --component rust-src
+      - name: Instrument Rust, std and C; check controls and module
+        run: scripts/tests/simplicity-sanitizers.sh
+      - name: Preserve public sanitizer evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: simplicity-linux-sanitizer
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 14

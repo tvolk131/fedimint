@@ -7,6 +7,26 @@ use fedimint_core::transaction::{Transaction, TransactionSignature};
 use super::*;
 use crate::assets::{asset_id, namespace, signature_hash_v1};
 
+pub(super) fn transaction() -> (FederationId, Transaction) {
+    let federation = FederationId(bitcoin::hashes::sha256::Hash::from_byte_array([0x99; 32]));
+    let mut foreign = input();
+    foreign.outpoint.out_idx = 0;
+    let tx = Transaction {
+        inputs: vec![
+            DynInput::from_typed(4, input()),
+            DynInput::from_typed(7, foreign),
+        ],
+        outputs: vec![
+            DynOutput::from_typed(4, legacy()),
+            DynOutput::from_typed(4, asset()),
+            DynOutput::from_typed(7, ContractOutput::action_output(actions())),
+        ],
+        nonce: [0x88; 8],
+        signatures: TransactionSignature::NaiveMultisig(vec![]),
+    };
+    (federation, tx)
+}
+
 #[test]
 fn encodings_and_domains_match_independent_reference() {
     let fixture = fixtures();
@@ -24,22 +44,7 @@ fn encodings_and_domains_match_independent_reference() {
             output
         );
     }
-    let federation = FederationId(bitcoin::hashes::sha256::Hash::from_byte_array([0x99; 32]));
-    let mut foreign = input();
-    foreign.outpoint.out_idx = 0;
-    let mut tx = Transaction {
-        inputs: vec![
-            DynInput::from_typed(4, input()),
-            DynInput::from_typed(7, foreign),
-        ],
-        outputs: vec![
-            DynOutput::from_typed(4, legacy()),
-            DynOutput::from_typed(4, asset()),
-            DynOutput::from_typed(7, ContractOutput::action_output(actions())),
-        ],
-        nonce: [0x88; 8],
-        signatures: TransactionSignature::NaiveMultisig(vec![]),
-    };
+    let (federation, mut tx) = transaction();
     assert_eq!(
         tx.outputs.consensus_encode_to_vec(),
         bytes(wire["outputs"].as_str().unwrap())
