@@ -31,6 +31,51 @@ use fedimint_core::module::{
 use fedimint_core::{InPoint, OutPoint, PeerId, apply, async_trait_maybe_send, dyn_newtype_define};
 pub use init::*;
 
+/// Consensus-owned context shared by every module processing a transaction.
+/// During history replay, `session_index` must be the original session index.
+#[derive(Debug, Clone, Copy)]
+pub struct TransactionConsensusContext {
+    pub federation_id: fedimint_core::config::FederationId,
+    pub session_index: u64,
+}
+
+/// Module-owned validation result, scoped to one transaction and database
+/// snapshot. Core validates every touched module before processing any inputs
+/// or outputs.
+pub struct ModuleTransactionValidation(Box<dyn std::any::Any + Send + Sync>);
+
+impl ModuleTransactionValidation {
+    pub fn new<T: std::any::Any + Send + Sync>(value: T) -> Self {
+        Self(Box::new(value))
+    }
+
+    pub fn get<T: std::any::Any>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+
+    pub fn into_inner<T: std::any::Any>(self) -> Result<T, Self> {
+        self.0.downcast().map(|value| *value).map_err(Self)
+    }
+}
+
+impl std::fmt::Debug for ModuleTransactionValidation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ModuleTransactionValidation")
+    }
+}
+
+/// Authenticated transaction view. This is constructed by the core, never
+/// decoded from a module input. Existing modules may ignore it.
+#[derive(Debug)]
+pub struct ModuleTransactionContext<'a> {
+    pub transaction: &'a fedimint_core::transaction::Transaction,
+    pub consensus: TransactionConsensusContext,
+    pub module_instance_id: ModuleInstanceId,
+    /// Preparation for this module kind, scoped to this validation attempt.
+    pub preparation: Option<&'a ModuleTransactionValidation>,
+    pub validation: Option<&'a ModuleTransactionValidation>,
+}
+
 #[apply(async_trait_maybe_send!)]
 pub trait ServerModule: Debug + Sized {
     type Common: ModuleCommon;
@@ -38,8 +83,8 @@ pub trait ServerModule: Debug + Sized {
     type Init: ServerModuleInit;
 
     fn module_kind() -> ModuleKind {
-        // Note: All modules should define kinds as &'static str, so this doesn't
-        // allocate
+        // Note: All modules should define kinds as &'static str, so this
+        // doesn't allocate
         <Self::Init as ModuleInit>::Common::KIND
     }
 
@@ -88,6 +133,18 @@ pub trait ServerModule: Debug + Sized {
         peer_id: PeerId,
     ) -> anyhow::Result<()>;
 
+    /// Stateless checks across all instances of this module kind, before any
+    /// per-input verification or database access. Core calls this once per
+    /// kind, using the lowest participating instance ID for the context.
+    /// Inspect all this kind's decoded inputs/outputs, not only that
+    /// instance. The default preserves existing modules' behavior. Outer
+    /// signatures are not yet checked.
+    fn verify_transaction(
+        _context: &ModuleTransactionContext<'_>,
+    ) -> Result<(), fedimint_core::transaction::TransactionError> {
+        Ok(())
+    }
+
     // Use this function to parallelise stateless cryptographic verification of
     // inputs across a transaction. All inputs of a transaction are verified
     // before any input is processed.
@@ -96,6 +153,40 @@ pub trait ServerModule: Debug + Sized {
         _input: &<Self::Common as ModuleCommon>::Input,
     ) -> Result<(), <Self::Common as ModuleCommon>::InputError> {
         Ok(())
+    }
+
+    /// Resolve state against the unmodified snapshot without executing programs
+    /// or mutating the database. Core completes this phase for every instance
+    /// before calling any kind's `prepare_kind_transaction` hook.
+    async fn prepare_transaction(
+        &self,
+        _dbtx: &mut DatabaseTransaction<'_>,
+        _context: &ModuleTransactionContext<'_>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
+        Ok(ModuleTransactionValidation::new(()))
+    }
+
+    /// Prepare execution once per kind, with only that kind's resolved states.
+    /// Core completes every kind's preparation before calling any validation
+    /// hook. The result is available to this kind's validation hooks and is
+    /// dropped before input/output processing. The context uses the lowest
+    /// participating instance ID, as in `verify_transaction`.
+    fn prepare_kind_transaction(
+        _context: &ModuleTransactionContext<'_>,
+        _instances: std::collections::BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
+        Ok(ModuleTransactionValidation::new(()))
+    }
+
+    /// Validate against the unmodified transaction snapshot. The returned value
+    /// is available to this module's processing hooks only for this
+    /// transaction. Implementations must not mutate the database here.
+    async fn validate_transaction(
+        &self,
+        _dbtx: &mut DatabaseTransaction<'_>,
+        _context: &ModuleTransactionContext<'_>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
+        Ok(ModuleTransactionValidation::new(()))
     }
 
     /// Try to spend a transaction input. On success all necessary updates will
@@ -108,6 +199,18 @@ pub trait ServerModule: Debug + Sized {
         input: &'b <Self::Common as ModuleCommon>::Input,
         in_point: InPoint,
     ) -> Result<InputMeta, <Self::Common as ModuleCommon>::InputError>;
+
+    /// Process an input with the full transaction and consensus context.
+    /// The default preserves the behavior of existing modules.
+    async fn process_input_with_context<'a, 'b, 'c>(
+        &'a self,
+        dbtx: &mut DatabaseTransaction<'c>,
+        input: &'b <Self::Common as ModuleCommon>::Input,
+        in_point: InPoint,
+        _context: &ModuleTransactionContext<'_>,
+    ) -> Result<InputMeta, <Self::Common as ModuleCommon>::InputError> {
+        self.process_input(dbtx, input, in_point).await
+    }
 
     /// Try to create an output (e.g. issue notes, peg-out BTC, …). On success
     /// all necessary updates to the database will be part of the database
@@ -123,6 +226,17 @@ pub trait ServerModule: Debug + Sized {
         output: &'a <Self::Common as ModuleCommon>::Output,
         out_point: OutPoint,
     ) -> Result<TransactionItemAmounts, <Self::Common as ModuleCommon>::OutputError>;
+
+    /// Process an output with the same authenticated context as the inputs.
+    async fn process_output_with_context<'a, 'b>(
+        &'a self,
+        dbtx: &mut DatabaseTransaction<'b>,
+        output: &'a <Self::Common as ModuleCommon>::Output,
+        out_point: OutPoint,
+        _context: &ModuleTransactionContext<'_>,
+    ) -> Result<TransactionItemAmounts, <Self::Common as ModuleCommon>::OutputError> {
+        self.process_output(dbtx, output, out_point).await
+    }
 
     /// **Deprecated**: Modules should not be using it. Instead, they should
     /// implement their own custom endpoints with semantics, versioning,
@@ -242,6 +356,30 @@ pub trait IServerModule: Debug {
     // before any input is processed.
     fn verify_input(&self, input: &DynInput) -> Result<(), DynInputError>;
 
+    /// See [`ServerModule::verify_transaction`].
+    fn verify_transaction(
+        &self,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<(), fedimint_core::transaction::TransactionError>;
+
+    async fn prepare_transaction(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError>;
+
+    fn prepare_kind_transaction(
+        &self,
+        context: &ModuleTransactionContext<'_>,
+        instances: std::collections::BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError>;
+
+    async fn validate_transaction(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError>;
+
     /// Try to spend a transaction input. On success all necessary updates will
     /// be part of the database transaction. On failure (e.g. double spend)
     /// the database transaction is rolled back and the operation will take
@@ -251,6 +389,14 @@ pub trait IServerModule: Debug {
         dbtx: &mut DatabaseTransaction<'c>,
         input: &'b DynInput,
         in_point: InPoint,
+    ) -> Result<InputMeta, DynInputError>;
+
+    async fn process_input_with_context<'a, 'b, 'c>(
+        &'a self,
+        dbtx: &mut DatabaseTransaction<'c>,
+        input: &'b DynInput,
+        in_point: InPoint,
+        context: &ModuleTransactionContext<'_>,
     ) -> Result<InputMeta, DynInputError>;
 
     /// Try to create an output (e.g. issue notes, peg-out BTC, …). On success
@@ -266,6 +412,14 @@ pub trait IServerModule: Debug {
         dbtx: &mut DatabaseTransaction<'a>,
         output: &DynOutput,
         out_point: OutPoint,
+    ) -> Result<TransactionItemAmounts, DynOutputError>;
+
+    async fn process_output_with_context<'a>(
+        &self,
+        dbtx: &mut DatabaseTransaction<'a>,
+        output: &DynOutput,
+        out_point: OutPoint,
+        context: &ModuleTransactionContext<'_>,
     ) -> Result<TransactionItemAmounts, DynOutputError>;
 
     /// See [`ServerModule::verify_input_submission`]
@@ -387,6 +541,37 @@ where
         .map_err(|v| DynInputError::from_typed(input.module_instance_id(), v))
     }
 
+    async fn prepare_transaction(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
+        <Self as ServerModule>::prepare_transaction(self, dbtx, context).await
+    }
+
+    fn prepare_kind_transaction(
+        &self,
+        context: &ModuleTransactionContext<'_>,
+        instances: std::collections::BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
+        <Self as ServerModule>::prepare_kind_transaction(context, instances)
+    }
+
+    async fn validate_transaction(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
+        <Self as ServerModule>::validate_transaction(self, dbtx, context).await
+    }
+
+    fn verify_transaction(
+        &self,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<(), fedimint_core::transaction::TransactionError> {
+        <Self as ServerModule>::verify_transaction(context)
+    }
+
     /// Try to spend a transaction input. On success all necessary updates will
     /// be part of the database transaction. On failure (e.g. double spend)
     /// the database transaction is rolled back and the operation will take
@@ -405,6 +590,27 @@ where
                 .downcast_ref::<<<Self as ServerModule>::Common as ModuleCommon>::Input>()
                 .expect("incorrect input type passed to module plugin"),
             in_point,
+        )
+        .await
+        .map_err(|v| DynInputError::from_typed(input.module_instance_id(), v))
+    }
+
+    async fn process_input_with_context<'a, 'b, 'c>(
+        &'a self,
+        dbtx: &mut DatabaseTransaction<'c>,
+        input: &'b DynInput,
+        in_point: InPoint,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<InputMeta, DynInputError> {
+        <Self as ServerModule>::process_input_with_context(
+            self,
+            dbtx,
+            input
+                .as_any()
+                .downcast_ref::<<<Self as ServerModule>::Common as ModuleCommon>::Input>()
+                .expect("incorrect input type passed to module plugin"),
+            in_point,
+            context,
         )
         .await
         .map_err(|v| DynInputError::from_typed(input.module_instance_id(), v))
@@ -432,6 +638,27 @@ where
                 .downcast_ref::<<<Self as ServerModule>::Common as ModuleCommon>::Output>()
                 .expect("incorrect output type passed to module plugin"),
             out_point,
+        )
+        .await
+        .map_err(|v| DynOutputError::from_typed(output.module_instance_id(), v))
+    }
+
+    async fn process_output_with_context<'a>(
+        &self,
+        dbtx: &mut DatabaseTransaction<'a>,
+        output: &DynOutput,
+        out_point: OutPoint,
+        context: &ModuleTransactionContext<'_>,
+    ) -> Result<TransactionItemAmounts, DynOutputError> {
+        <Self as ServerModule>::process_output_with_context(
+            self,
+            dbtx,
+            output
+                .as_any()
+                .downcast_ref::<<<Self as ServerModule>::Common as ModuleCommon>::Output>()
+                .expect("incorrect output type passed to module plugin"),
+            out_point,
+            context,
         )
         .await
         .map_err(|v| DynOutputError::from_typed(output.module_instance_id(), v))

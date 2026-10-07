@@ -1,8 +1,11 @@
+use fedimint_core::core::{DynInput, DynOutput};
 use fedimint_core::db::DatabaseTransaction;
 use fedimint_core::module::{Amounts, CoreConsensusVersion, TransactionItemAmounts};
 use fedimint_core::transaction::{TRANSACTION_OVERFLOW_ERROR, Transaction, TransactionError};
 use fedimint_core::{InPoint, OutPoint};
-use fedimint_server_core::ServerModuleRegistry;
+use fedimint_server_core::{
+    ModuleTransactionContext, ServerModuleRegistry, TransactionConsensusContext,
+};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::metrics::{CONSENSUS_TX_PROCESSED_INPUTS, CONSENSUS_TX_PROCESSED_OUTPUTS};
@@ -19,6 +22,7 @@ pub async fn process_transaction_with_dbtx(
     transaction: &Transaction,
     version: CoreConsensusVersion,
     mode: TxProcessingMode,
+    consensus: TransactionConsensusContext,
 ) -> Result<(), TransactionError> {
     let in_count = transaction.inputs.len();
     let out_count = transaction.outputs.len();
@@ -28,10 +32,35 @@ pub async fn process_transaction_with_dbtx(
         CONSENSUS_TX_PROCESSED_OUTPUTS.observe(out_count as f64);
     });
 
-    // We can not return the error here as errors are not returned in a specified
-    // order and the client still expects consensus on the error. Since the
-    // error is not extensible at the moment we need to incorrectly return the
-    // InvalidWitnessLength variant.
+    let module_ids = transaction
+        .inputs
+        .iter()
+        .map(DynInput::module_instance_id)
+        .chain(
+            transaction
+                .outputs
+                .iter()
+                .map(DynOutput::module_instance_id),
+        )
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut verified_kinds = std::collections::BTreeSet::new();
+    for &module_instance_id in &module_ids {
+        let module = modules.get_expect(module_instance_id);
+        if verified_kinds.insert(module.module_kind()) {
+            module.verify_transaction(&ModuleTransactionContext {
+                transaction,
+                consensus,
+                module_instance_id,
+                preparation: None,
+                validation: None,
+            })?;
+        }
+    }
+
+    // We can not return the error here as errors are not returned in a
+    // specified order and the client still expects consensus on the error.
+    // Since the error is not extensible at the moment we need to
+    // incorrectly return the InvalidWitnessLength variant.
     transaction
         .inputs
         .clone()
@@ -43,14 +72,74 @@ pub async fn process_transaction_with_dbtx(
         })
         .map_err(|_| TransactionError::InvalidWitnessLength)?;
 
+    // Resolve every instance before any kind decodes/prepares programs. All
+    // phases use this same snapshot, before processing can mutate it.
+    let mut resolved = std::collections::BTreeMap::<_, std::collections::BTreeMap<_, _>>::new();
+    for &module_instance_id in &module_ids {
+        let module = modules.get_expect(module_instance_id);
+        let state = module
+            .prepare_transaction(
+                &mut dbtx.to_ref_with_prefix_module_id(module_instance_id).0,
+                &ModuleTransactionContext {
+                    transaction,
+                    consensus,
+                    module_instance_id,
+                    preparation: None,
+                    validation: None,
+                },
+            )
+            .await?;
+        resolved
+            .entry(module.module_kind())
+            .or_default()
+            .insert(module_instance_id, state);
+    }
+    let mut preparations = std::collections::BTreeMap::new();
+    for &module_instance_id in &module_ids {
+        let module = modules.get_expect(module_instance_id);
+        if let Some(instances) = resolved.remove(&module.module_kind()) {
+            let preparation = module.prepare_kind_transaction(
+                &ModuleTransactionContext {
+                    transaction,
+                    consensus,
+                    module_instance_id,
+                    preparation: None,
+                    validation: None,
+                },
+                instances,
+            )?;
+            preparations.insert(module.module_kind(), preparation);
+        }
+    }
+
+    let mut validations = std::collections::BTreeMap::new();
+    for module_instance_id in module_ids {
+        let validation = modules
+            .get_expect(module_instance_id)
+            .validate_transaction(
+                &mut dbtx.to_ref_with_prefix_module_id(module_instance_id).0,
+                &ModuleTransactionContext {
+                    transaction,
+                    consensus,
+                    module_instance_id,
+                    preparation: preparations
+                        .get(&modules.get_expect(module_instance_id).module_kind()),
+                    validation: None,
+                },
+            )
+            .await?;
+        validations.insert(module_instance_id, validation);
+    }
+    drop(preparations);
+
     let mut funding_verifier = FundingVerifier::default();
     let mut public_keys = Vec::new();
 
     let txid = transaction.tx_hash();
 
     for (input, in_idx) in transaction.inputs.iter().zip(0u64..) {
-        // somewhat unfortunately, we need to do the extra checks berofe `process_x`
-        // does the changes in the dbtx
+        // somewhat unfortunately, we need to do the extra checks berofe
+        // `process_x` does the changes in the dbtx
         if mode == TxProcessingMode::Submission {
             modules
                 .get_expect(input.module_instance_id())
@@ -65,12 +154,19 @@ pub async fn process_transaction_with_dbtx(
         }
         let meta = modules
             .get_expect(input.module_instance_id())
-            .process_input(
+            .process_input_with_context(
                 &mut dbtx
                     .to_ref_with_prefix_module_id(input.module_instance_id())
                     .0,
                 input,
                 InPoint { txid, in_idx },
+                &ModuleTransactionContext {
+                    transaction,
+                    consensus,
+                    module_instance_id: input.module_instance_id(),
+                    preparation: None,
+                    validation: validations.get(&input.module_instance_id()),
+                },
             )
             .await
             .map_err(TransactionError::Input)?;
@@ -82,8 +178,8 @@ pub async fn process_transaction_with_dbtx(
     transaction.validate_signatures(&public_keys)?;
 
     for (output, out_idx) in transaction.outputs.iter().zip(0u64..) {
-        // somewhat unfortunately, we need to do the extra checks berofe `process_x`
-        // does the changes in the dbtx
+        // somewhat unfortunately, we need to do the extra checks berofe
+        // `process_x` does the changes in the dbtx
         if mode == TxProcessingMode::Submission {
             modules
                 .get_expect(output.module_instance_id())
@@ -100,12 +196,19 @@ pub async fn process_transaction_with_dbtx(
 
         let amount = modules
             .get_expect(output.module_instance_id())
-            .process_output(
+            .process_output_with_context(
                 &mut dbtx
                     .to_ref_with_prefix_module_id(output.module_instance_id())
                     .0,
                 output,
                 OutPoint { txid, out_idx },
+                &ModuleTransactionContext {
+                    transaction,
+                    consensus,
+                    module_instance_id: output.module_instance_id(),
+                    preparation: None,
+                    validation: validations.get(&output.module_instance_id()),
+                },
             )
             .await
             .map_err(TransactionError::Output)?;
