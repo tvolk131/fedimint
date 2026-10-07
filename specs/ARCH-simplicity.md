@@ -1,0 +1,250 @@
+# ARCH-simplicity: Experimental Simplicity contracts
+
+## Status
+
+The guardian contract ledger, execution environments, explicit assets, and
+client builders, and persistent wallet described below are implemented as an
+experimental prototype. Encrypted descriptors and authenticated history replay
+support mnemonic-only recovery for the wallet's supported contracts. The wallet
+must satisfy
+[REQ-simplicity-recovery](REQ-simplicity-recovery.md).
+
+## Module and transaction boundaries
+
+The opt-in Simplicity module extends the module topology in
+[ARCH-fedimint](ARCH-fedimint.md) with a contract UTXO ledger for bitcoin and
+explicit assets.
+It depends on Fedimint transaction funding and consensus ordering; the mint does
+not depend on it. [Prototype usage and limits](../modules/fedimint-simplicity-common/README.md)
+belong with the implementation.
+
+Core consensus supplies modules with a read-only view of the actual outer
+transaction, the federation identity, module instance, and current session index.
+Admission and ordered execution use the same context-aware validation hooks;
+replay uses the session being replayed. Existing modules retain their original
+validation behavior through default hook implementations. No new core transaction
+wire format is introduced.
+
+A stateless core verification hook runs once per participating module kind before
+per-input verification. Simplicity checks redemption bytes, creation charges,
+structure and the outer signature envelope there. Core then resolves each
+instance's state through its own database namespace, before preparing programs
+once per kind. Simplicity decodes sequentially, checks every commitment and
+execution version, and enforces the shared static-cost budget before any of its
+programs execute. All phases use the same unmodified database snapshot. Existing
+modules have no-op preparation defaults and retain their validation behavior.
+The wallet checks structural/resource limits before committing submission and
+funding reservations, but runs before outer signatures are constructed.
+
+Kind preparation retains decoded programs within a local accounting budget;
+uncached programs are decoded again for execution. Retention changes performance
+only, never transaction validity or fees. Preparations are owned by one validation
+attempt and dropped before input/output processing; admission and consensus do
+not share cached state.
+
+Core invokes a module validation hook against the unmodified transaction snapshot
+before processing inputs or outputs. A transaction-local, type-erased result is
+passed only to that module's processing hooks. Simplicity uses the prepared
+contracts/programs, validates each instance's asset accounting, and executes its
+programs in that phase; it
+applies the validated changes during ordinary input/output processing.
+
+Each contract input consumes one module UTXO and reports its gross bitcoin value
+to core funding. Each contract output separately reports the value it locks.
+Core funding, outer signatures, and transaction-wide database rollback remain
+responsible for conservation and atomicity across modules. Contract execution
+cannot mint native bitcoin, bypass outer signatures, or commit partial spends.
+
+The common crate owns versioned consensus encodings and the deterministic runtime.
+The guardian owns current UTXOs, creation clocks, and threshold block-count votes.
+The client owns SimplicityHL compilation and witness construction; guardians do
+not compile source or trust caller-supplied environment values. Programs authorize
+an inner digest that binds all this module instance's spending references and
+claim keys, the nonce, and every outer output. Witnesses and outer signatures are
+excluded to avoid circular commitments. Foreign funding inputs are excluded to
+permit sponsorship.
+
+The first execution environment exposes the current consumed contract, rich
+successor views within its module instance, opaque hashes of foreign outputs,
+and consensus clocks. It does not provide typed access to foreign modules'
+internal data. Multiple programs may inspect the same output; assigning distinct
+successors is an application policy obligation.
+
+Live contract records, including opaque recovery annotations, disappear on spend.
+Core history retains their original transactions for mnemonic recovery. Contract
+amounts, asset transfers, policies, and public witnesses remain transparent.
+
+## Execution versions and explicit assets
+
+Execution version zero pins its runtime, permitted jets, commitments, and cost
+semantics. Future versions must preserve the interpretation of existing outputs;
+contract-authorized spending is the migration boundary.
+
+Execution version one adds bounded multi-asset balances and unique, indivisible
+issuance authorities to contract outputs. A separate module action output carries
+creation, issuance, and destruction declarations without creating a UTXO. Asset
+conservation is module-owned; core bitcoin accounting and the mint remain unaware
+of asset quantities. Issuance requires consuming the relevant authority and
+satisfying its program. Authorities cannot be copied and may be destroyed.
+
+Creation namespaces derive from fresh client signing keys, federation identity,
+and module instance; ordinal-derived asset IDs are independent of funding inputs.
+Creation is authorized over the version-one intent and starts with zero supply.
+Permanent namespace markers prevent replay after destruction. Immutable asset
+records identify the initial authority policy so clients can verify provenance.
+Creation keys confer no ongoing authority. Creation signatures across Simplicity
+module instances are excluded from the v1 intent to avoid self-reference and
+cross-instance signing cycles; v0 encoding and signing remain unchanged.
+
+The expanded execution environment exposes all resolved module inputs, successor
+asset balances and authorities, and issuance/destruction quantities. The client
+SDK constructs these transitions. Its binary-market example encodes collateral,
+oracle resolution, and redemption policy entirely in Simplicity, without guardian
+market-specific rules. A unique shared vault serializes collateral operations;
+independent position transfers do not consume it. Clients verify immutable asset
+origins as well as current holdings before trusting the market policy.
+
+## Wallet recovery design
+
+The initial persistent wallet reconstructs current contracts and confirmed wallet
+interaction history in one ordered scan of existing federation session history.
+It uses Fedimint's history-recovery infrastructure and persists progress so an
+interruption can resume. The Simplicity wallet cannot submit new transactions
+until recovery completes; other modules follow their own recovery rules. There
+is no separate live-contract scan or concurrent history backfill in this design.
+Completed sessions use the existing signed-session API when the negotiated core
+API version and trusted client-config broadcast keys support it. Open sessions,
+older APIs, and configs without those keys use quorum-authenticated history.
+Invalid signed data fails over to another peer without accepting unauthenticated
+history. Unknown modules retain their original bytes for signature verification
+and later interpretation. Recovery, ongoing sync, and market discovery share
+this access path; no new guardian recovery endpoint is required.
+
+Local contract and history reads support bounded pages without dropping spent
+contracts or older activity. A continuation token belongs to one wallet view;
+a sync or market-discovery change requires restarting the listing, so callers
+cannot silently combine pages from different states. Existing full-list helpers
+remain available. Pagination does not change the complete recovery scan.
+
+Wallet software owns versioned contract templates, descriptors, key derivation,
+annotation encryption, recognition of its historical activity, and reconstruction
+of usable state. Wallet-specific information that cannot be derived must be
+preserved in federation records. A program commitment alone cannot recover an
+arbitrary program or its secrets. Older template and descriptor versions must
+remain interpretable by compatible wallet releases.
+
+Guardians continue treating annotations as opaque, bounded transaction data;
+they do not identify wallets or validate the meaning of encrypted descriptors.
+Wallets must verify recovered descriptors against the actual contract and use
+authenticated federation history. Recovery requires retention of the historical
+records, even after the corresponding live contracts are deleted. The scan must
+recognize terminal spends with no Simplicity successor and preserve their
+confirmed activity rather than only the remaining holdings.
+
+The recovery contract does not depend on Fedimint's deprecated encrypted-backup
+service. A versioned descriptor identifies a software template, its parameters,
+a random key-derivation salt, and optional application context. Encryption and
+spending keys use separate mnemonic derivations scoped to federation and module.
+Receivers provide the sender with a destination contract and freshly encrypted
+annotation; the sender needs no discovery key or stable wallet identifier.
+
+Each authenticated session prefix updates recognized contracts, spent status,
+confirmed transactions, successor links, and the scan cursor in one client database
+transaction.
+The open session's saved prefix must match later extensions exactly. Original
+spent descriptors identify terminal interactions without an extra receipt UTXO.
+A shared binary-market vault remains recognizable through successors preserving
+its policy and issuance authorities, even when another participant replaces its
+annotation. Watching that vault does not count all its collateral as wallet funds.
+Templates may also recognize successors through a contract-enforced assignment
+from module-local input index to absolute output index, as partial limit orders do.
+A copied policy alone never proves lineage. Intent builders read contracts and
+these authenticated links from one snapshot, preserving the requested quantity
+while following an order through competing fills. Known origins use the local
+index; importing a new origin replays its authenticated history.
+
+The persistent submission API adds an encrypted sender receipt when there is no
+recognized wallet input or output, enabling direct funding of someone else's
+contracts from another module. One receipt per module instance fits in the
+existing action output's bounded recovery bytes. It creates no UTXO and requires
+no guardian endpoint: recovery scans the retained transaction history. Optional
+versioned application context may accompany the receipt. Receipt encryption uses
+a separate mnemonic derivation and fresh randomness, without a wallet identifier.
+Receipt recognition records sent activity without inferring ownership.
+
+The receipt commitment binds all input order/module IDs, nonce and outputs. For
+Simplicity inputs it binds outpoints and claim keys; foreign inputs retain their
+full encoding. Simplicity programs/witnesses and outer signatures are excluded.
+Across all Simplicity instances, FMR1 action annotations and creation signatures
+are normalized out to break circularity. Other annotation bytes remain bound.
+Copied receipts with mismatching commitments are ignored; an authenticated,
+matching but unsupported receipt is an error. Application
+metadata promised to survive must fit a descriptor or be derivable; arbitrary
+program imports and local-only notes have no implicit recovery guarantee.
+
+Core client finalizers prepare all reserved receipt metadata after funding,
+change and nonce are fixed, then authorize outputs and inputs, then verify final
+invariants before outer signatures and state-machine IDs. Module replacements
+cannot change the transaction shape or cross module boundaries, and core checks
+that fees remain unchanged. Simplicity reserves inputs together with durable core
+submission state, releases reservations on rejection, and synchronizes accepted
+transactions into confirmed history. Initial recovery uses the core's unusable
+module mode; applications reopen the client after recovery completes.
+
+## Shared-contract conflict handling
+
+A durable, versioned semantic intent is a client operation above individual core
+transaction submissions. Wallet software registers template handlers that retain
+historical intent meaning. The first handler mints a fixed number of market pairs
+to fixed, independent recipient outputs; other market actions continue using the
+low-level transaction API. Guardians enforce the same contracts either way.
+
+Each attempt's core submission, primary funding, Simplicity reservations, and
+association with its parent intent commit in one client database transaction. A
+pending attempt must resolve before any replacement can be built. Definitive
+rejection permits rebuilding only after authenticated history identifies a
+competing transaction spending a designated shared input. Error strings and
+network timeouts are insufficient. The market handler follows the actual
+consuming transaction and unique authorities to a successor, preserving quantity,
+recipients, and collateral price; a resolved market is a permanent failure.
+
+Manual retry is the default. Opt-in automatic retries use persisted backoff and
+jitter, a shared maximum-attempt count, a final funded fee cap per attempt, and an
+optional session deadline for preparation. New attempts opt into durable primary
+funding reservations through the shared client interface. Mint v2 retains owned
+notes on rejection; Simplicity authenticates a permanent conflict and requests
+local release, then waits for restoration before retrying or finishing cancellation.
+Unproven rejections pause with funding reserved, without automatic paid reclaim.
+Timeouts cannot expire submitted reservations. Existing pre-reservation operations
+retain their original funding behavior. Core checks the actual total fees including
+funding/change overpayment before authorization. Limits cannot be reset by retry.
+Cancellation prevents future attempts but still resolves in-flight submissions.
+An unavailable federation leaves the same attempt pending. Construction/funding
+errors pause for attention; they do not trigger unbounded repeated submissions.
+
+Public market discovery verifies immutable origins and replays authenticated
+sessions through exactly the wallet's already-scanned prefix. It merges the
+resulting chain/history atomically under the scan lock, avoiding a live-UTXO query
+racing a recovery cursor that has already passed its consumption. Later ordinary
+sync follows the imported chain. Watching does not imply owning vault collateral.
+
+Existing database restarts resume pending intents. Mnemonic-only recovery restores
+confirmed interactions and outputs from federation records, but must not recreate
+or automatically execute unfinished local intentions. A watch-only subscription
+with no confirmed participation is local-only state. Applications can add it again.
+These mechanisms change client behavior only, not guardian consensus rules.
+
+Local intent progress waits on committed database notifications for intent
+changes, submission outcomes and primary funding restoration. Timers implement
+semantic backoff and retry failed advancement; they do not poll local outcomes.
+Every wakeup rechecks durable state before advancing or rebuilding a transaction.
+
+## Alternatives
+
+Compact module-specific recovery history remains a possible download
+optimization. It must retain enough information to reconstruct confirmed
+activity as well as current holdings. A live-contract scan alone cannot recover
+fully spent activity. Combining it with historical backfill would add scan
+consistency and concurrent-operation complexity; it is deferred until recovery
+measurements justify it. Neither optimization is required by
+[REQ-simplicity-recovery](REQ-simplicity-recovery.md).
