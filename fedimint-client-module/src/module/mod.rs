@@ -21,8 +21,8 @@ use fedimint_core::module::{AmountUnit, Amounts, CommonModuleInit, ModuleCommon,
 use fedimint_core::task::{MaybeSend, MaybeSync};
 use fedimint_core::util::{BoxStream, FmtCompact as _};
 use fedimint_core::{
-    Amount, OutPoint, PeerId, apply, async_trait_maybe_send, dyn_newtype_define, maybe_add_send,
-    maybe_add_send_sync,
+    Amount, OutPoint, PeerId, TransactionId, apply, async_trait_maybe_send, dyn_newtype_define,
+    maybe_add_send, maybe_add_send_sync,
 };
 use fedimint_eventlog::{
     DBTransactionEventLogExt, Event, EventKind, EventLogId, EventPersistence, PersistedLogEntry,
@@ -77,6 +77,19 @@ pub trait ClientContextIface: MaybeSend + MaybeSync {
         operation_meta_gen: Box<maybe_add_send_sync!(dyn Fn(OutPointRange) -> serde_json::Value)>,
         tx_builder: TransactionBuilder,
     ) -> anyhow::Result<OutPointRange>;
+
+    async fn release_funding_after_conflict(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        operation_id: OperationId,
+        txid: TransactionId,
+    ) -> Result<bool, anyhow::Error>;
+
+    async fn await_funding_release_progress(
+        &self,
+        operation_id: OperationId,
+        txid: TransactionId,
+    ) -> Result<(), anyhow::Error>;
 
     // TODO: unify
     async fn finalize_and_submit_transaction_inner(
@@ -275,6 +288,11 @@ where
         }
     }
 
+    /// This module instance within the federation. Available during init.
+    pub fn module_instance_id(&self) -> ModuleInstanceId {
+        self.module_instance_id
+    }
+
     /// Get a reference to a global Api handle
     pub fn global_api(&self) -> DynGlobalApi {
         self.client.get().api_clone()
@@ -420,6 +438,48 @@ where
                 }),
                 tx_builder,
             )
+            .await
+    }
+
+    /// Release primary funding for a permanently invalid transaction.
+    ///
+    /// The calling wallet module MUST authenticate a permanent conflict (for
+    /// example, an accepted competing spend). A rejection string, timeout or
+    /// user cancellation is insufficient. Never use this for received ecash.
+    ///
+    /// Returns false while funding is still pending or being released. Commit
+    /// this transaction even when false, then wait for funding release progress
+    /// and recheck before rebuilding. A
+    /// repeated call after release is harmless. With no reservation (including
+    /// older operations), returns true without modifying funding.
+    pub async fn release_funding_after_conflict(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        operation_id: OperationId,
+        txid: TransactionId,
+    ) -> Result<bool, anyhow::Error> {
+        self.client
+            .get()
+            .release_funding_after_conflict(
+                &mut dbtx.global_dbtx(self.global_dbtx_access_token),
+                operation_id,
+                txid,
+            )
+            .await
+    }
+
+    /// Wait for a pending release to make progress, without holding a database
+    /// transaction. Call only after committing
+    /// `release_funding_after_conflict`. This is a wakeup, not
+    /// authorization to rebuild: recheck release first.
+    pub async fn await_funding_release_progress(
+        &self,
+        operation_id: OperationId,
+        txid: TransactionId,
+    ) -> Result<(), anyhow::Error> {
+        self.client
+            .get()
+            .await_funding_release_progress(operation_id, txid)
             .await
     }
 
@@ -785,8 +845,9 @@ where
                 Box::new(move |update| {
                     // The update was serialized from a `U` moments ago in this
                     // process, so deserialization only fails if `U` is not
-                    // round-trip-safe; treat that conservatively as non-terminal
-                    // (skip caching) rather than panicking inside the stream.
+                    // round-trip-safe; treat that conservatively as
+                    // non-terminal (skip caching) rather
+                    // than panicking inside the stream.
                     serde_json::from_value::<U>(update.clone())
                         .map(|update| is_terminal(&update))
                         .unwrap_or(false)
@@ -1083,6 +1144,56 @@ pub trait ClientModule: Debug + MaybeSend + MaybeSync + 'static {
         unimplemented!()
     }
 
+    /// Like ordinary funding, but retain owned inputs on rejection until the
+    /// originating operation authorizes local release after a permanent
+    /// conflict. Never silently fall back to an automatic paid reclaim.
+    /// Returned state machines must bind the reservation to the final txid
+    /// before submission can begin. All writes belong to the supplied dbtx.
+    async fn create_reserved_inputs_and_outputs(
+        &self,
+        _dbtx: &mut DatabaseTransaction<'_>,
+        _operation_id: OperationId,
+        _unit: AmountUnit,
+        _input_amount: Amount,
+        _output_amount: Amount,
+    ) -> Result<
+        (
+            ClientInputBundle<<Self::Common as ModuleCommon>::Input, Self::States>,
+            ClientOutputBundle<<Self::Common as ModuleCommon>::Output, Self::States>,
+        ),
+        anyhow::Error,
+    > {
+        Err(anyhow::anyhow!(
+            "{} does not support funding reservations",
+            <Self as ClientModule>::kind()
+        ))
+    }
+
+    /// Called only after the originating wallet authenticates a permanent
+    /// conflict. Return true once release is complete or if no reservation
+    /// exists; false while pending. Must reject mismatching transaction IDs
+    /// and accepted reservations, and make repeated release idempotent.
+    async fn release_funding_after_conflict(
+        &self,
+        _dbtx: &mut DatabaseTransaction<'_>,
+        _operation_id: OperationId,
+        _txid: TransactionId,
+    ) -> Result<bool, anyhow::Error> {
+        Ok(true)
+    }
+
+    /// Wait until another release request can make progress. Reservation
+    /// providers must wait on local state notifications while the outcome or
+    /// restoration is pending, and return immediately when a recheck is useful.
+    /// Modules without reservations have nothing to wait for.
+    async fn await_funding_release_progress(
+        &self,
+        _operation_id: OperationId,
+        _txid: TransactionId,
+    ) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+
     /// Waits for the funds from an output created by
     /// [`Self::create_final_inputs_and_outputs`] to become available. This
     /// function returning typically implies a change in the output of
@@ -1216,6 +1327,30 @@ pub trait IClientModule: Debug {
         output_amount: Amount,
     ) -> anyhow::Result<(ClientInputBundle, ClientOutputBundle)>;
 
+    async fn create_reserved_inputs_and_outputs(
+        &self,
+        module_instance: ModuleInstanceId,
+        dbtx: &mut DatabaseTransaction<'_>,
+        operation_id: OperationId,
+        unit: AmountUnit,
+        input_amount: Amount,
+        output_amount: Amount,
+    ) -> Result<(ClientInputBundle, ClientOutputBundle), anyhow::Error>;
+
+    async fn release_funding_after_conflict(
+        &self,
+        module_instance: ModuleInstanceId,
+        dbtx: &mut DatabaseTransaction<'_>,
+        operation_id: OperationId,
+        txid: TransactionId,
+    ) -> Result<bool, anyhow::Error>;
+
+    async fn await_funding_release_progress(
+        &self,
+        operation_id: OperationId,
+        txid: TransactionId,
+    ) -> Result<(), anyhow::Error>;
+
     async fn await_primary_module_output(
         &self,
         operation_id: OperationId,
@@ -1336,6 +1471,54 @@ where
         let outputs = outputs.into_dyn(module_instance);
 
         Ok((inputs, outputs))
+    }
+
+    async fn create_reserved_inputs_and_outputs(
+        &self,
+        module_instance: ModuleInstanceId,
+        dbtx: &mut DatabaseTransaction<'_>,
+        operation_id: OperationId,
+        unit: AmountUnit,
+        input_amount: Amount,
+        output_amount: Amount,
+    ) -> Result<(ClientInputBundle, ClientOutputBundle), anyhow::Error> {
+        let (inputs, outputs) = <T as ClientModule>::create_reserved_inputs_and_outputs(
+            self,
+            &mut dbtx.to_ref_with_prefix_module_id(module_instance).0,
+            operation_id,
+            unit,
+            input_amount,
+            output_amount,
+        )
+        .await?;
+        Ok((
+            inputs.into_dyn(module_instance),
+            outputs.into_dyn(module_instance),
+        ))
+    }
+
+    async fn release_funding_after_conflict(
+        &self,
+        module_instance: ModuleInstanceId,
+        dbtx: &mut DatabaseTransaction<'_>,
+        operation_id: OperationId,
+        txid: TransactionId,
+    ) -> Result<bool, anyhow::Error> {
+        <T as ClientModule>::release_funding_after_conflict(
+            self,
+            &mut dbtx.to_ref_with_prefix_module_id(module_instance).0,
+            operation_id,
+            txid,
+        )
+        .await
+    }
+
+    async fn await_funding_release_progress(
+        &self,
+        operation_id: OperationId,
+        txid: TransactionId,
+    ) -> Result<(), anyhow::Error> {
+        <T as ClientModule>::await_funding_release_progress(self, operation_id, txid).await
     }
 
     async fn await_primary_module_output(
