@@ -1,5 +1,7 @@
 [default.extend-words]
 substituters = "substituters"
+# GnuPG's machine-readable fingerprint record type
+fpr = "fpr"
 # trips on some base64 string in the test
 wel = "wel"
 # common mistake that typos doesn't detect automatically

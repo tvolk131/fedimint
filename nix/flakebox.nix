@@ -66,6 +66,8 @@ let
     "fedimint-server/src/test_fixtures/.*"
     "docs/.*\\.md"
     "fedimint-ui-common/assets/.*"
+    "modules/fedimint-simplicity-client/contracts/.*\\.simf"
+    "modules/fedimint-simplicity-common/tests/vectors/consensus\\.json"
   ];
 
   commonSrc = builtins.path {
@@ -123,6 +125,8 @@ let
         "scripts/.*"
         "docs/.*\\.md"
         "fedimint-ui-common/assets/.*"
+        "modules/fedimint-simplicity-client/contracts/.*\\.simf"
+        "modules/fedimint-simplicity-common/tests/vectors/consensus\\.json"
       ]
     ) src;
 
@@ -947,6 +951,16 @@ in
     fedimintd = pickBinary {
       pkg = fedimint-pkgs;
       bin = "fedimintd";
+    };
+
+    # Opt-in beta artifact; the normal daemon/packages keep their default modules.
+    fedimintd-simplicity = fedimintBuildPackageGroup {
+      pname = "fedimintd-simplicity";
+      packages = [ "fedimintd" ];
+      features = [
+        "fedimintd/experimental-simplicity"
+      ]
+      ++ lib.optionals (pkgs.stdenv.isLinux || pkgs.stdenv.isDarwin) [ "fedimintd/jemalloc" ];
     };
 
     fedimint-cli = pickBinary {

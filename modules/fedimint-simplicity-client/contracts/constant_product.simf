@@ -1,0 +1,108 @@
+// The unique POOL authority identifies this pool; it never issues a balance.
+// Trading co-spends the binary vault at input/output 0 and this pool at 1.
+// Native bitcoin in the pool is accrued fees: 3 msat per collateral sat.
+fn not(value: bool) -> bool { match value { true => false, false => true, } }
+fn add(a: u64, b: u64) -> u64 {
+    let (carry, result): (bool, u64) = jet::add_64(a, b);
+    assert!(not(carry));
+    result
+}
+fn sub(a: u64, b: u64) -> u64 {
+    let (borrow, result): (bool, u64) = jet::subtract_64(a, b);
+    assert!(not(borrow));
+    result
+}
+fn mul(a: u64, b: u64) -> u64 {
+    let (high, low): (u64, u64) = <u128>::into(jet::multiply_64(a, b));
+    assert!(jet::eq_64(high, 0));
+    low
+}
+fn product_le(a: u64, b: u64, c: u64, d: u64) -> bool {
+    let (ah, al): (u64, u64) = <u128>::into(jet::multiply_64(a, b));
+    let (bh, bl): (u64, u64) = <u128>::into(jet::multiply_64(c, d));
+    match jet::eq_64(ah, bh) {
+        true => jet::le_64(al, bl),
+        false => jet::lt_64(ah, bh),
+    }
+}
+fn scaled(old: u64, new: u64, scale: u64) {
+    // new = floor(old * scale / 10000), proved without a division jet.
+    assert!(product_le(new, 10000, old, scale));
+    assert!(not(product_le(add(new, 1), 10000, old, scale)));
+}
+fn main() {
+    let i: u32 = jet::fm_current_index();
+    assert!(jet::eq_32(jet::fm_input_authority_count(i), 1));
+    assert!(jet::fm_input_authority((i, param::POOL)));
+    assert!(jet::eq_64(jet::fm_issued_quantity(param::POOL), 0));
+    let action: u8 = witness::ACTION;
+    let signature: Signature = witness::SIGNATURE;
+    match jet::eq_8(action, 5) {
+        true => jet::bip_0340_verify((param::OWNER, jet::fm_sig_hash_all()), signature),
+        false => {
+            assert!(jet::eq_32(jet::fm_input_asset_count(i), 2));
+            assert!(jet::eq_32(jet::fm_output_version(i), 1));
+            assert!(jet::eq_256(jet::fm_output_cmr(i), jet::fm_current_cmr()));
+            assert!(jet::eq_256(jet::fm_output_state(i), jet::fm_current_state()));
+            assert!(jet::eq_32(jet::fm_output_authority_count(i), 1));
+            assert!(jet::fm_output_authority((i, param::POOL)));
+            assert!(jet::eq_32(jet::fm_output_asset_count(i), 2));
+            let y: u64 = jet::fm_input_asset_quantity((i, param::YES));
+            let n: u64 = jet::fm_input_asset_quantity((i, param::NO));
+            let yy: u64 = jet::fm_output_asset_quantity((i, param::YES));
+            let nn: u64 = jet::fm_output_asset_quantity((i, param::NO));
+            assert!(jet::lt_64(0, y));
+            assert!(jet::lt_64(0, n));
+            assert!(jet::lt_64(0, yy));
+            assert!(jet::lt_64(0, nn));
+            match jet::eq_8(action, 4) {
+                true => {
+                    jet::bip_0340_verify((param::OWNER, jet::fm_sig_hash_all()), signature);
+                    let scale: u64 = witness::SCALE;
+                    scaled(y, yy, scale);
+                    scaled(n, nn, scale);
+                },
+                false => {
+                    assert!(jet::eq_32(i, 1));
+                    assert!(jet::eq_256(jet::fm_input_cmr(0), param::VAULT));
+                    assert!(jet::eq_256(jet::fm_input_state(0), 0));
+                    assert!(jet::lt_64(jet::fm_block_count(), param::CLOSE));
+                    let issued: u64 = jet::fm_issued_quantity(param::YES);
+                    let burned: u64 = jet::fm_burned_quantity(param::YES);
+                    assert!(jet::eq_64(issued, jet::fm_issued_quantity(param::NO)));
+                    assert!(jet::eq_64(burned, jet::fm_burned_quantity(param::NO)));
+                    let quantity: u64 = match jet::eq_8(action, 0) {
+                        true => {
+                            assert!(jet::eq_64(burned, 0));
+                            assert!(jet::eq_64(nn, add(n, issued)));
+                            assert!(jet::lt_64(yy, add(y, issued)));
+                            issued
+                        },
+                        false => match jet::eq_8(action, 1) {
+                            true => {
+                                assert!(jet::eq_64(burned, 0));
+                                assert!(jet::eq_64(yy, add(y, issued)));
+                                assert!(jet::lt_64(nn, add(n, issued)));
+                                issued
+                            },
+                            false => {
+                                assert!(jet::eq_64(issued, 0));
+                                match jet::eq_8(action, 2) {
+                                    true => assert!(jet::eq_64(nn, sub(n, burned))),
+                                    false => {
+                                        assert!(jet::eq_8(action, 3));
+                                        assert!(jet::eq_64(yy, sub(y, burned)));
+                                    },
+                                };
+                                burned
+                            },
+                        },
+                    };
+                    assert!(jet::lt_64(0, quantity));
+                    assert!(product_le(y, n, yy, nn));
+                    assert!(jet::eq_64(jet::fm_output_amount(i), add(jet::fm_current_amount(), mul(quantity, 3))));
+                },
+            }
+        },
+    }
+}
