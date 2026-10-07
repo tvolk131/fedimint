@@ -187,7 +187,7 @@ async fn prepare(
     assert_eq!(pending.status, IntentStatus::Submitted, "{pending:?}");
     assert_eq!(pending.attempts.len(), 1);
     // Repeated polling with no accepted/rejected result must not rebuild.
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    fedimint_core::runtime::sleep(Duration::from_millis(600)).await;
     assert_eq!(wallet.intent(id).await.unwrap(), pending);
     drop(wallet);
     client.shutdown().await;
@@ -318,7 +318,7 @@ async fn run() {
                 break;
             }
             assert!(record.status.is_running(), "retry stopped: {record:?}");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            fedimint_core::runtime::sleep(Duration::from_millis(20)).await;
         }
     })
     .await

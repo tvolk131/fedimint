@@ -6,10 +6,12 @@ use std::time::Duration;
 use fedimint_core::TransactionId;
 use fedimint_core::core::OperationId;
 use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
+use fedimint_core::util::FmtCompactAnyhow as _;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 
 use super::now_ms;
+use crate::LOG_CLIENT_SIMPLICITY;
 use crate::client::SimplicityClientModule;
 use crate::wallet::db;
 
@@ -88,9 +90,9 @@ impl SimplicityClientModule {
                 Ok(wait) => wait,
                 Err(error) => {
                     tracing::warn!(
-                        target: "fm::simplicity",
+                        target: LOG_CLIENT_SIMPLICITY,
                         ?id,
-                        %error,
+                        error = %error.fmt_compact_anyhow(),
                         "Retrying intent advancement"
                     );
                     IntentWait::Retry
@@ -106,7 +108,7 @@ impl SimplicityClientModule {
                 }) => {},
                 result = self.wait_for_intent(wait) => {
                     if let Err(error) = result {
-                        tracing::warn!(target: "fm::simplicity", ?id, %error, "Retrying funding release wait");
+                        tracing::warn!(target: LOG_CLIENT_SIMPLICITY, ?id, error = %error.fmt_compact_anyhow(), "Retrying funding release wait");
                         fedimint_core::runtime::sleep(Duration::from_secs(1)).await;
                     }
                 }

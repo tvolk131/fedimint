@@ -27,6 +27,7 @@ pub use progress::SyncProgress;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::LOG_CLIENT_SIMPLICITY_SYNC;
 use crate::common::{ContractInput, ContractOutput};
 use crate::descriptor::{ContractDescriptor, ContractTemplates, WalletKeys};
 
@@ -177,7 +178,7 @@ impl WalletStore {
                         .await?;
                 }
             }
-            tracing::debug!(target: "fedimint_simplicity_client::sync",
+            tracing::debug!(target: LOG_CLIENT_SIMPLICITY_SYNC,
                 index,
                 elapsed_us = started.elapsed().unwrap_or_default().as_micros() as u64,
                 "wallet session applied");

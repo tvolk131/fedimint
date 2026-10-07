@@ -9,10 +9,10 @@ use fedimint_core::epoch::ConsensusItem;
 use fedimint_core::session_outcome::SessionStatus;
 use futures::StreamExt as _;
 
-use crate::SimplicityClientModule;
 use crate::common::{ContractInput, ContractOutput};
 use crate::descriptor::ContractDescriptor;
 use crate::wallet::{HistoryEntry, SessionHistory, WalletContract, WalletStore, db};
+use crate::{LOG_CLIENT_SIMPLICITY_SYNC, SimplicityClientModule};
 
 impl SimplicityClientModule {
     /// Track an authenticated creation outpoint and template-defined
@@ -131,7 +131,7 @@ impl WalletStore {
         let next = tx.get_value(&db::NextSessionKey).await.unwrap_or(0);
         let (open_len, open_hash) = tx.get_value(&db::OpenSessionKey).await.unwrap_or((0, None));
         drop(tx);
-        tracing::debug!(target: "fedimint_simplicity_client::sync", first_session, next,
+        tracing::debug!(target: LOG_CLIENT_SIMPLICITY_SYNC, first_session, next,
             origins = requests.len(), "public contract replay started");
         // Replay exactly the prefix already scanned by this wallet, then merge
         // atomically. Future ordinary sync starts after this prefix. Inserting

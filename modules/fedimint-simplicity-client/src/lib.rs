@@ -119,3 +119,7 @@ pub fn sign_transaction(transaction: &mut Transaction, keys: &[Keypair]) -> anyh
 pub mod intent;
 
 mod quote;
+
+const LOG_CLIENT_SIMPLICITY: &str = "client::simplicity";
+const LOG_CLIENT_SIMPLICITY_SYNC: &str = "client::simplicity::sync";
+const LOG_CLIENT_SIMPLICITY_TIMING: &str = "client::simplicity::timing";

@@ -20,7 +20,7 @@ pub(super) fn write_report(name: &str, value: &serde_json::Value) {
     if let Some(directory) = std::env::var_os("FM_SIMPLICITY_REPORT_DIR") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(
+        fedimint_core::util::write_overwrite(
             directory.join(name),
             serde_json::to_vec_pretty(value).unwrap(),
         )

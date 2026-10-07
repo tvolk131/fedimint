@@ -9,7 +9,7 @@ use fedimint_core::transaction::{Transaction, TransactionSignature};
 
 use crate::compiler::{TemplateProgramWitness, WitnessNameToValueMap, WitnessValues};
 use crate::intent::{IntentContext, IntentPlan};
-use crate::{SimplicityClientModule, common};
+use crate::{LOG_CLIENT_SIMPLICITY_TIMING, SimplicityClientModule, common};
 
 impl SimplicityClientModule {
     pub async fn consensus_block_count(&self) -> anyhow::Result<u64> {
@@ -112,7 +112,7 @@ impl SimplicityClientModule {
         let started = fedimint_core::time::now();
         let request = self.plan_fee_request(plan, context)?;
         tracing::debug!(
-            target: "fedimint_simplicity_client::timing",
+            target: LOG_CLIENT_SIMPLICITY_TIMING,
             operation = "quote_plan", stage = "explicit_fee",
             elapsed_us = started.elapsed().unwrap_or_default().as_micros() as u64,
             "stage complete"
@@ -132,7 +132,7 @@ impl SimplicityClientModule {
             .fee_quote(OperationId::new_random(), request)
             .await?;
         tracing::debug!(
-            target: "fedimint_simplicity_client::timing",
+            target: LOG_CLIENT_SIMPLICITY_TIMING,
             operation = "quote_fee_request", stage = "funding_fee",
             elapsed_us = started.elapsed().unwrap_or_default().as_micros() as u64,
             "stage complete"

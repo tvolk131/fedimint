@@ -10,6 +10,8 @@ use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::session_outcome::SessionStatus;
 use futures::{Stream, StreamExt, stream};
 
+use crate::LOG_CLIENT_SIMPLICITY_SYNC;
+
 #[derive(Debug, Clone)]
 pub struct SessionHistory {
     pub(super) api: DynGlobalApi,
@@ -53,7 +55,7 @@ impl SessionHistory {
 
     pub async fn session(&self, index: u64) -> anyhow::Result<SessionStatus> {
         let started = fedimint_core::time::now();
-        tracing::debug!(target: "fedimint_simplicity_client::sync", index, "requesting authenticated session");
+        tracing::debug!(target: LOG_CLIENT_SIMPLICITY_SYNC, index, "requesting authenticated session");
         let result = self
             .api
             .get_session_status(
@@ -63,7 +65,7 @@ impl SessionHistory {
                 self.broadcast_public_keys.as_ref(),
             )
             .await;
-        tracing::debug!(target: "fedimint_simplicity_client::sync",
+        tracing::debug!(target: LOG_CLIENT_SIMPLICITY_SYNC,
             index,
             elapsed_us = started.elapsed().unwrap_or_default().as_micros() as u64,
             success = result.is_ok(),

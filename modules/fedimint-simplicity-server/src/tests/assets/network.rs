@@ -146,7 +146,7 @@ impl Federation {
         let path = self.directory.path().join(format!("peer-{peer}"));
         std::fs::create_dir_all(&path).unwrap();
         let config_path = path.join("config.json");
-        std::fs::write(
+        fedimint_core::util::write_overwrite(
             &config_path,
             serde_json::to_vec(&self.configs[&peer]).unwrap(),
         )
@@ -193,7 +193,7 @@ impl Federation {
                 if matches!(count, Ok(5)) {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                fedimint_core::runtime::sleep(Duration::from_millis(100)).await;
             }
         }
     }

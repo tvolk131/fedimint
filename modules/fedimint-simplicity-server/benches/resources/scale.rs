@@ -318,7 +318,7 @@ async fn generate(path: &Path, count: u32, stride: u32) {
         storage::save_history(&db, &mut history, (expected.accepted - 1) / 100).await;
     }
     let generation_seconds = Instant::now().duration_since(begin).as_secs_f64();
-    std::fs::write(
+    fedimint_core::util::write_overwrite(
         path.join("expected.json"),
         serde_json::to_vec(&expected).expect("expectations"),
     )
