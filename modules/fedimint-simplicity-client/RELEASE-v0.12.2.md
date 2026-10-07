@@ -68,8 +68,40 @@ to be available. Hosted artifacts contain synthetic reports, environment details
 and logs, never guardian databases or wallet secrets. They expire after 14 days;
 retain the chosen candidate's evidence separately.
 
-Validation of this port is in progress. The earlier October 6/7 evidence files
-identify development-branch revisions and do not certify this branch. Passing
-these focused checks does not replace the remaining [beta checklist](BETA-CHECKLIST.md):
-new-candidate hardware/storage observations, baseline upgrade fixtures, and a
-small private signet pilot with real deposits and withdrawals remain separate.
+## Candidate validation: October 7, 2026
+
+The tested code revision is `13c53a4f79c6a0cb9b8fb35f0aa83b05eb56efb9`, with
+Cargo.lock SHA-256
+`3b1f1db253a1aee9d7ef9465d798286c7f927880be15e62dc84b95f6c0a0599d`.
+The [hosted run](https://github.com/tvolk131/fedimint/actions/runs/37668146744)
+passed all six jobs: native comparison, ASan/leak checks, repository lint,
+module/shared tests, four-guardian tests, example compilation, Clippy and both
+daemon builds. The ordinary and enabled Linux release binaries each ran
+`--version` successfully. The final commit after this tested revision only
+records these results in documentation.
+
+Both hosted Linux x86-64 and the ARM64 Mac passed 322 module/shared tests and all
+four network scenarios: submission/settlement/disk recovery, sender-receipt
+history recovery, shared-market
+conflicts/restarts/resolution, and mnemonic-only recovery with spendability.
+The common-module vectors and 100,000 seeded mutations also passed locally.
+Mac, Linux x86-64, Linux ARM64 and Linux ASan observations matched byte-for-byte:
+
+| Report | SHA-256 |
+| --- | --- |
+| Consensus observations | `f2b3440159972ac994d1b213c3399996e0ae1edcfc4227f6472258d5ff872815` |
+| Mutation observations | `9c796bf55aaa7c74cd1c64d14c8541ba607a6ca43e17323ce1dbabc4094c7283` |
+
+The mutation seed was `5065796730156482561`; the campaign reached 47,880 decoded
+programs, 42,712 successful executions and 100,000 C-frame adapter calls. This is
+bounded coverage, not exhaustive consensus or memory-safety verification. Focused
+independent review found no outstanding issue in the port or CI changes.
+The opt-in Nix package's derivation evaluated on the Mac; a complete Nix package
+build was not run. The guardian build checks above use Cargo.
+
+The earlier October 6/7 evidence files identify development-branch revisions and
+do not certify this branch. Passing these focused checks does not replace the
+remaining [beta checklist](BETA-CHECKLIST.md): new-candidate hardware/storage
+observations, deployment-baseline fixtures, and a small private signet pilot
+with real deposits and withdrawals remain separate. The application and live
+Mac/Pi federation remain on their existing development revisions.

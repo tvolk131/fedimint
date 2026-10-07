@@ -89,6 +89,10 @@ they retain the outstanding platform, operational, or candidate-specific work.
    and obtain focused independent review. Update the runbook and retain the
    artifact identities and validation evidence. Prior rehearsals do not certify
    a later candidate; desktop-app packaging is a separate deliverable.
+   The [v0.12.2 candidate evidence](RELEASE-v0.12.2.md#candidate-validation-october-7-2026)
+   records this port's exact revision and focused validation. Deployment and
+   hardware checks still need to identify that same candidate before this
+   workstream is complete.
 
 7. [ ] **Small private signet pilot.** Before broader beta, operate the chosen
    candidate with actual testnet deposits/withdrawals, monitoring, retained
