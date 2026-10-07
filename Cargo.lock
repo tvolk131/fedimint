@@ -4909,6 +4909,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "fedimint-simplicity-client"
+version = "0.12.2"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bitcoin",
+ "clap",
+ "erased-serde",
+ "fedimint-aead",
+ "fedimint-api-client",
+ "fedimint-bip39",
+ "fedimint-client",
+ "fedimint-client-module",
+ "fedimint-connectors",
+ "fedimint-core",
+ "fedimint-derive-secret",
+ "fedimint-mintv2-client",
+ "fedimint-rocksdb",
+ "fedimint-simplicity-common",
+ "futures",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fedimint-simplicity-common"
 version = "0.12.2"
 dependencies = [
