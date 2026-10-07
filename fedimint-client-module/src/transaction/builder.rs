@@ -19,6 +19,7 @@ use rand::{CryptoRng, Rng, RngCore};
 use secp256k1::Secp256k1;
 use tracing::warn;
 
+use super::finalizer::{RegisteredFinalizer, TransactionFinalizer, finalize};
 use crate::module::{IdxRange, OutPointRange, StateGenerator};
 use crate::sm::{self, DynState};
 use crate::{
@@ -543,7 +544,8 @@ where
     // binary-search it for free to find that fundable ceiling and seed the real
     // (fee-quoting) search there. This peels off the gateway fee — usually the
     // larger of the two — for free, leaving the expensive quotes to probe only
-    // the small window the federation fee opens up, instead of the whole balance.
+    // the small window the federation fee opens up, instead of the whole
+    // balance.
     if gross_up(Amount::from_msats(lo_bound)).msats > balance.msats {
         // The balance can't even fund the smallest amount's gross-up.
         return None;
@@ -648,6 +650,7 @@ where
 pub struct TransactionBuilder {
     inputs: Vec<ClientInputBundle>,
     outputs: Vec<ClientOutputBundle>,
+    finalizers: Vec<RegisteredFinalizer>,
 }
 
 impl TransactionBuilder {
@@ -665,18 +668,36 @@ impl TransactionBuilder {
         self
     }
 
+    pub fn with_finalizer(
+        mut self,
+        module: ModuleInstanceId,
+        finalizer: Arc<dyn TransactionFinalizer>,
+    ) -> Self {
+        self.finalizers
+            .push(RegisteredFinalizer { module, finalizer });
+        self
+    }
+
+    pub fn verify_fees(&self, fees: &Amounts) -> Result<(), anyhow::Error> {
+        for registration in &self.finalizers {
+            registration.finalizer.verify_fees(fees)?;
+        }
+        Ok(())
+    }
+
     pub fn build<C, R: RngCore + CryptoRng>(
         self,
         secp_ctx: &Secp256k1<C>,
         mut rng: R,
-    ) -> (Transaction, Vec<DynState>)
+    ) -> Result<(Transaction, Vec<DynState>), anyhow::Error>
     where
         C: secp256k1::Signing + secp256k1::Verification,
     {
-        // `input_idx_to_bundle_idx[input_idx]` stores the index of a bundle the input
-        // at `input_idx` comes from, so we can call state machines of the
-        // corresponding bundle for every input bundle. It is always
-        // monotonically increasing, e.g. `[0, 0, 1, 2, 2, 2, 4]`
+        // `input_idx_to_bundle_idx[input_idx]` stores the index of a bundle the
+        // input at `input_idx` comes from, so we can call state
+        // machines of the corresponding bundle for every input bundle.
+        // It is always monotonically increasing, e.g. `[0, 0, 1, 2, 2,
+        // 2, 4]`
         let (input_idx_to_bundle_idx, inputs, input_keys): (Vec<_>, Vec<_>, Vec<_>) = multiunzip(
             self.inputs
                 .iter()
@@ -688,8 +709,8 @@ impl TransactionBuilder {
                         .map(move |input| (bundle_idx, input.input.clone(), input.keys.clone()))
                 }),
         );
-        // `output_idx_to_bundle` works exactly like `input_idx_to_bundle_idx` above,
-        // but for outputs.
+        // `output_idx_to_bundle` works exactly like `input_idx_to_bundle_idx`
+        // above, but for outputs.
         let (output_idx_to_bundle_idx, outputs): (Vec<_>, Vec<_>) = multiunzip(
             self.outputs
                 .iter()
@@ -703,7 +724,14 @@ impl TransactionBuilder {
         );
         let nonce: [u8; 8] = rng.r#gen();
 
-        let txid = Transaction::tx_hash_from_parts(&inputs, &outputs, nonce);
+        let mut transaction = Transaction {
+            inputs,
+            outputs,
+            nonce,
+            signatures: TransactionSignature::NaiveMultisig(vec![]),
+        };
+        finalize(&mut transaction, &self.finalizers)?;
+        let txid = transaction.tx_hash();
         let msg = secp256k1::Message::from_digest_slice(&txid[..]).expect("txid has right length");
 
         let signatures = input_keys
@@ -712,12 +740,7 @@ impl TransactionBuilder {
             .map(|keypair| secp_ctx.sign_schnorr(&msg, keypair))
             .collect();
 
-        let transaction = Transaction {
-            inputs,
-            outputs,
-            nonce,
-            signatures: TransactionSignature::NaiveMultisig(signatures),
-        };
+        transaction.signatures = TransactionSignature::NaiveMultisig(signatures);
 
         let input_states = self
             .inputs
@@ -752,7 +775,7 @@ impl TransactionBuilder {
                     ))
                 })
             });
-        (transaction, input_states.chain(output_states).collect())
+        Ok((transaction, input_states.chain(output_states).collect()))
     }
 
     pub fn inputs(&self) -> impl Iterator<Item = &ClientInput> {

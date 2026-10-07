@@ -275,6 +275,11 @@ where
         }
     }
 
+    /// This module instance within the federation. Available during init.
+    pub fn module_instance_id(&self) -> ModuleInstanceId {
+        self.module_instance_id
+    }
+
     /// Get a reference to a global Api handle
     pub fn global_api(&self) -> DynGlobalApi {
         self.client.get().api_clone()
@@ -785,8 +790,9 @@ where
                 Box::new(move |update| {
                     // The update was serialized from a `U` moments ago in this
                     // process, so deserialization only fails if `U` is not
-                    // round-trip-safe; treat that conservatively as non-terminal
-                    // (skip caching) rather than panicking inside the stream.
+                    // round-trip-safe; treat that conservatively as
+                    // non-terminal (skip caching) rather
+                    // than panicking inside the stream.
                     serde_json::from_value::<U>(update.clone())
                         .map(|update| is_terminal(&update))
                         .unwrap_or(false)
