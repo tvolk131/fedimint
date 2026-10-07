@@ -6,6 +6,7 @@ use fedimint_core::OutPoint;
 use fedimint_core::db::IDatabaseTransactionOpsCoreTyped;
 use fedimint_core::encoding::Encodable as _;
 use fedimint_core::session_outcome::{ConsensusItem, SessionStatus};
+use futures::StreamExt as _;
 
 use crate::SimplicityClientModule;
 use crate::common::{ContractInput, ContractOutput};
@@ -41,14 +42,7 @@ impl SimplicityClientModule {
         &self,
         origins: Vec<(OutPoint, ContractDescriptor)>,
     ) -> anyhow::Result<BTreeMap<OutPoint, Option<OutPoint>>> {
-        ensure!(origins.len() <= 2048, "too many public contract origins");
-        if origins.is_empty() {
-            return Ok(BTreeMap::new());
-        }
-        self.sync().await?;
-        self.store
-            .watch_contracts(&self.session_history().await, origins)
-            .await
+        self.watch_contracts_from_session(origins, 0).await
     }
 
     /// Import origins whose creation is at or after `first_session`.
@@ -61,18 +55,36 @@ impl SimplicityClientModule {
         origins: Vec<(OutPoint, ContractDescriptor)>,
         first_session: u64,
     ) -> anyhow::Result<BTreeMap<OutPoint, Option<OutPoint>>> {
+        self.watch_contracts_from_session_with_progress(origins, first_session, &|_| {})
+            .await
+    }
+
+    /// As [`Self::watch_contracts_from_session`], reporting this call's wallet
+    /// and public-lineage replay. An import becomes visible only on success.
+    pub async fn watch_contracts_from_session_with_progress(
+        &self,
+        origins: Vec<(OutPoint, ContractDescriptor)>,
+        first_session: u64,
+        progress: &(dyn Fn(crate::wallet::SyncProgress) + Send + Sync),
+    ) -> anyhow::Result<BTreeMap<OutPoint, Option<OutPoint>>> {
         ensure!(origins.len() <= 2048, "too many public contract origins");
         if origins.is_empty() {
             return Ok(BTreeMap::new());
         }
-        self.sync().await?;
+        self.sync_with_progress(progress).await?;
         self.store
-            .watch_contracts_from_session(&self.session_history().await, origins, first_session)
+            .watch_contracts_from_session_with_progress(
+                &self.session_history().await,
+                origins,
+                first_session,
+                |next, end| progress(crate::wallet::SyncProgress::Contracts { next, end }),
+            )
             .await
     }
 }
 
 impl WalletStore {
+    #[cfg(test)]
     pub(crate) async fn watch_contracts(
         &self,
         history: &SessionHistory,
@@ -81,11 +93,23 @@ impl WalletStore {
         self.watch_contracts_from_session(history, origins, 0).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn watch_contracts_from_session(
         &self,
         history: &SessionHistory,
         origins: Vec<(OutPoint, ContractDescriptor)>,
         first_session: u64,
+    ) -> anyhow::Result<BTreeMap<OutPoint, Option<OutPoint>>> {
+        self.watch_contracts_from_session_with_progress(history, origins, first_session, |_, _| {})
+            .await
+    }
+
+    pub(crate) async fn watch_contracts_from_session_with_progress(
+        &self,
+        history: &SessionHistory,
+        origins: Vec<(OutPoint, ContractDescriptor)>,
+        first_session: u64,
+        progress: impl Fn(u64, u64),
     ) -> anyhow::Result<BTreeMap<OutPoint, Option<OutPoint>>> {
         let _guard = self.sync_lock.lock().await;
         let mut requests = BTreeMap::new();
@@ -106,6 +130,8 @@ impl WalletStore {
         let next = tx.get_value(&db::NextSessionKey).await.unwrap_or(0);
         let (open_len, open_hash) = tx.get_value(&db::OpenSessionKey).await.unwrap_or((0, None));
         drop(tx);
+        tracing::debug!(target: "fedimint_simplicity_client::sync", first_session, next,
+            origins = requests.len(), "public contract replay started");
         // Replay exactly the prefix already scanned by this wallet, then merge
         // atomically. Future ordinary sync starts after this prefix. Inserting
         // a live API UTXO directly could miss a spend already passed by the cursor.
@@ -113,11 +139,14 @@ impl WalletStore {
             first_session <= next,
             "contract replay hint is beyond wallet history"
         );
-        for index in first_session..=next {
-            if index == next && open_len == 0 {
-                break;
-            }
-            let status = history.session(index).await?;
+        let end = next
+            .checked_add(u64::from(open_len != 0))
+            .ok_or_else(|| anyhow::anyhow!("contract replay cursor overflow"))?;
+        let sessions = history.sessions(first_session..end);
+        progress(first_session, end);
+        futures::pin_mut!(sessions);
+        while let Some((index, status)) = sessions.next().await {
+            let status = status?;
             let items = match status {
                 SessionStatus::Complete(session) => session.items,
                 SessionStatus::Pending(items) if index == next => items,
@@ -252,6 +281,7 @@ impl WalletStore {
                     ));
                 }
             }
+            progress(index + 1, end);
         }
         let mut current = BTreeMap::new();
         for origin in requests.keys() {

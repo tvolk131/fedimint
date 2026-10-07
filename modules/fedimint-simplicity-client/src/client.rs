@@ -208,8 +208,19 @@ impl ClientModule for SimplicityClientModule {
 impl SimplicityClientModule {
     /// Refresh holdings and confirmed history. Safe to repeat or interrupt.
     pub async fn sync(&self) -> anyhow::Result<()> {
+        self.sync_with_progress(|_| {}).await
+    }
+
+    /// As [`Self::sync`], with observational progress scoped to this call.
+    /// Progress does not establish completion or authorize spending.
+    pub async fn sync_with_progress(
+        &self,
+        progress: impl Fn(crate::wallet::SyncProgress) + Send + Sync,
+    ) -> anyhow::Result<()> {
         self.store
-            .sync(&self.session_history().await, |_, _| {})
+            .sync(&self.session_history().await, |next, end| {
+                progress(crate::wallet::SyncProgress::Wallet { next, end });
+            })
             .await
     }
 

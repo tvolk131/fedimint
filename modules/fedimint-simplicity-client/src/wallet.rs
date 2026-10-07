@@ -5,6 +5,7 @@
 pub(crate) mod db;
 mod history;
 mod pages;
+mod progress;
 
 use std::sync::Arc;
 
@@ -21,6 +22,7 @@ use fedimint_derive_secret::DerivableSecret;
 use futures::StreamExt as _;
 pub use history::SessionHistory;
 pub use pages::{MAX_WALLET_PAGE_SIZE, PageError, WalletCursor, WalletPage};
+pub use progress::SyncProgress;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -152,10 +154,13 @@ impl WalletStore {
             "wallet recovery cursor exceeds its target"
         );
         progress(start, target + 1);
-        for index in start..=target {
+        let sessions = history.sessions(start..target + 1);
+        futures::pin_mut!(sessions);
+        while let Some((index, status)) = sessions.next().await {
             // Completed sessions are signed; the open prefix uses quorum
             // agreement without waiting for session closure.
-            let status = history.session(index).await?;
+            let status = status?;
+            let started = fedimint_core::time::now();
             match status {
                 SessionStatus::Complete(session) => {
                     self.apply_session(index, &session, true).await?
@@ -171,6 +176,10 @@ impl WalletStore {
                         .await?;
                 }
             }
+            tracing::debug!(target: "fedimint_simplicity_client::sync",
+                index,
+                elapsed_us = started.elapsed().unwrap_or_default().as_micros() as u64,
+                "wallet session applied");
             progress(index + 1, target + 1);
         }
         let mut dbtx = self.db.begin_transaction().await;

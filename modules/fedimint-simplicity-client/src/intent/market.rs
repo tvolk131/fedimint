@@ -178,6 +178,16 @@ impl SimplicityClientModule {
     /// Watching alone is local; an accepted interaction carries an encrypted
     /// descriptor so mnemonic recovery rediscovers that participation.
     pub async fn watch_market(&self, market: &BinaryMarket) -> anyhow::Result<OutPoint> {
+        self.watch_market_with_progress(market, &|_| {}).await
+    }
+
+    /// Observe catch-up for this market without changing its authentication or
+    /// completion requirements.
+    pub async fn watch_market_with_progress(
+        &self,
+        market: &BinaryMarket,
+        progress: &(dyn Fn(crate::wallet::SyncProgress) + Send + Sync),
+    ) -> anyhow::Result<OutPoint> {
         ensure!(
             market.federation == self.store.federation && market.module == self.store.module,
             "wrong market scope"
@@ -206,9 +216,14 @@ impl SimplicityClientModule {
             .await
             .is_some()
         {
-            self.sync().await?;
+            self.sync_with_progress(progress).await?;
         } else {
-            self.watch_contract(origin, descriptor).await?;
+            self.watch_contracts_from_session_with_progress(
+                vec![(origin, descriptor)],
+                0,
+                progress,
+            )
+            .await?;
         }
         // Asset records authenticate the genesis policy, but only the complete
         // transaction establishes its exact balances and authority set.
