@@ -39,7 +39,7 @@ scripts/tests/simplicity-release-checks.sh tests
 scripts/tests/simplicity-release-checks.sh network
 scripts/tests/simplicity-release-checks.sh clippy
 scripts/tests/simplicity-release-checks.sh guardian
-nix develop .#lint --command just lint
+nix develop .#lint --command env NO_STASH=true bash misc/git-hooks/pre-commit
 ```
 
 The guardian network tests bind local ports. These tests include simulated

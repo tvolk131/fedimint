@@ -181,4 +181,4 @@ jobs:
           persist-credentials: false
       - uses: dpc/nix-installer-action@c6e05d595d5ed6d6b7c46e42409ca2a126efe13d # dpc/jj-vqymqvyntouw
       - name: Run the release's standard lint checks
-        run: nix develop .#lint --command just lint
+        run: nix develop .#lint --command env NO_STASH=true bash misc/git-hooks/pre-commit
