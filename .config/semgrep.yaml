@@ -158,7 +158,10 @@ rules:
   languages:
     - rust
   message: "Wildcard imports make it unclear which items are being used. Avoid using `use ...::*;` except in sub-modules of a file such as `use super::*;` in a test module."
-  pattern-regex: '^use .*::\*;$'
+  patterns:
+    - pattern-regex: '^use .*::\*;$'
+    # Parent imports are explicitly permitted for split modules and tests.
+    - pattern-not-regex: '^use super::\*;$'
   severity: ERROR
 
 - id: ban-direct-sleep-in-tests

@@ -651,11 +651,28 @@ pub struct TransactionBuilder {
     inputs: Vec<ClientInputBundle>,
     outputs: Vec<ClientOutputBundle>,
     finalizers: Vec<RegisteredFinalizer>,
+    reserve_funding: bool,
 }
 
 impl TransactionBuilder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Hold primary funding after rejection instead of automatically reclaiming
+    /// it. The operation must explicitly release it after proving permanent
+    /// invalidity. Unsupported primary modules fail before submission.
+    ///
+    /// Funding and submission still commit together: abandoning construction
+    /// rolls both back. Once committed, cancellation or timeout cannot release
+    /// the funding. This does not change explicitly supplied inputs.
+    pub fn with_funding_reservations(mut self) -> Self {
+        self.reserve_funding = true;
+        self
+    }
+
+    pub fn reserves_funding(&self) -> bool {
+        self.reserve_funding
     }
 
     pub fn with_inputs(mut self, inputs: ClientInputBundle) -> Self {

@@ -15,6 +15,7 @@ use crate::issuance::NoteIssuanceRequest;
 pub enum DbKeyPrefix {
     Note = 0x20,
     RecoveryState = 0x21,
+    FundingReservation = 0x22,
 }
 
 #[derive(Debug, Clone, Encodable, Decodable)]
@@ -61,4 +62,16 @@ impl_db_record!(
     key = RecoveryStateKey,
     value = RecoveryState,
     db_prefix = DbKeyPrefix::RecoveryState,
+);
+
+/// Index of reserved funding outcomes. The input state machine holds the notes
+/// and final transaction ID from the same commit that enables submission.
+#[derive(Debug, Encodable, Decodable)]
+pub(crate) struct FundingReservationKey(pub fedimint_core::core::OperationId);
+
+impl_db_record!(
+    key = FundingReservationKey,
+    value = crate::reservation::FundingReservation,
+    db_prefix = DbKeyPrefix::FundingReservation,
+    notify_on_modify = true,
 );
