@@ -76,3 +76,90 @@ cannot overwrite a newer logical attempt, and advertised TTL uses monotonic
 elapsed time. Status assembly holds the federation-manager read lock only while
 capturing one coherent snapshot; do not clone the client solely for this public
 query because that would interfere with concurrent leave.
+
+## Experimental Simplicity Contracts
+
+The `experimental-simplicity` daemon feature adds an opt-in contract module that
+is disabled by default. It is an unaudited prototype for development, with no
+production fund-safety claim. Guardians execute untrusted redemption bytecode
+through a pinned Simplicity runtime and custom C-frame jet adapters. Decoder,
+type-expansion, static execution, and transaction limits are part of this trust
+boundary; production use requires adversarial review of these limits and the
+unsafe adapters, consensus test vectors, and measured fee/cost calibration.
+
+Contract authorization binds the federation, module instance, spending references,
+claim keys, nonce, and all outer outputs. Core funding checks and transaction
+rollback enforce native bitcoin conservation. Bitcoin timelocks trust the
+configured guardians' threshold-agreed backend observations, subject to the
+backend trust model above. Session timelocks use core consensus ordering, not
+wall time.
+
+Contract values, states, revealed programs/witnesses, and recovery annotations
+are public to guardians and retained transaction history. The unauthenticated
+point-query API returns current contract records, including recovery bytes.
+Wallets must encrypt sensitive annotations; deleting a spent live record cannot
+erase its historical ciphertext. The persistent client encrypts versioned
+recovery descriptors with mnemonic-derived keys scoped to federation and module.
+It authenticates federation session history, verifies recovered policies against
+output commitments, and reconstructs confirmed activity including terminal
+spends. Recovery requires the original federation's retained history and wallet
+software that still supports historical templates. It adds no ecash-like transfer
+privacy: values, policies and public witnesses remain visible.
+
+Local wallet databases contain decrypted descriptors, derived-key salts,
+application secrets, and confirmed transaction history. Protect the local database
+like other wallet material; federation annotation encryption does not encrypt
+local storage. The database dump API intentionally omits these wallet records.
+Receiving requires a sender to include the receiver's recovery annotation; low-level
+builders do not automatically supply it. Repeated annotations or policies can
+link outputs, so receive requests should be fresh. See the
+[prototype documentation](modules/fedimint-simplicity-common/README.md) for exact
+API, retention, and implementation limits.
+
+Direct sends without an owned Simplicity input or output use bounded encrypted
+sender receipts in non-spendable action outputs. Receipts identify confirmed
+activity, not ownership. Their separate mnemonic-derived key and transaction
+commitment bind funding inputs, nonce and outputs; copies on unrelated intents
+are ignored. Receipt ciphertext and creation signatures are normalized across
+instances to avoid circularity. Client finalization checks the commitment again
+after authorization. Guardians interpret none of the receipt plaintext and
+retain only the ordinary transaction history, with no receipt UTXO or index.
+
+
+Execution version one adds public assets with guardian-enforced conservation and
+unique issuance capabilities. Creation starts at zero supply; first issuance must
+execute the authority contract. Fresh client creation keys authenticate immutable
+asset origins but have no continuing issuance power. Namespace-use markers and
+origin records are retained permanently to prevent resurrection after destruction.
+The v1 intent excludes creation signatures across Simplicity instances to avoid
+circularity, while committing
+the creation parameters and all issuance/destruction operations. Contract programs
+execute against one pre-mutation snapshot; final outer authorization and core
+funding checks still gate database commitment.
+
+The `asset` point-query endpoint exposes immutable origin records without
+credentials; it adds no listing or wallet identifier. As with contract queries,
+clients need normal federation consensus queries rather than trusting one server.
+The binary-market SDK verifies both assets originated in the expected unresolved
+vault; current-vault inspection alone cannot establish backing. Its oracle fixes
+the market outcome, while position-owner programs authorize payout destinations.
+Collateral operations share one vault and serialize; ordinary position transfers
+remain public, independent UTXO spends. Oracle honesty, client descriptor retention,
+and safe application covenant construction remain explicit trust boundaries.
+
+Shared-contract retry handlers are trusted wallet software. They preserve an
+immutable versioned request and may rebuild only after a definitive rejection
+and authenticated evidence of a competing spend of a designated shared input.
+Network uncertainty never authorizes another attempt. Submission, funding,
+reservations and attempt identity persist atomically; cancellation still resolves
+in-flight transactions. Attempt limits, a final funded per-attempt fee cap, and
+optional preparation deadlines bound automation. New attempts require opt-in
+primary funding reservations: owned notes return locally only after authenticated
+permanent invalidity and definitive rejection of their bound transaction. The
+originating wallet module is trusted to establish that proof; the mint client
+checks the reservation's transaction and outcome, not Simplicity semantics.
+Timeouts and cancellation cannot release pending notes. Unproven rejections retain
+funding without an automatic paid reclaim. Previously persisted ordinary funding
+operations keep their original module-dependent refund behavior. Local intent payloads may contain sensitive recipient metadata
+and are omitted from database dumps. Mnemonic recovery must not restart abandoned
+or unfinished intentions.
