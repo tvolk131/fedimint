@@ -39,6 +39,7 @@ rules:
       - devimint/
       # server only
       - fedimint-server/
+      - /modules/fedimint-simplicity-server/
 
 - id: ban-fs-write
   languages:
