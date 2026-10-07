@@ -924,7 +924,7 @@ impl ConsensusEngine {
 
         let outcome = loop {
             match self
-                .process_consensus_item_attempt(item_index, &item, peer)
+                .process_consensus_item_attempt(session_index, item_index, &item, peer)
                 .await
             {
                 Ok(outcome) => break outcome,
@@ -972,6 +972,7 @@ impl ConsensusEngine {
     /// means the item itself was rejected, which is a normal, final outcome.
     async fn process_consensus_item_attempt(
         &self,
+        session_index: u64,
         item_index: u64,
         item: &ConsensusItem,
         peer: PeerId,
@@ -995,7 +996,12 @@ impl ConsensusEngine {
         }
 
         if let Err(err) = self
-            .process_consensus_item_with_db_transaction(&mut dbtx.to_ref_nc(), item.clone(), peer)
+            .process_consensus_item_with_db_transaction(
+                &mut dbtx.to_ref_nc(),
+                item.clone(),
+                peer,
+                session_index,
+            )
             .await
         {
             // Rejected items are very common, so only trace level
@@ -1082,6 +1088,7 @@ impl ConsensusEngine {
         dbtx: &mut DatabaseTransaction<'_>,
         consensus_item: ConsensusItem,
         peer_id: PeerId,
+        session_index: u64,
     ) -> anyhow::Result<()> {
         // We rely on decoding rejecting any unknown module instance ids to avoid
         // peer-triggered panic here
@@ -1125,6 +1132,10 @@ impl ConsensusEngine {
                     &transaction,
                     self.cfg.consensus.version,
                     TxProcessingMode::Consensus,
+                    fedimint_server_core::TransactionConsensusContext {
+                        federation_id: self.cfg.calculate_federation_id(),
+                        session_index,
+                    },
                 )
                 .await
                 .map_err(|error| anyhow!(error.to_string()))?;
