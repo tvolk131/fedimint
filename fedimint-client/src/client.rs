@@ -769,24 +769,38 @@ impl Client {
                 bail!("No module to balance a partial transaction (affected unit: {unit:?}");
             };
 
-            let (added_input_bundle, added_output_bundle) = module
-                .create_final_inputs_and_outputs(
-                    module_id,
-                    dbtx,
-                    operation_id,
-                    *unit,
-                    input_amount,
-                    output_amount,
-                )
-                .await?;
+            let (added_input_bundle, added_output_bundle) =
+                if partial_transaction.reserves_funding() {
+                    module
+                        .create_reserved_inputs_and_outputs(
+                            module_id,
+                            dbtx,
+                            operation_id,
+                            *unit,
+                            input_amount,
+                            output_amount,
+                        )
+                        .await?
+                } else {
+                    module
+                        .create_final_inputs_and_outputs(
+                            module_id,
+                            dbtx,
+                            operation_id,
+                            *unit,
+                            input_amount,
+                            output_amount,
+                        )
+                        .await?
+                };
 
             added_inputs_bundles.push(added_input_bundle);
             added_outputs_bundles.push(added_output_bundle);
         }
 
         // This is the range of  outputs that will be added to the transaction
-        // in order to balance it. Notice that it may stay empty in case the transaction
-        // is already balanced.
+        // in order to balance it. Notice that it may stay empty in case the
+        // transaction is already balanced.
         let change_range = Range {
             start: partial_transaction.outputs().count() as u64,
             end: (partial_transaction.outputs().count() as u64
@@ -2915,6 +2929,37 @@ impl ClientContextIface for Client {
         tx_builder: TransactionBuilder,
     ) -> anyhow::Result<OutPointRange> {
         Client::finalize_and_submit_transaction_inner(self, dbtx, operation_id, tx_builder).await
+    }
+
+    async fn release_funding_after_conflict(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        operation_id: OperationId,
+        txid: fedimint_core::TransactionId,
+    ) -> Result<bool, anyhow::Error> {
+        let mut released = true;
+        // Visit all instances, including a previous primary module. Each module
+        // owns its reservation records and ignores operations it did not fund.
+        for (instance, _, module) in self.modules.iter_modules() {
+            released &= module
+                .release_funding_after_conflict(instance, dbtx, operation_id, txid)
+                .await?;
+        }
+        Ok(released)
+    }
+
+    async fn await_funding_release_progress(
+        &self,
+        operation_id: OperationId,
+        txid: fedimint_core::TransactionId,
+    ) -> Result<(), anyhow::Error> {
+        futures::future::try_join_all(
+            self.modules
+                .iter_modules()
+                .map(|(_, _, module)| module.await_funding_release_progress(operation_id, txid)),
+        )
+        .await?;
+        Ok(())
     }
 
     async fn fee_quote(
