@@ -542,6 +542,9 @@ pub async fn run(
 pub fn default_modules() -> ServerModuleInitRegistry {
     let mut server_gens = ServerModuleInitRegistry::new();
 
+    #[cfg(feature = "experimental-simplicity")]
+    server_gens.attach(fedimint_simplicity_server::SimplicityInit);
+
     server_gens.attach(MintInit);
     server_gens.attach(fedimint_mintv2_server::MintInit);
 

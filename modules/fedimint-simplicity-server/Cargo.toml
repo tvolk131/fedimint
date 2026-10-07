@@ -1,0 +1,62 @@
+[package]
+authors = { workspace = true }
+description = "Experimental Simplicity contract module: server"
+edition = { workspace = true }
+license = { workspace = true }
+name = "fedimint-simplicity-server"
+readme = { workspace = true }
+repository = { workspace = true }
+version = { workspace = true }
+
+[features]
+# Only installs an allocation profiler in the resources benchmark executable.
+bench-alloc = []
+
+[[bench]]
+harness = false
+name = "resources"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+erased-serde = { workspace = true }
+fedimint-core = { workspace = true }
+fedimint-metrics = { workspace = true }
+fedimint-server-core = { workspace = true }
+fedimint-simplicity-common = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+simplicity-lang = { version = "=0.9.0", default-features = false, features = [
+    "bitcoin",
+] }
+
+[dev-dependencies]
+axum = { workspace = true }
+bitcoin = { workspace = true }
+divan = "0.1.21"
+fedimint-aead = { workspace = true }
+fedimint-api-client = { workspace = true }
+fedimint-client = { workspace = true }
+fedimint-connectors = { workspace = true }
+fedimint-derive-secret = { workspace = true }
+fedimint-dummy-client = { workspace = true }
+fedimint-dummy-common = { workspace = true }
+fedimint-dummy-server = { workspace = true }
+fedimint-logging = { workspace = true }
+fedimint-mintv2-client = { workspace = true }
+fedimint-mintv2-common = { workspace = true }
+fedimint-mintv2-server = { workspace = true }
+fedimint-portalloc = { workspace = true }
+fedimint-rocksdb = { workspace = true }
+fedimint-server = { workspace = true }
+fedimint-simplicity-client = { workspace = true }
+fedimint-testing-core = { workspace = true }
+libc = "0.2"
+rand = { workspace = true }
+serde_json = { workspace = true }
+tbs = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true
