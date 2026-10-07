@@ -158,9 +158,9 @@ async fn failed_authentication_never_applies_a_prefetched_successor() {
     let spend = tx(2, &[point(&receive)], vec![]);
     let api = RangeApi::new(
         vec![
-            session(&[receive.clone()]),
+            session(std::slice::from_ref(&receive)),
             session(&[]),
-            session(&[spend.clone()]),
+            session(std::slice::from_ref(&spend)),
         ],
         false,
     );

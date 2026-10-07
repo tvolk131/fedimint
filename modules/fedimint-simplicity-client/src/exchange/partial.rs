@@ -71,7 +71,7 @@ impl PartialLimitOrder {
         let positions = bundle.balances.first().map_or(0, |v| v.quantity);
         if self.buy {
             ensure!(
-                output.amount.msats % self.unit_price.msats == 0,
+                output.amount.msats.is_multiple_of(self.unit_price.msats),
                 "inexact order escrow"
             );
             Ok(OrderState {

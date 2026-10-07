@@ -141,7 +141,7 @@ async fn wait_for_recovery(client: &ClientHandle) -> anyhow::Result<()> {
     loop {
         tokio::select! {
             // Progress alone cannot report terminal recovery failures.
-            result = &mut outcome => return result.map_err(Into::into),
+            result = &mut outcome => return result,
             Some((module, value)) = progress.next() => {
                 let percent = if value.total == 0 {
                     None

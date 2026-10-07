@@ -157,7 +157,7 @@ fn check_structure(transaction: &Transaction) -> Result<Cost, ContractError> {
                         .and_then(|destination| {
                             destination.as_any().downcast_ref::<ContractOutput>()
                         });
-                    if !destination.is_some_and(|destination| destination.bundle().is_some()) {
+                    if destination.is_none_or(|destination| destination.bundle().is_none()) {
                         return Err(ContractError::Assets);
                     }
                 }
