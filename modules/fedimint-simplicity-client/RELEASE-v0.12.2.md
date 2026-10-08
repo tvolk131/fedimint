@@ -276,3 +276,124 @@ synthetic mnemonics and regtest ecash: do not publish it or activate duplicate
 wallets. Only this summary is committed. The deployment and documentation
 received independent review. These follow-up commits change documentation
 only; the tested production code remains the candidate identified above.
+
+## Maximal-pruning qualification: October 8, 2026
+
+The code candidate is `928747c0538e8ee037b23172c471399c3bba325a`, appended to
+`0a65bebec807b0aafb4920781f88fb8f4d8692d0` without rewriting the prior release
+history. Cargo.lock SHA-256 is
+`5e4e619d073fb822ad29bc3fb95d2eb56af6f43f85f529dd6d143bd69b989751`.
+This is a fresh-federation qualification with matching clients and guardians;
+it does not certify replay of old unpruned history or mixed-version deployment.
+No consensus version was bumped for this undeployed rule change.
+
+Guardians track execution in the normal VM pass and reject unnecessarily
+revealed nodes or case branches. The SDK prunes against the actual transaction
+and resolved contract metadata, retaining the original template for future
+witnesses and contexts. A pinned-compiler pruning defect required rebuilding
+inferred types after hiding branches; canonical decoding remains strict. Tests
+cover hidden witness bits, shared DAGs, both execution versions, signed
+transactions, changing clocks, market branches, pruning-aware fees and funding
+rollback. A deterministic shared-contract race first failed, then passed with
+one bounded automatic refresh/rebuild; manual and repeatedly stale plans stop
+without submitting an attempt. The implementation received independent review.
+
+[The candidate's hosted run](https://github.com/tvolk131/fedimint/actions/runs/37827166742)
+passed all six jobs, including module/shared tests, the four guardian scenarios,
+example compilation, Clippy, repository lint, both guardian builds, native
+architecture agreement and ASan/leak checks.
+The local ARM64 Mac passed 336 module/shared tests, all four network scenarios,
+module Clippy and benchmark fixture checks; the two legacy mint-v2 migrations
+also passed. The unchanged VM/common code's Mac observations match the final
+Linux x86-64, Linux ARM64 and Linux ASan reports byte-for-byte:
+
+| Report | SHA-256 |
+| --- | --- |
+| Consensus observations | `9ffdc38ba954ae679e8334fd199f02ee41709d6e591148b870a81fac865803ef` |
+| Mutation observations | `bfa67e32711670a99a7bc455680808c02a7262ace9922b277ff6e2e92c45939c` |
+
+The 100,000-mutation campaign used seed `5065796730156482561`, reaching 41,920
+decoded programs, 30,673 successful executions and 100,000 C-frame adapter calls.
+These remain bounded checks, not exhaustive consensus or memory-safety proofs.
+
+The final native macOS Nix guardian package built and reported the exact
+candidate. Linux ARM64 binaries used Rust 1.93.0, Debian 12, generic ARM64 code,
+`JEMALLOC_SYS_WITH_LG_PAGE=16` and release optimization. The shared Docker VM
+ran out of compiler memory with the normal profile; the qualified Linux build
+sets `CARGO_PROFILE_RELEASE_LTO=false`, `CARGO_PROFILE_RELEASE_DEBUG=0` and
+`CARGO_BUILD_JOBS=1` for all dependencies and binaries. It is a Cargo deployment,
+not a Linux Nix closure; the Mac package retains the normal Nix build profile.
+
+| Deployed artifact | SHA-256 |
+| --- | --- |
+| macOS Nix guardian | `79fa21e0a092c8f8ff25da1c19001bd6a09d35a15632cfa549669930550c299c` |
+| Linux ARM64 guardian | `aa44f91fe763f50c6452775a1aca6ae07ead143cb34401d0a1df732342b8dbe2` |
+| macOS SDK wallet example | `5b3b17a27f8a6b0804b53d5aad0ef01c755891a3bd60bf45556afea4b1888161` |
+| Linux ARM64 SDK wallet example | `445ab1c1956ffbdc0945024762b4b287ae2a40e11b1acb0a6786c056f1dc02ec` |
+
+
+A new isolated federation ran two packaged Mac guardians and two Pi guardians
+with real Bitcoin Core regtest funding. It passed the owner and three-outcome
+market lifecycles, fully spent history recovery, mnemonic recovery followed by
+spending, lost acknowledgement/conflict/funding reuse, and client process kills
+after durable submission and during initialized recovery. As before, the
+recovery kill occurred at zero progress; it does not certify nonzero-cursor
+interruption. The private 71-file checkpoint/wallet/template/pending-intent
+baseline loaded its four wallet copies with networking denied.
+
+All four individual guardian outage/rejoin cases passed, followed by a confirmed
+10,000 sat withdrawal. Guardian 2 restored checkpoint 0 and caught up through
+session 2. Checkpoint 0 already contains session 0; replay applied sessions 1
+and 2. Signed outcomes 0–2 and all three final market vaults/asset origins agreed
+across the four guardians; the replaced database and frozen checkpoint were
+preserved. The driver's first post-restoration read was premature: the final
+vault transactions belonged to still-open session 2, whereas its readiness check
+covered only completed sessions. After that session closed, all comparisons
+passed without another restoration or transaction submission. The retained
+driver now waits through the previously open session before comparing state.
+
+Five caught `submit_guardian_metadata` WriteConflict panics recurred on the Pi,
+from the unchanged upstream v0.12.2 handler described above. Guardian shutdowns
+also logged expected Aleph shutdown/channel-closure errors during the deliberate stops.
+These are retained in the evidence; no Simplicity consensus/replay failure was
+observed. The application and original federation were not upgraded.
+
+
+Two before/after timing runs per revision used the System allocator and 100
+one-iteration samples per case on the ARM64 Mac. The old revision was the parent
+named above; our compiler container was paused, but other user workloads
+continued and were recorded. In-memory core-submission median ranges were:
+
+| Fixture | Before | With pruning |
+| --- | ---: | ---: |
+| Market issuance | 1.349–1.366 ms | 0.638–0.801 ms |
+| Market resolution | 1.440–1.454 ms | 0.877–1.132 ms |
+| Packed constants | 17.74–18.07 ms | 17.28–18.30 ms |
+| Two deep chains | 15.23–15.34 ms | 15.04–15.54 ms |
+| Late failing mixed workload | 20.75–20.91 ms | 20.18–21.41 ms |
+
+The market fixtures intentionally change their submitted representation:
+issuance program/witness bytes fall from 1,359/66 to 599/1, and its input fee
+from 1,661 to 777 msat; resolution falls to 806/66 bytes and 1,104 msat. Fee
+coefficients are unchanged. These short, warm-database comparisons exclude
+networking/consensus and client-side pruning; ambient load prevents treating
+small timing differences as regressions or improvements. They do not establish
+Pi throughput, worst-case latency, or a DoS bound.
+
+The 60-second idle and 900-second functional-window samples recorded Pi RSS
+below 188.4 MiB per guardian and sampled process high-water marks below
+189.8 MiB. Temperature reached 60.05 C; the final throttling status was zero.
+Idle kernel-attributed writes were about 1.24 MiB/s per guardian versus about
+24 KiB/s of logical syscall writes, consistent with the pre-existing write
+amplification concern. Whole-device counters include the original federation
+and other filesystem activity and do not measure NAND wear. The functional
+window includes waiting/idle time and concurrent host workloads; it is not a
+sustained-load or storage-endurance qualification.
+
+All isolated services were stopped after the checks. The private evidence
+bundle `simplicity-v0.12.2-pruning-20261008` is retained outside build caches,
+including source archives, build settings, artifact hashes, frozen fixtures,
+raw logs and public hosted reports. Its Mac Nix closure is protected by a local
+GC root. The bundle contains guardian secrets and synthetic wallet material:
+do not publish it or activate duplicate wallets. This documentation follow-up
+changes no production code.

@@ -1,6 +1,6 @@
 # Simplicity: remaining beta work
 
-Checkpoint: 2026-10-07. The [v0.12.2 port](RELEASE-v0.12.2.md) records the
+Checkpoint: 2026-10-08. The [v0.12.2 port](RELEASE-v0.12.2.md) records the
 release baseline and focused checks; earlier evidence remains tied to its
 original development revision. These seven release workstreams include completed bounded
 tests and work still requiring a chosen release candidate. The native market
@@ -105,7 +105,13 @@ they retain the outstanding platform, operational, or candidate-specific work.
    `41100ea9a5e` now has a built/launched macOS Nix package, installed Linux ARM64
    Cargo binaries on the Pi's 16 KiB-page OS, matching native SDK, real Bitcoin
    deposit/withdrawal, and isolated four-guardian recovery/outage/restoration
-   evidence. The appended release documentation changes no production code.
+   evidence. The maximal-pruning candidate `928747c0538` repeated the focused hosted checks
+   and fresh Mac/Pi rehearsal; see its
+   [qualification record](RELEASE-v0.12.2.md#maximal-pruning-qualification-october-8-2026).
+   It requires a fresh federation with matching clients and guardians; it does
+   not certify old unpruned history or a rolling upgrade. A new private
+   71-file fixture baseline is retained. The appended release documentation
+   changes no production code.
    Linux Nix packaging and other deployment targets remain unqualified; use
    the documented, tested artifact paths.
 
