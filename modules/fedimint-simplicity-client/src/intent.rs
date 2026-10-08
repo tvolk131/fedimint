@@ -511,25 +511,82 @@ impl SimplicityClientModule {
             if let Err(error) = record.can_prepare(self.store.next_session().await) {
                 record.status = IntentStatus::Failed(error.to_string());
             } else {
-                let context = self.intent_context().await;
-                let plan = self
-                    .intents
-                    .build(self, &record.intent, &context)
-                    .await
-                    .and_then(|plan| {
-                        ensure!(
-                            !plan.shared_inputs.is_empty()
-                                && plan.shared_inputs.iter().all(|point| plan
-                                    .spends
-                                    .iter()
-                                    .any(|spend| spend.outpoint == *point)),
-                            "invalid shared input plan"
-                        );
-                        Ok(plan)
-                    });
+                let mut context = self.intent_context().await;
+                let mut refreshed = false;
+                let plan = loop {
+                    let plan = self
+                        .intents
+                        .build(self, &record.intent, &context)
+                        .await
+                        .and_then(|plan| {
+                            ensure!(
+                                !plan.shared_inputs.is_empty()
+                                    && plan.shared_inputs.iter().all(|point| plan
+                                        .spends
+                                        .iter()
+                                        .any(|spend| spend.outpoint == *point)),
+                                "invalid shared input plan"
+                            );
+                            Ok(plan)
+                        });
+                    let plan = match plan {
+                        Ok(plan) => plan,
+                        Err(error) => break Err(error),
+                    };
+                    let snapshot = match self
+                        .pruning_snapshot(plan.spends.iter().map(|spend| spend.outpoint))
+                        .await
+                    {
+                        Err(error) if !error.is::<crate::pruning::InvalidPruningPlan>() => {
+                            return Err(error);
+                        }
+                        result => result,
+                    };
+                    let conflict = snapshot
+                        .as_ref()
+                        .err()
+                        .and_then(|error| {
+                            error.downcast_ref::<crate::pruning::InvalidPruningPlan>()
+                        })
+                        .and_then(|error| match error {
+                            crate::pruning::InvalidPruningPlan::Unavailable(point) => Some(point),
+                            _ => None,
+                        })
+                        .filter(|point| {
+                            plan.shared_inputs.contains(point)
+                                && context
+                                    .contracts
+                                    .get(point)
+                                    .is_some_and(|contract| contract.spent_by.is_none())
+                        });
+                    if !refreshed
+                        && record.policy.retry == RetryMode::Automatic
+                        && let Some(point) = conflict
+                    {
+                        // A point-query miss alone is not conflict proof. Only
+                        // authenticated history may authorize a new plan, and
+                        // only once here: broken handlers must still stop.
+                        self.sync().await?;
+                        let next = self.intent_context().await;
+                        if next
+                            .contracts
+                            .get(point)
+                            .is_some_and(|contract| contract.spent_by.is_some())
+                        {
+                            if let Err(error) = record.can_prepare(self.store.next_session().await)
+                            {
+                                break Err(error);
+                            }
+                            context = next;
+                            refreshed = true;
+                            continue;
+                        }
+                    }
+                    break Ok((plan, snapshot));
+                };
                 match plan {
                     Err(error) => record.status = IntentStatus::Failed(error.to_string()),
-                    Ok(plan) => {
+                    Ok((plan, snapshot)) => {
                         let mut tx = self.store.db.begin_transaction().await;
                         tx.ignore_uncommitted(); // Construction errors intentionally roll back.
                         // Compare-and-commit also protects independent handles
@@ -539,23 +596,28 @@ impl SimplicityClientModule {
                             tx.get_value(&db::IntentKey(id)).await.as_ref() == Some(&record),
                             "intent changed while preparing"
                         );
-                        let submission = self
-                            .submit_dbtx(
-                                &mut tx.to_ref_nc(),
-                                Submission {
-                                    spends: plan.spends,
-                                    outputs: plan.outputs,
-                                    creations: vec![],
-                                    requested_receipt: None,
-                                    max_fee: Some(
-                                        plan.max_fee.map_or(record.policy.max_fee, |limit| {
-                                            limit.min(record.policy.max_fee)
-                                        }),
-                                    ),
-                                    reserve_funding: true,
-                                },
-                            )
-                            .await;
+                        let submission = match snapshot {
+                            Err(error) => Err(error),
+                            Ok(snapshot) => {
+                                self.submit_dbtx(
+                                    &mut tx.to_ref_nc(),
+                                    Submission {
+                                        spends: plan.spends,
+                                        outputs: plan.outputs,
+                                        creations: vec![],
+                                        requested_receipt: None,
+                                        max_fee: Some(
+                                            plan.max_fee.map_or(record.policy.max_fee, |limit| {
+                                                limit.min(record.policy.max_fee)
+                                            }),
+                                        ),
+                                        reserve_funding: true,
+                                        snapshot,
+                                    },
+                                )
+                                .await
+                            }
+                        };
                         match submission {
                             Ok((operation, transaction)) => {
                                 record.attempts.push(IntentAttempt {

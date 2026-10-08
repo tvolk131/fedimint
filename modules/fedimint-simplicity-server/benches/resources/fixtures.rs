@@ -41,6 +41,8 @@ use simplicity::{BitWriter, ConstructNode, encode};
 
 #[path = "adversarial.rs"]
 pub mod adversarial;
+#[path = "pruning.rs"]
+mod pruning;
 #[path = "scale.rs"]
 pub mod scale;
 #[path = "storage.rs"]
@@ -659,6 +661,9 @@ pub fn build(name: &str) -> Fixture {
         _ => {}
     }
     fixture.finish();
+    if matches!(name, "market_issue" | "market_resolve" | "bad_oracle") {
+        pruning::market(&mut fixture);
+    }
     fixture.preflight_error = match name {
         "cost_near_limit"
         | "cost_32"

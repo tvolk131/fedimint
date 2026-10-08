@@ -9,6 +9,7 @@ use crate::jet::FedimintJet;
 use crate::{ContractError, ContractInput, ContractOutput, MAX_PROGRAM_BYTES, MAX_WITNESS_BYTES};
 
 mod preflight;
+mod pruning;
 
 #[derive(Debug, Clone)]
 pub struct EnvironmentOutput {
@@ -148,8 +149,10 @@ pub fn execute_decoded(
 ) -> Result<Amount, ContractError> {
     check_commitment(program, &environment.current)?;
     let mut machine = BitMachine::for_program(program).map_err(|_| ContractError::Limit)?;
+    let mut tracker = pruning::Execution::default();
     machine
-        .exec(program, environment)
+        .exec_with_tracker(program, environment, &mut tracker)
         .map_err(|_| ContractError::Rejected)?;
+    tracker.check(program)?;
     Ok(program_fee(input, program))
 }

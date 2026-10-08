@@ -31,6 +31,7 @@ impl SimplicityClientModule {
         &self,
         plan: &IntentPlan,
         context: &IntentContext,
+        snapshot: &crate::pruning::PruningSnapshot,
     ) -> anyhow::Result<FeeQuoteRequest> {
         ensure!(
             !plan.spends.is_empty(),
@@ -39,13 +40,14 @@ impl SimplicityClientModule {
         let mut input_amount = 0u64;
         let mut input_fee = 0u64;
         let mut inputs = vec![];
+        let mut prepared = vec![];
         for spend in &plan.spends {
             let contract = context
                 .contracts
                 .get(&spend.outpoint)
                 .context("unknown quote input")?;
             ensure!(contract.spent_by.is_none(), "quote input is spent");
-            let (_, program) = self
+            let (version, program) = self
                 .store
                 .keys
                 .program(&contract.descriptor, self.store.templates.as_ref())?;
@@ -64,9 +66,23 @@ impl SimplicityClientModule {
             input_amount = input_amount
                 .checked_add(contract.output.amount.msats)
                 .context("quote amount overflow")?;
-            input_fee = input_fee
-                .checked_add(common::runtime::input_fee(&input)?.msats)
-                .context("quote fee overflow")?;
+            let observed = snapshot
+                .contracts
+                .get(&spend.outpoint)
+                .context("missing pruning input context")?;
+            ensure!(
+                observed.output == contract.output
+                    && observed.creation_session == contract.creation_session,
+                "pruning context differs from authenticated wallet history"
+            );
+            prepared.push(crate::authorization::PreparedSpend {
+                outpoint: spend.outpoint,
+                version,
+                program,
+                key: self.descriptor_key(&contract.descriptor),
+                witnesses: spend.witnesses.clone(),
+                signature_witness: spend.signature_witness.clone(),
+            });
             inputs.push(DynInput::from_typed(self.store.module, input));
         }
         let mut output_amount = 0u64;
@@ -79,21 +95,45 @@ impl SimplicityClientModule {
                 .checked_add(common::output_fee(output).msats)
                 .context("quote fee overflow")?;
         }
-        output_amount
-            .checked_add(input_fee)
-            .and_then(|v| v.checked_add(output_fee))
-            .context("quote funding overflow")?;
-        common::resources::check_transaction(&Transaction {
+        let mut draft = Transaction {
             inputs,
             outputs: plan
                 .outputs
                 .iter()
                 .cloned()
-                .map(|o| DynOutput::from_typed(self.store.module, o))
+                .map(|output| DynOutput::from_typed(self.store.module, output))
                 .collect(),
             nonce: [0; 8],
             signatures: TransactionSignature::NaiveMultisig(vec![]),
-        })?;
+        };
+        let authorization = crate::authorization::Authorization {
+            federation: self.store.federation,
+            module: self.store.module,
+            spends: prepared,
+            creations: vec![],
+            receipt: None,
+            max_fee: None,
+            snapshot: snapshot.clone(),
+        };
+        for (index, input) in authorization.pruned_inputs(&draft)? {
+            input_fee = input_fee
+                .checked_add(
+                    common::runtime::input_fee(
+                        input
+                            .as_any()
+                            .downcast_ref::<common::ContractInput>()
+                            .expect("authorization returns Simplicity inputs"),
+                    )?
+                    .msats,
+                )
+                .context("quote fee overflow")?;
+            draft.inputs[index] = input;
+        }
+        output_amount
+            .checked_add(input_fee)
+            .and_then(|value| value.checked_add(output_fee))
+            .context("quote funding overflow")?;
+        common::resources::check_transaction(&draft)?;
         Ok(FeeQuoteRequest {
             input_amount: Amounts::new_bitcoin(Amount::from_msats(input_amount)),
             output_amount: Amounts::new_bitcoin(Amount::from_msats(output_amount)),
@@ -110,7 +150,10 @@ impl SimplicityClientModule {
         context: &IntentContext,
     ) -> anyhow::Result<Amount> {
         let started = fedimint_core::time::now();
-        let request = self.plan_fee_request(plan, context)?;
+        let snapshot = self
+            .pruning_snapshot(plan.spends.iter().map(|spend| spend.outpoint))
+            .await?;
+        let request = self.plan_fee_request(plan, context, &snapshot)?;
         tracing::debug!(
             target: LOG_CLIENT_SIMPLICITY_TIMING,
             operation = "quote_plan", stage = "explicit_fee",

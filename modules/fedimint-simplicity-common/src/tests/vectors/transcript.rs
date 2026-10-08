@@ -85,6 +85,11 @@ fn consensus_observation_report() {
             })
         })
         .collect::<Vec<_>>();
-    let report = json!({"schema": 1, "wire": wire, "jets": jets, "programs": programs});
+    #[allow(unused_mut)]
+    let mut report = json!({"schema": 2, "wire": wire, "jets": jets, "programs": programs});
+    #[cfg(feature = "compiler")]
+    {
+        report["pruning"] = super::pruning::observations();
+    }
     write_report("consensus.json", &report);
 }

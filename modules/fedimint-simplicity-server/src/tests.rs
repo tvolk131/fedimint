@@ -2,6 +2,7 @@ mod api;
 mod assets;
 mod config;
 mod preflight;
+mod pruning;
 
 use std::collections::BTreeMap;
 
@@ -91,7 +92,8 @@ fn spend_input(
         .unwrap()
 }
 
-fn authorize(
+async fn authorize(
+    fed: &Harness,
     tx: &mut Transaction,
     program: &ContractProgram,
     point: OutPoint,
@@ -104,7 +106,7 @@ fn authorize(
         DynInput::from_typed(SIMP, spend_input(program, point, owner, release, signature));
     let mut keys = vec![*owner];
     keys.extend_from_slice(other_keys);
-    sign_transaction(tx, &keys).unwrap();
+    fed.sign(tx, &keys).await.unwrap();
 }
 
 fn draft_spend(
@@ -365,6 +367,7 @@ async fn ecash_deposit_top_up_and_redeem_through_core() {
     top_up
         .inputs
         .push(DynInput::from_typed(MINT, MintInput::new_v0(top_up_note)));
+    fed.prune(&mut top_up, 2).await;
     let input = top_up.inputs[0]
         .as_any()
         .downcast_ref::<ContractInput>()
@@ -374,7 +377,16 @@ async fn ecash_deposit_top_up_and_redeem_through_core() {
         .msats
         + output_fee(&successor).msats;
     top_up.outputs[0] = DynOutput::from_typed(SIMP, successor.clone());
-    authorize(&mut top_up, &program, point, &owner, false, &[second.key]);
+    authorize(
+        &fed,
+        &mut top_up,
+        &program,
+        point,
+        &owner,
+        false,
+        &[second.key],
+    )
+    .await;
 
     fed.vote(99).await;
     assert!(
@@ -397,7 +409,16 @@ async fn ecash_deposit_top_up_and_redeem_through_core() {
     assert!(fed.process(&changed, 2).await.is_err());
 
     // The owner cannot bypass the covenant by authorizing changed state.
-    authorize(&mut changed, &program, point, &owner, false, &[second.key]);
+    authorize(
+        &fed,
+        &mut changed,
+        &program,
+        point,
+        &owner,
+        false,
+        &[second.key],
+    )
+    .await;
     assert!(fed.process(&changed, 2).await.is_err());
     assert_eq!(fed.contract(point).await.unwrap().output, initial);
 
@@ -410,7 +431,7 @@ async fn ecash_deposit_top_up_and_redeem_through_core() {
     // Even a valid program and owner signature cannot create unfunded value.
     let mut unfunded = top_up.clone();
     unfunded.inputs.pop();
-    authorize(&mut unfunded, &program, point, &owner, false, &[]);
+    authorize(&fed, &mut unfunded, &program, point, &owner, false, &[]).await;
     let error = fed.process(&unfunded, 2).await.unwrap_err();
     assert!(matches!(
         error.downcast_ref::<TransactionError>(),
@@ -439,6 +460,7 @@ async fn ecash_deposit_top_up_and_redeem_through_core() {
     );
 
     let mut release = draft_spend(&program, successor_point, &owner, true, vec![]);
+    fed.prune(&mut release, 3).await;
     let input = release.inputs[0]
         .as_any()
         .downcast_ref::<ContractInput>()
@@ -452,7 +474,16 @@ async fn ecash_deposit_top_up_and_redeem_through_core() {
         .map(|bit| MintRequest::new(Denomination(bit)))
         .collect::<Vec<_>>();
     release.outputs = withdrawals.iter().map(MintRequest::output).collect();
-    authorize(&mut release, &program, successor_point, &owner, true, &[]);
+    authorize(
+        &fed,
+        &mut release,
+        &program,
+        successor_point,
+        &owner,
+        true,
+        &[],
+    )
+    .await;
     fed.process(&release, 3).await.unwrap();
     assert!(fed.contract(successor_point).await.is_none());
     assert_eq!(fed.audit().await, 0);
@@ -521,7 +552,7 @@ async fn signatures_commit_to_claim_key_federation_module_and_foreign_outputs() 
         true,
         vec![MintRequest::new(Denomination(10)).output()],
     );
-    authorize(&mut tx, &program, point, &owner, true, &[]);
+    authorize(&fed, &mut tx, &program, point, &owner, true, &[]).await;
     let original_hash =
         fedimint_simplicity_common::signature_hash(federation_id(), SIMP, &tx).unwrap();
     assert_ne!(
@@ -579,7 +610,7 @@ async fn malformed_oversized_and_wrong_programs_do_not_consume_contracts() {
         out_idx: 0,
     };
     let mut tx = draft_spend(&program, point, &owner, true, vec![]);
-    authorize(&mut tx, &program, point, &owner, true, &[]);
+    authorize(&fed, &mut tx, &program, point, &owner, true, &[]).await;
     for program_bytes in [vec![], vec![255; 24], vec![0; MAX_PROGRAM_BYTES + 1]] {
         let mut invalid = tx.clone();
         let mut input = invalid.inputs[0]
@@ -691,7 +722,7 @@ async fn invalid_outputs_and_duplicate_spends_roll_back() {
             true,
             vec![DynOutput::from_typed(SIMP, invalid)],
         );
-        authorize(&mut tx, &program, point, &owner, true, &[]);
+        authorize(&fed, &mut tx, &program, point, &owner, true, &[]).await;
         let error = fed.process(&tx, 0).await.unwrap_err();
         let Some(TransactionError::Input(error)) = error.downcast_ref::<TransactionError>() else {
             panic!("expected a structural preflight error: {error:#}");

@@ -44,8 +44,11 @@ CLI wallet integration yet.
 
 Guardian initialization, configuration validation, and client-config export reject
 module consensus versions other than `0.1` before decoding the configuration.
-This prototype does not silently activate new rules from an older configuration
-or provide a migration/rolling-upgrade path for earlier experimental deployments.
+Version `0.1` alone does not identify the rules of this undeployed prototype:
+mandatory pruning tightens acceptance without a version bump. Start a fresh
+federation with the exact same candidate on every guardian. Older configurations
+are not an upgrade boundary, and replay of older unpruned history or mixed-version
+rolling upgrades is unsupported.
 
 ## Guardian and client API
 
@@ -73,17 +76,34 @@ The low-level builder flow is:
 2. `program.output(amount, state, recovery)` creates a funded output request.
    A CMR alone is not a recoverable program. Use the persistent wallet below
    when mnemonic recovery is required.
-3. For a spend, use `program.input(outpoint, claim_key, witnesses(...))` with
-   `placeholder_signature()` to assemble a draft. Choose all contract inputs,
-   all outputs, the transaction nonce, and required funding. Estimate spending
-   fees with `runtime::input_fee` using the actual branch and witness shape;
-   output fees come from `output_fee`.
-4. Use `signature_value(federation_id, module_id, &transaction, owner_key)` to
-   replace each placeholder. Other contracts may use different witnesses or
-   authorization policies. Rebuild the input with those witnesses.
+3. Use `program.input(...)` with placeholder signatures only to assemble an
+   unpruned draft. Select the inputs, outputs, nonce and funding. Obtain a
+   `PruningSnapshot` containing resolved inputs and consensus clock observations;
+   `snapshot.environment(...)` constructs each input's full execution context.
+4. Compute the real signature witnesses, then call
+   `program.input_with_environment(outpoint, claim_key, witnesses, &environment)`.
+   This executes and prunes from the original template. Estimate fees with
+   `runtime::input_fee` on these submitted bytes, and `output_fee` for outputs.
+   If funding changes the context, rebuild signatures and pruning from the
+   original template and recheck fees before submitting.
 5. Apply the ordinary outer signatures after witnesses are final. The prototype
    `sign_transaction` helper supports exactly one signing key per outer input,
    in transaction order. Submit through the normal Fedimint transaction API.
+
+Guardians require every revealed node to execute and both sides of each revealed
+`case` to execute at least once. Unused branches must be hidden; shared cases can
+retain both used branches. Programs without unused branches remain unchanged.
+Pruning preserves the CMR, while fees and resource caps use the pruned bytes and
+static cost. Retain the original template and recoverable witness material.
+
+The persistent wallet handles draft/final pruning automatically. A branch that
+changes its fee after funding is rejected locally before committing reservations;
+use a fully funded low-level construction for such policies. `plan_fee_request`
+requires a reusable pruning snapshot, avoiding network requests for each local
+route candidate. `pruning_snapshot` queries existing contract and clock endpoints;
+these queries disclose outpoint interest. Applications may supply already
+authenticated metadata instead. Clock observations do not reserve an inclusion
+window, and construction can fail early when a contract is not currently valid.
 
 The [integration tests](../fedimint-simplicity-server/src/tests.rs) are executable
 examples of this sequence. Final outer signatures cover the actual transaction
@@ -166,7 +186,9 @@ and `fm_block_count() >= deadline` for a refund. Advancing the agreed clock clos
 the claim path without a competing transaction; moving funds still requires a
 spend. A predicate such as an even session index can also close and reopen a path
 while its contract remains unspent. Monotonic clocks do not imply monotonic
-program validity.
+program validity. Maximal pruning commits a submitted spend to its chosen branch:
+if a clock change selects a hidden branch, rebuild from the original template.
+A branch-free predicate can still close and reopen for the same submitted bytes.
 
 Under Fedimint's normal Byzantine-fault assumptions, finalized consensus history
 does not roll back when Bitcoin reorganizes. Its existing

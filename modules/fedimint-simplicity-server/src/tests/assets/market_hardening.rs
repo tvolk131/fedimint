@@ -2,12 +2,16 @@
 //! and signatures valid so they cannot mask a missing covenant check.
 use super::*;
 
-fn resolve(market: &Market, state: u8, amount: u64) -> Transaction {
+async fn resolve(market: &Market, state: u8, amount: u64) -> Transaction {
     let (mut tx, sponsor) = sponsored(
         vec![market.input(2, state, &market.oracle)],
         vec![market.vault_output(amount, state)],
     );
-    sign_transaction(&mut tx, &[market.operator, sponsor]).unwrap();
+    market
+        .fed
+        .sign(&mut tx, &[market.operator, sponsor])
+        .await
+        .unwrap();
     tx
 }
 
@@ -62,7 +66,11 @@ async fn oracle_attestations_are_bound_to_every_market_term_and_outcome() {
             vec![attestation_input(&market, &other, 1, 1)],
             vec![market.vault_output(0, 1)],
         );
-        sign_transaction(&mut tx, &[market.operator, sponsor]).unwrap();
+        market
+            .fed
+            .sign(&mut tx, &[market.operator, sponsor])
+            .await
+            .unwrap();
         assert_error(market.fed.process(&tx, 1).await, "program rejected");
         assert!(market.fed.contract(market.vault).await.is_some());
     }
@@ -70,11 +78,15 @@ async fn oracle_attestations_are_bound_to_every_market_term_and_outcome() {
         vec![attestation_input(&market, &market.terms, 2, 1)],
         vec![market.vault_output(0, 1)],
     );
-    sign_transaction(&mut tx, &[market.operator, sponsor]).unwrap();
+    market
+        .fed
+        .sign(&mut tx, &[market.operator, sponsor])
+        .await
+        .unwrap();
     assert_error(market.fed.process(&tx, 1).await, "program rejected");
     market
         .fed
-        .process(&resolve(&market, 1, 0), 1)
+        .process(&resolve(&market, 1, 0).await, 1)
         .await
         .unwrap();
 }
@@ -85,7 +97,7 @@ async fn oracle_and_timeout_windows_have_exact_boundaries() {
         for outcome in [1, 2, 3] {
             let market = Market::new().await;
             market.fed.vote(height).await;
-            let tx = resolve(&market, outcome, 0);
+            let tx = resolve(&market, outcome, 0).await;
             if (5..10).contains(&height) || (height >= 10 && outcome == 3) {
                 market.fed.process(&tx, 1).await.unwrap();
             } else {
@@ -100,7 +112,11 @@ async fn oracle_and_timeout_windows_have_exact_boundaries() {
             vec![market.input(2, 3, &key())],
             vec![market.vault_output(0, 3)],
         );
-        sign_transaction(&mut tx, &[market.operator, sponsor]).unwrap();
+        market
+            .fed
+            .sign(&mut tx, &[market.operator, sponsor])
+            .await
+            .unwrap();
         if height >= 10 {
             market.fed.process(&tx, 1).await.unwrap();
         } else {
@@ -202,21 +218,33 @@ async fn issuance_preserves_the_vault_policy_authorities_state_and_pair_backing(
             _ => unreachable!(),
         };
         tx.outputs[0] = output(successor);
-        sign_transaction(&mut tx, &[market.operator, sponsor]).unwrap();
+        market
+            .fed
+            .sign(&mut tx, &[market.operator, sponsor])
+            .await
+            .unwrap();
         assert_error(market.fed.process(&tx, 1).await, expected);
         assert!(market.fed.contract(market.vault).await.is_some());
         assert!(market.fed.contract(point(&tx, 1)).await.is_none());
     }
     for (yes, no) in [(0, 0), (1, 0), (0, 1), (1, 2)] {
         let (mut tx, sponsor) = issue_transaction(&market, &owner, yes, no, yes * 1000, 0);
-        sign_transaction(&mut tx, &[market.operator, sponsor]).unwrap();
+        market
+            .fed
+            .sign(&mut tx, &[market.operator, sponsor])
+            .await
+            .unwrap();
         assert_error(market.fed.process(&tx, 1).await, "program rejected");
     }
     for height in [9, 10] {
         let market = Market::new().await;
         market.fed.vote(height).await;
         let (mut tx, sponsor) = issue_transaction(&market, &owner, 1, 1, 1000, 0);
-        sign_transaction(&mut tx, &[market.operator, sponsor]).unwrap();
+        market
+            .fed
+            .sign(&mut tx, &[market.operator, sponsor])
+            .await
+            .unwrap();
         if height == 9 {
             market.fed.process(&tx, 1).await.unwrap();
         } else {
@@ -236,7 +264,7 @@ struct Holding {
 // Exact token conservation and owner authorization, with independently
 // specified policy action, burns, successor state, and collateral for negative
 // cases.
-fn burn_transaction(
+async fn burn_transaction(
     market: &Market,
     holding: &Holding,
     action: u8,
@@ -281,7 +309,11 @@ fn burn_transaction(
         ],
     );
     sign_owner(&mut tx, 1, &program, holding.point, &holding.owner);
-    sign_transaction(&mut tx, &[market.operator, holding.owner, sponsor]).unwrap();
+    market
+        .fed
+        .sign(&mut tx, &[market.operator, holding.owner, sponsor])
+        .await
+        .unwrap();
     tx
 }
 
@@ -299,7 +331,7 @@ async fn actions_cannot_cross_resolution_states_or_redeem_unmatched_pairs() {
         };
         if state != 0 {
             market.fed.vote(5).await;
-            let tx = resolve(&market, state, 4000);
+            let tx = resolve(&market, state, 4000).await;
             market.fed.process(&tx, 2).await.unwrap();
             market.vault = point(&tx, 0);
         }
@@ -332,14 +364,19 @@ async fn actions_cannot_cross_resolution_states_or_redeem_unmatched_pairs() {
                 burns,
                 4000 - payout,
                 payout,
-            );
+            )
+            .await;
             assert_error(market.fed.process(&tx, 3).await, "program rejected");
             assert!(market.fed.contract(market.vault).await.is_some());
             assert!(market.fed.contract(holding.point).await.is_some());
         }
         if state != 0 {
             let (mut tx, sponsor) = issue_transaction(&market, &owner, 1, 1, 5000, state);
-            sign_transaction(&mut tx, &[market.operator, sponsor]).unwrap();
+            market
+                .fed
+                .sign(&mut tx, &[market.operator, sponsor])
+                .await
+                .unwrap();
             assert_error(market.fed.process(&tx, 3).await, "program rejected");
         }
         // Prove rejected attempts leave a valid transition available.
@@ -357,7 +394,8 @@ async fn actions_cannot_cross_resolution_states_or_redeem_unmatched_pairs() {
             burns,
             3000,
             1000,
-        );
+        )
+        .await;
         market.fed.process(&tx, 3).await.unwrap();
     }
 }
@@ -417,7 +455,7 @@ async fn repeated_issuance_transfers_and_partial_redemptions_exhaust_all_outcome
                 outputs,
             );
             sign_owner(&mut tx, 0, &program, point_in, &owner);
-            sign_transaction(&mut tx, &[owner, sponsor]).unwrap();
+            market.fed.sign(&mut tx, &[owner, sponsor]).await.unwrap();
             market.fed.process(&tx, 2).await.unwrap();
             for (index, (owner, yes, no)) in recipients.into_iter().enumerate() {
                 holdings.push(Holding {
@@ -430,7 +468,7 @@ async fn repeated_issuance_transfers_and_partial_redemptions_exhaust_all_outcome
             }
         }
         market.fed.vote(5).await;
-        let tx = resolve(&market, state, 10_000);
+        let tx = resolve(&market, state, 10_000).await;
         market.fed.process(&tx, 3).await.unwrap();
         market.vault = point(&tx, 0);
         let mut collateral = 10_000;
@@ -446,7 +484,8 @@ async fn repeated_issuance_transfers_and_partial_redemptions_exhaust_all_outcome
             for burns in [first, (yes - first.0, no - first.1)] {
                 let payout = (burns.0 + burns.1) * if state == 3 { 500 } else { 1000 };
                 collateral -= payout;
-                let tx = burn_transaction(&market, holding, 3, state, burns, collateral, payout);
+                let tx =
+                    burn_transaction(&market, holding, 3, state, burns, collateral, payout).await;
                 market.fed.process(&tx, 4).await.unwrap();
                 market.vault = point(&tx, 0);
                 holding.point = point(&tx, 1);
@@ -499,11 +538,11 @@ async fn distinct_competing_redemptions_rebuild_against_the_winning_successor() 
         native: 0,
     };
     market.fed.vote(5).await;
-    let tx = resolve(&market, 1, 2000);
+    let tx = resolve(&market, 1, 2000).await;
     market.fed.process(&tx, 2).await.unwrap();
     market.vault = point(&tx, 0);
-    let first_tx = burn_transaction(&market, &first, 3, 1, (1, 0), 1000, 1000);
-    let stale_tx = burn_transaction(&market, &second, 3, 1, (1, 0), 1000, 1000);
+    let first_tx = burn_transaction(&market, &first, 3, 1, (1, 0), 1000, 1000).await;
+    let stale_tx = burn_transaction(&market, &second, 3, 1, (1, 0), 1000, 1000).await;
     assert_ne!(first_tx.tx_hash(), stale_tx.tx_hash());
     market.fed.check_submission(&first_tx, 3).await.unwrap();
     market.fed.check_submission(&stale_tx, 3).await.unwrap();
@@ -512,7 +551,7 @@ async fn distinct_competing_redemptions_rebuild_against_the_winning_successor() 
     assert!(market.fed.contract(second.point).await.is_some());
     assert!(market.fed.contract(point(&stale_tx, 1)).await.is_none());
     market.vault = point(&first_tx, 0);
-    let rebuilt = burn_transaction(&market, &second, 3, 1, (1, 0), 0, 1000);
+    let rebuilt = burn_transaction(&market, &second, 3, 1, (1, 0), 0, 1000).await;
     market.fed.process(&rebuilt, 4).await.unwrap();
     assert_eq!(
         market
@@ -595,9 +634,14 @@ async fn exact_ecash_funding_charges_static_fees_returns_change_and_rolls_back_s
             .unwrap(),
     ));
     let initial = 1 << 20;
+    market.fed.prune(&mut issue, 1).await;
     let issue_fees = balance_change(&mut issue, initial, 3);
     assert!(issue_fees > 0);
-    sign_transaction(&mut issue, &[market.operator, request.key]).unwrap();
+    market
+        .fed
+        .sign(&mut issue, &[market.operator, request.key])
+        .await
+        .unwrap();
     let mut short = issue.clone();
     let mut change = short.outputs[3]
         .as_any()
@@ -606,7 +650,11 @@ async fn exact_ecash_funding_charges_static_fees_returns_change_and_rolls_back_s
         .clone();
     change.amount += Amount::from_msats(1);
     short.outputs[3] = output(change);
-    sign_transaction(&mut short, &[market.operator, request.key]).unwrap();
+    market
+        .fed
+        .sign(&mut short, &[market.operator, request.key])
+        .await
+        .unwrap();
     assert_error(market.fed.process(&short, 1).await, "unbalanced");
     assert!(market.fed.contract(market.vault).await.is_some());
     assert!(market.fed.contract(point(&short, 1)).await.is_none());
@@ -643,9 +691,14 @@ async fn exact_ecash_funding_charges_static_fees_returns_change_and_rolls_back_s
             ),
         ],
     );
+    market.fed.prune(&mut resolution, 2).await;
     let resolution_fees = balance_change(&mut resolution, 8000 + change_amount, 1);
     sign_owner(&mut resolution, 1, &program, change_point, &owner);
-    sign_transaction(&mut resolution, &[market.operator, owner]).unwrap();
+    market
+        .fed
+        .sign(&mut resolution, &[market.operator, owner])
+        .await
+        .unwrap();
     market.fed.process(&resolution, 2).await.unwrap();
     market.vault = point(&resolution, 0);
     change_point = point(&resolution, 1);
@@ -674,10 +727,15 @@ async fn exact_ecash_funding_charges_static_fees_returns_change_and_rolls_back_s
             actions(&[], &[(market.terms.yes, 8)]),
         ],
     );
+    market.fed.prune(&mut redeem, 3).await;
     let redeem_fees = balance_change(&mut redeem, 8000 + change_amount, 2);
     sign_owner(&mut redeem, 1, &program, positions, &owner);
     sign_owner(&mut redeem, 2, &program, change_point, &owner);
-    sign_transaction(&mut redeem, &[market.operator, owner, owner]).unwrap();
+    market
+        .fed
+        .sign(&mut redeem, &[market.operator, owner, owner])
+        .await
+        .unwrap();
     market.fed.process(&redeem, 3).await.unwrap();
     let final_note = market.fed.note(&payout, point(&redeem, 1)).await;
     let final_change = market
@@ -709,8 +767,12 @@ async fn admitted_transactions_are_revalidated_when_the_consensus_clock_changes(
     let market = Market::new().await;
     market.fed.vote(9).await;
     let (mut issue, sponsor) = issue_transaction(&market, &key(), 1, 1, 1000, 0);
-    sign_transaction(&mut issue, &[market.operator, sponsor]).unwrap();
-    let resolution = resolve(&market, 1, 0);
+    market
+        .fed
+        .sign(&mut issue, &[market.operator, sponsor])
+        .await
+        .unwrap();
+    let resolution = resolve(&market, 1, 0).await;
     market.fed.check_submission(&issue, 2).await.unwrap();
     market.fed.check_submission(&resolution, 2).await.unwrap();
     market.fed.vote(10).await;
@@ -721,7 +783,7 @@ async fn admitted_transactions_are_revalidated_when_the_consensus_clock_changes(
     }
     market
         .fed
-        .process(&resolve(&market, 3, 0), 3)
+        .process(&resolve(&market, 3, 0).await, 3)
         .await
         .unwrap();
 }

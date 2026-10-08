@@ -57,7 +57,7 @@ async fn assert_restored(client: &ClientHandle) {
         "conflict must return the identical notes without a paid reissue"
     );
 }
-async fn notes(client: &ClientHandle) -> Vec<SpendableNote> {
+pub(super) async fn notes(client: &ClientHandle) -> Vec<SpendableNote> {
     let mint = client
         .get_first_instance(&fedimint_mintv2_common::KIND)
         .unwrap();
@@ -566,6 +566,7 @@ async fn run() {
     );
     drop(restored);
     dan.shutdown().await;
+    super::pruning::check(&alice).await;
     drop(a);
     alice.shutdown().await;
     drop(b);
