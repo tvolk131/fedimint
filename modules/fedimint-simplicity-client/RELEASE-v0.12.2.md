@@ -169,8 +169,103 @@ routine package-test counts. The history and test correction received independen
 review.
 
 The earlier October 6/7 evidence files identify development-branch revisions and
-do not certify this branch. Passing these focused checks does not replace the
-remaining [beta checklist](BETA-CHECKLIST.md): new-candidate hardware/storage
-observations, deployment-baseline fixtures, and a small private signet pilot
-with real deposits and withdrawals remain separate. The application and live
-Mac/Pi federation remain on their existing development revisions.
+do not certify this branch. The following deployment checks now cover this
+candidate; the [beta checklist](BETA-CHECKLIST.md) retains the longer pilot and
+future upgrade work. The application and original Mac/Pi federation remain on
+their existing development revisions.
+
+### Packaged candidate and isolated Mac/Pi rehearsal
+
+Candidate `41100ea9a5ea7b5014789bc1a28d7006da568a34` has the same code and lockfile
+as the corrected hosted candidate above. On October 7 (local time), its explicit
+`fedimintd-simplicity` Nix package built and ran natively on ARM64 macOS. Its
+closure was 127,219,512 bytes; the output was
+`/nix/store/ydjksifn13gca0png1agw47747wrp9dq-fedimintd-simplicity`.
+Both deployed guardian builds reported the exact candidate through
+`version-hash`. The `flake.lock` SHA-256 was
+`fb4553899cb56f234b3cf639855d9e7c90ec1bf7f9961c19b16a58393167dba5`.
+
+Linux ARM64 release binaries were built using Rust 1.93.0 and Debian 12 in an
+ARM64 container, then installed and run on an 8 GB Pi 5 with Raspberry Pi OS,
+16 KiB OS pages, SD storage and active cooling. The build used
+`JEMALLOC_SYS_WITH_LG_PAGE=16`, generic ARM64 code and the repository release
+profile. Native startup and transferred hashes passed. This qualifies that
+Cargo deployment, not a Linux Nix closure. The [runbook](RUNBOOK.md) records the
+build settings and dependency checks.
+
+| Deployed artifact | SHA-256 |
+| --- | --- |
+| macOS Nix guardian | `3861b030521cc88abb8dda32bdc41714905bba081cf69c4d826b200ca859d980` |
+| Linux ARM64 guardian | `85ebb4386cd7c1d7e8a22890f062f7b7964499508a8a5f74a4b2e48be26fd979` |
+| macOS SDK wallet example | `ac9fd4cf2add415c15d8262ff54d2047519cff02a86bd48856437cf00ca64241` |
+| Linux ARM64 SDK wallet example | `ad0db75435472f15f54100feec1006a63c7ec8c87f8f3edd7a62646f910c41c0` |
+
+A fresh federation used two packaged guardians on the Mac and two on the Pi,
+normal DKG/TLS/WebSocket consensus, Mint v2, Wallet v2 and Simplicity, and real
+Bitcoin Core 31.1 regtest RPC. The SDK driver ran on the Mac; the Pi SDK received
+a native startup check. The isolated deployment passed:
+
+- A real 0.01 BTC deposit and a confirmed 10,000 sat withdrawal.
+- Owner funding/release, sender receipts, independent YES/NO assets, pair
+  issuance/recombination, and signed YES, NO and INVALID market resolutions.
+- Mnemonic-only recovery, exact recoverable holdings/history comparison,
+  recovered spending for all three outcomes, and fully spent owner history.
+- Two funded attempts consuming the same market state: acceptance with its
+  local acknowledgement withheld, restart, permanent conflict, exact original
+  note release, and a successful retry against the successor.
+- Process kill after durable operation submission, followed by completion
+  without duplicate history; process kill during initialized recovery,
+  offline confirmation that Simplicity recovery remained unfinished, then
+  reopening and completing recovery. That recovery had cursor/progress zero;
+  this does not demonstrate resumption from a partially scanned nonzero cursor.
+- One guardian offline at a time, with graceful stops and abrupt kills on both
+  hosts, transactions accepted by the remaining quorum, and catch-up afterward.
+- Restoring one guardian from populated checkpoint 4 while peers had completed
+  six sessions. The checkpoint already contains session 4; replay catches up
+  through session 5. Outcomes 4 and 5 matched across all four peers; market
+  vaults, asset origins and spent authority removal also agreed. The replaced
+  current database was retained, and the frozen checkpoint was unchanged.
+
+One comparison initially included nine spent public market predecessors that
+Bob had only watched before participating. The recovery contract excludes that
+local-only watch cache. The corrected assertion excludes exactly those known
+predecessors and their watch-only references, while comparing every owned and
+recoverable interaction and its full transaction ID. Independent review checked
+this boundary; no production fix was needed.
+
+Final log inspection also found startup `WriteConflict` panics in
+`submit_guardian_metadata` on the Pi. That handler is byte-for-byte unchanged
+from official v0.12.2: concurrent updates use `commit_tx()` without retrying the
+optimistic transaction. The API catches the panic and returns an error; the
+service retries, and both guardians subsequently completed the qualification.
+This is an upstream metadata-availability/logging follow-up, not a Simplicity
+consensus failure. It is retained with the evidence rather than silently counted
+as a clean log or folded into this module's patch set.
+
+Private baseline fixtures contain the populated guardian checkpoint, two market
+wallets with versioned descriptors, and two funded pending-intent wallets.
+All 74 files are checksummed. Disposable wallet copies loaded with OS-enforced
+network denial; template commitments and holdings/history matched, and both
+pending intents and their transaction/funding records were interpreted. The
+live checkpoint restoration supplies the guardian-loading check. These are
+same-version fixtures for a future upgrade test, not evidence of an upgrade
+that has not happened yet.
+
+A 60-second idle sample and 900-second functional-workload sample recorded Pi
+resources while the existing federation and other host workloads remained
+running. Sampled resident memory stayed below 178 MiB per candidate Pi guardian
+(process high-water marks below 190 MiB); sampled temperature reached 57.3 C.
+Kernel-attributed writes remained about 1.2 MiB/s per candidate guardian even
+at idle, versus about 22 KiB/s of logical syscall writes at idle. These counters
+are not NAND wear measurements. Whole-device SD counters include the original
+federation and filesystem activity. This short run does not establish saturated
+throughput, storage endurance, or DoS immunity; the existing storage concern
+remains. All isolated services were stopped after qualification.
+
+The private evidence bundle is retained outside build caches as
+`simplicity-v0.12.2-20261007`, with source, drivers, artifact identities, raw
+results and an offline fixture-loader command. It contains guardian secrets,
+synthetic mnemonics and regtest ecash: do not publish it or activate duplicate
+wallets. Only this summary is committed. The deployment and documentation
+received independent review. These follow-up commits change documentation
+only; the tested production code remains the candidate identified above.
