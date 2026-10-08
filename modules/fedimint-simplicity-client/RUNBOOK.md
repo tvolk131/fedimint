@@ -39,12 +39,18 @@ libraries. The tested environment was Debian 12 in an ARM64 container, with
 native execution on Raspberry Pi OS. This was not a Linux Nix-package test.
 
 ```sh
+CARGO_BUILD_JOBS=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_DEBUG=0 \
 JEMALLOC_SYS_WITH_LG_PAGE=16 CC=clang CXX=clang++ \
 RUSTFLAGS='--cfg tokio_unstable' \
 cargo build --locked --release -p fedimintd -p fedimint-cli \
     -p fedimint-simplicity-client --features fedimintd/experimental-simplicity \
     --bins --example wallet
 ```
+
+The October 8 Pi qualification uses the release-profile overrides above to fit
+the build host's memory: cross-crate LTO and debug information are disabled for
+that Cargo build. Record these settings with the artifact; the Mac Nix package
+uses its normal profile.
 
 Avoid `target-cpu=native` when the build host differs from the destination.
 Preserve the exact source revision when building from an archive; Fedimint's
@@ -236,7 +242,10 @@ its preserved configuration, secrets and supported database checkpoint. Retain
 or restore the federation history required for client recovery and verify
 catch-up against the other guardians. Do not let a stale restored guardian act
 as an independent federation. History/checkpoint retention and restoration must
-be rehearsed before opening the beta broadly.
+be rehearsed before opening the beta broadly. A completed-session counter does
+not prove that transactions in the still-open session have replayed. Wait for
+the relevant signed outcomes and verify the expected transactions and contract
+records before declaring restoration complete.
 
 Monitor disk growth and consensus progress during load. Per-transaction caps do
 not limit the number of concurrent submissions. There is no module-owned global
