@@ -63,6 +63,8 @@ impl ContractProgram {
         })
     }
 
+    /// Build an unpruned draft for signing/fee preparation, not submission.
+    /// Use `input_with_environment` for a complete spend.
     pub fn input(
         &self,
         outpoint: OutPoint,
@@ -71,6 +73,28 @@ impl ContractProgram {
     ) -> anyhow::Result<common::ContractInput> {
         let satisfied = self.0.satisfy(witnesses).map_err(|error| anyhow!(error))?;
         let (program, witness) = satisfied.redeem().to_vec_with_witness();
+        let input = common::ContractInput {
+            outpoint,
+            claim_key,
+            program,
+            witness,
+        };
+        common::runtime::decode_program(&input)?;
+        Ok(input)
+    }
+    /// Satisfy and prune against the actual transaction environment. The
+    /// original template remains available to construct another spend path.
+    pub fn input_with_environment(
+        &self,
+        outpoint: OutPoint,
+        claim_key: PublicKey,
+        witnesses: WitnessValues,
+        environment: &common::runtime::Environment,
+    ) -> anyhow::Result<common::ContractInput> {
+        let satisfied = self.0.satisfy(witnesses).map_err(|error| anyhow!(error))?;
+        let pruned = compiler::prune(satisfied.redeem(), environment)?;
+        common::runtime::check_commitment(&pruned, &environment.current)?;
+        let (program, witness) = pruned.to_vec_with_witness();
         let input = common::ContractInput {
             outpoint,
             claim_key,
@@ -118,6 +142,7 @@ pub fn sign_transaction(transaction: &mut Transaction, keys: &[Keypair]) -> anyh
 
 pub mod intent;
 
+pub mod pruning;
 mod quote;
 
 const LOG_CLIENT_SIMPLICITY: &str = "fm::client::module::simplicity";

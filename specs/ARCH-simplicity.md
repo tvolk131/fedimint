@@ -74,6 +74,41 @@ Live contract records, including opaque recovery annotations, disappear on spend
 Core history retains their original transactions for mnemonic recovery. Contract
 amounts, asset transfers, policies, and public witnesses remain transparent.
 
+## Pruned redemption programs
+
+Both execution versions require maximal pruning for the submitted witness and
+actual execution environment. Every revealed node must execute, and every
+revealed `case` must execute both branches at least once. A shared case can
+legitimately reveal both branches when different invocations use each one.
+Unexecuted branches are represented by hidden CMRs; a branch-free program needs
+no modification. The guardian tracks execution during its existing VM pass and
+checks these conditions without executing a second time. Canonical decoding and
+maximal sharing remain the pinned runtime's responsibility.
+
+The client prunes from the original template with valid witnesses and an explicit
+execution snapshot. The snapshot supplies authenticated input records and
+observed consensus clocks; guardians reconstruct their own context. Clocks may
+advance before inclusion. Pruning preserves the policy CMR but can change types,
+witness bytes, static cost and encoded size. Fees and resource caps apply to the
+submitted pruned representation. A hidden path cannot be recovered from that
+representation: rebuilding requires the original template and witness material.
+
+The persistent wallet signs and prunes a draft before selecting funding, then
+rebuilds and prunes with final signatures after funding and output finalization.
+If the final representation changes its fee, construction fails before committing
+wallet reservations or submission. Contracts whose branch selection depends on
+funding, nonce, signature bytes or finalized output contents may require the
+low-level fully funded builder. Local quotes accept a reusable snapshot; fetching
+one uses existing point-query APIs and discloses the requested outpoints to the
+guardians. Applications can instead supply metadata already authenticated from
+history. No new guardian endpoint or shared finalization interface is introduced.
+
+This is a predeployment consensus restriction on the experimental release branch,
+without a version bump. It preserves contract commitments and descriptor formats,
+but old unpruned conditional spends are no longer valid. Qualify fresh federations
+using the same revision on every guardian; do not replay older unpruned history
+or mix old and new validators without a separately designed upgrade boundary.
+
 ## Execution versions and explicit assets
 
 Execution version zero pins its runtime, permitted jets, commitments, and cost

@@ -11,10 +11,11 @@ use fedimint_client_module::transaction::{
     ClientInput, ClientInputBundle, ClientInputSM, ClientOutput, ClientOutputBundle,
     ClientOutputSM, TransactionBuilder,
 };
-use fedimint_core::core::OperationId;
+use fedimint_core::core::{DynInput, DynOutput, OperationId};
 use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::module::{AmountUnit, Amounts, ApiVersion, ModuleInit, MultiApiVersion};
 use fedimint_core::secp256k1::Keypair;
+use fedimint_core::transaction::{Transaction, TransactionSignature};
 use fedimint_core::{Amount, OutPoint, TransactionId, apply, async_trait_maybe_send};
 use futures::StreamExt as _;
 
@@ -356,6 +357,9 @@ impl SimplicityClientModule {
         creations: Vec<Keypair>,
         requested_receipt: Option<crate::receipt::SenderReceipt>,
     ) -> anyhow::Result<(OperationId, TransactionId)> {
+        let snapshot = self
+            .pruning_snapshot(spends.iter().map(|spend| spend.outpoint))
+            .await?;
         let mut dbtx = self.store.db.begin_transaction().await;
         let result = self
             .submit_dbtx(
@@ -367,6 +371,7 @@ impl SimplicityClientModule {
                     requested_receipt,
                     max_fee: None,
                     reserve_funding: false,
+                    snapshot,
                 },
             )
             .await?;
@@ -386,6 +391,7 @@ impl SimplicityClientModule {
             requested_receipt,
             max_fee,
             reserve_funding,
+            snapshot,
         } = submission;
         ensure!(
             !spends.is_empty() || !outputs.is_empty(),
@@ -418,6 +424,15 @@ impl SimplicityClientModule {
             );
             dbtx.insert_new_entry(&db::ReservationKey(spend.outpoint), &operation_id)
                 .await;
+            let observed = snapshot
+                .contracts
+                .get(&spend.outpoint)
+                .ok_or_else(|| anyhow::anyhow!("missing pruning input context"))?;
+            ensure!(
+                observed.output == contract.output
+                    && observed.creation_session == contract.creation_session,
+                "pruning context differs from authenticated wallet history"
+            );
             let (version, program) = self
                 .store
                 .keys
@@ -489,6 +504,38 @@ impl SimplicityClientModule {
         } else {
             None
         };
+        let authorization = Arc::new(Authorization {
+            federation: self.store.federation,
+            module: self.store.module,
+            spends: prepared,
+            creations,
+            receipt,
+            max_fee,
+            snapshot,
+        });
+        // Prune with valid signatures over a draft intent before core selects
+        // funding. Finalization rebuilds from the original template and checks
+        // that the final pruning has exactly the same fee.
+        let draft = Transaction {
+            inputs: inputs
+                .iter()
+                .map(|input| DynInput::from_typed(self.store.module, input.input.clone()))
+                .collect(),
+            outputs: outputs
+                .iter()
+                .cloned()
+                .map(|output| DynOutput::from_typed(self.store.module, output))
+                .collect(),
+            nonce: [0; 8],
+            signatures: TransactionSignature::NaiveMultisig(vec![]),
+        };
+        for (index, input) in authorization.pruned_inputs(&draft)? {
+            inputs[index].input = input
+                .as_any()
+                .downcast_ref::<ContractInput>()
+                .expect("authorization returns Simplicity inputs")
+                .clone();
+        }
         let state_gen: StateGenerator<SimplicityState> = Arc::new(move |range| {
             vec![SimplicityState {
                 operation_id,
@@ -530,17 +577,7 @@ impl SimplicityClientModule {
                 )),
             );
         }
-        builder = builder.with_finalizer(
-            self.store.module,
-            Arc::new(Authorization {
-                federation: self.store.federation,
-                module: self.store.module,
-                spends: prepared,
-                creations,
-                receipt,
-                max_fee,
-            }),
-        );
+        builder = builder.with_finalizer(self.store.module, authorization);
         let range = self
             .context
             .finalize_and_submit_transaction_dbtx(
@@ -615,4 +652,5 @@ pub(crate) struct Submission {
     pub requested_receipt: Option<crate::receipt::SenderReceipt>,
     pub max_fee: Option<Amount>,
     pub reserve_funding: bool,
+    pub snapshot: crate::pruning::PruningSnapshot,
 }

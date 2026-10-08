@@ -45,6 +45,14 @@ pub struct ContractOutput {
     pub extension: Option<assets::AssetExtension>,
 }
 
+/// Immutable contract context returned by the existing contract point query.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Encodable, Decodable)]
+pub struct StoredContract {
+    pub output: ContractOutput,
+    pub creation_session: u64,
+    pub creation_block_count: u64,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
 pub struct ContractInput {
     pub outpoint: OutPoint,

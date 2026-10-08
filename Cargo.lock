@@ -4990,6 +4990,7 @@ dependencies = [
  "serde",
  "serde_json",
  "simplicity-lang",
+ "simplicity-sys",
  "tempfile",
  "tokio",
 ]

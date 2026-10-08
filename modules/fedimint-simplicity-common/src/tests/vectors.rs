@@ -2,6 +2,8 @@
 mod execution;
 mod jets;
 mod mutation;
+#[cfg(feature = "compiler")]
+mod pruning;
 mod transcript;
 mod wire;
 

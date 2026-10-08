@@ -8,8 +8,15 @@ changes. The development branch remains available independently.
 
 ## Compatibility boundaries
 
-The port preserves the module's wire formats, consensus rules, fees, contract
-templates, funding reservations and authenticated session-history recovery.
+The original port preserved the development module's wire formats, consensus
+rules, fee formula, contract templates, funding reservations and authenticated
+session-history recovery. The subsequent maximal-pruning change restricts accepted
+spends in both execution versions before deployment: every revealed node must
+execute and every revealed case must use both branches. Commitments and descriptor
+formats are unchanged; fees use the submitted pruned representation. Old unpruned
+conditional history may fail replay. Use a fresh federation with matching guardian
+and client revisions, rather than treating this as a rolling upgrade. Earlier
+qualification results below certify their named revisions, not this change.
 Release-specific changes use v0.12.2's existing `anyhow` error boundaries and
 fallible client/connector constructors instead of importing the later client
 error refactor. No external backup file or deprecated backup endpoint is needed

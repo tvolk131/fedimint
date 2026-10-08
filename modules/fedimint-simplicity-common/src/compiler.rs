@@ -1,5 +1,7 @@
 //! Client-only SimplicityHL integration. Guardians decode bytecode directly.
 
+mod pruning;
+pub use pruning::prune;
 use simplicity::jet::{Core, Jet};
 use simplicityhl::ast::JetHinter;
 use simplicityhl::jet::{JetHL, SourceJetClassification, TargetJetClassification};

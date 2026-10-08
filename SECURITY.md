@@ -106,6 +106,16 @@ spends. Recovery requires the original federation's retained history and wallet
 software that still supports historical templates. It adds no ecash-like transfer
 privacy: values, policies and public witnesses remain visible.
 
+Guardians require maximal pruning of unused branches at spend time. Hidden
+branches reveal commitments rather than their programs, but this does not hide
+executed policy, values, asset flows or witness data. Shared branches used during
+execution remain revealed. Annotations remain arbitrary bounded bytes: encryption,
+padding and multi-party recovery envelopes are wallet responsibilities. Client
+pruning uses observed clocks and resolved inputs; default point queries disclose
+interest in those outpoints. An application can reuse authenticated history
+metadata instead. Consensus may advance between pruning and inclusion, requiring
+a newly built spend from the original template.
+
 Local wallet databases contain decrypted descriptors, derived-key salts,
 application secrets, and confirmed transaction history. Protect the local database
 like other wallet material; federation annotation encryption does not encrypt

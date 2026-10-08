@@ -25,7 +25,7 @@ async fn a_vote_before_execution_in_the_same_session_closes_claim_and_opens_refu
         }
         let funding = fed.fund(vec![output(contract)]).await;
         let origin = point(&funding, 0);
-        let build = |refund| {
+        let build = async |refund| {
             let input = program
                 .input(
                     origin,
@@ -34,11 +34,11 @@ async fn a_vote_before_execution_in_the_same_session_closes_claim_and_opens_refu
                 )
                 .unwrap();
             let (mut tx, sponsor) = sponsored(vec![DynInput::from_typed(SIMP, input)], vec![]);
-            sign_transaction(&mut tx, &[owner, sponsor]).unwrap();
+            fed.sign(&mut tx, &[owner, sponsor]).await.unwrap();
             tx
         };
-        let claim = build(false);
-        let refund = build(true);
+        let claim = build(false).await;
+        let refund = build(true).await;
         fed.vote(9).await;
         fed.check_submission(&claim, 7).await.unwrap();
         assert_error(fed.check_submission(&refund, 7).await, "program rejected");
@@ -61,10 +61,7 @@ async fn an_unspent_path_can_close_and_reopen_without_rebuilding_the_transaction
         let owner = key();
         let program = ContractProgram::compile(
             "fn main() {
-                match jet::eq_64(jet::fm_session_index(), 2) {
-                    true => {},
-                    false => assert!(jet::eq_64(jet::fm_session_index(), 4)),
-                }
+                assert!(jet::eq_64(jet::fm_session_index(), jet::fm_block_count()));
             }",
             arguments([]),
         )
@@ -83,12 +80,14 @@ async fn an_unspent_path_can_close_and_reopen_without_rebuilding_the_transaction
             .unwrap();
         let (mut tx, sponsor) = sponsored(vec![DynInput::from_typed(SIMP, input)], vec![]);
         sign_transaction(&mut tx, &[owner, sponsor]).unwrap();
+        fed.vote(2).await;
         fed.check_submission(&tx, 2).await.unwrap();
         for _ in 0..2 {
             assert_error(fed.check_submission(&tx, 3).await, "program rejected");
             assert_error(fed.process(&tx, 3).await, "program rejected");
             assert!(fed.contract(origin).await.is_some());
         }
+        fed.vote(4).await;
         fed.check_submission(&tx, 4).await.unwrap();
         fed.process(&tx, 4).await.unwrap();
         assert!(fed.contract(origin).await.is_none());

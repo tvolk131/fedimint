@@ -44,6 +44,7 @@ fn seeds() -> Vec<ContractInput> {
         let mut input = input();
         (input.program, input.witness) = satisfied.redeem().to_vec_with_witness();
         seeds.push(input);
+        seeds.extend(super::pruning::seeds());
     }
     seeds
 }

@@ -29,6 +29,7 @@ pub(crate) struct Authorization {
     pub creations: Vec<Keypair>,
     pub receipt: Option<crate::receipt::ReceiptPlan>,
     pub max_fee: Option<fedimint_core::Amount>,
+    pub snapshot: crate::pruning::PruningSnapshot,
 }
 
 impl fmt::Debug for Authorization {
@@ -87,6 +88,26 @@ impl TransactionFinalizer for Authorization {
     }
 
     fn finalize_inputs(&self, tx: &Transaction) -> Result<Vec<(usize, DynInput)>, anyhow::Error> {
+        let inputs = self.pruned_inputs(tx)?;
+        for (index, input) in &inputs {
+            let fee = |input: &DynInput| -> anyhow::Result<_> {
+                let input = input
+                    .as_any()
+                    .downcast_ref::<common::ContractInput>()
+                    .ok_or_else(|| anyhow::anyhow!("invalid Simplicity input"))?;
+                Ok(common::runtime::input_fee(input)?)
+            };
+            anyhow::ensure!(
+                fee(input)? == fee(&tx.inputs[*index])?,
+                "funding changed pruning fees; construct this contract with a complete transaction environment"
+            );
+        }
+        Ok(inputs)
+    }
+}
+
+impl Authorization {
+    pub(crate) fn pruned_inputs(&self, tx: &Transaction) -> anyhow::Result<Vec<(usize, DynInput)>> {
         self.spends
             .iter()
             .enumerate()
@@ -110,10 +131,13 @@ impl TransactionFinalizer for Authorization {
                 }
                 let input = spend
                     .program
-                    .input(
+                    .input_with_environment(
                         spend.outpoint,
                         spend.key.public_key(),
                         WitnessValues::from_map(witnesses),
+                        &self
+                            .snapshot
+                            .environment(self.federation, self.module, tx, index)?,
                     )
                     .map_err(anyhow::Error::msg)?;
                 Ok((index, DynInput::from_typed(self.module, input)))

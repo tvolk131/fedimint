@@ -23,7 +23,10 @@ fn db() -> Database {
 async fn builder(stopped: bool) -> ClientBuilder {
     let mut builder = Client::builder().await.unwrap();
     builder.with_module(DummyClientInit);
-    builder.with_module(SimplicityClientInit::default());
+    builder.with_module(SimplicityClientInit {
+        templates: Arc::new(pruning::Templates),
+        intents: Arc::new(pruning::Templates),
+    });
     if stopped {
         builder.stopped();
     }
@@ -172,19 +175,17 @@ async fn run() {
             AssetBundle::default(),
         )
         .unwrap();
-    let (rejected, _) = wallet
-        .submit(
-            vec![top_up_spend(id, false)],
-            vec![invalid_successor],
-            vec![],
-        )
-        .await
-        .unwrap();
-    assert!(wallet.await_operation(rejected).await.is_err());
-    assert!(matches!(
-        wallet.operation_status(rejected).await,
-        Some(fedimint_simplicity_client::states::OperationStatus::Rejected(_))
-    ));
+    assert!(
+        wallet
+            .submit(
+                vec![top_up_spend(id, false)],
+                vec![invalid_successor],
+                vec![],
+            )
+            .await
+            .is_err(),
+        "pruning rejects a currently invalid covenant before submission"
+    );
     assert_eq!(wallet.history().await, before_rejection);
     // The rejected operation must release its reservation for a corrected spend.
     submit(&wallet, vec![top_up_spend(id, true)], vec![], vec![]).await;
@@ -506,3 +507,4 @@ async fn direct_sender_receipts_restore_history_without_owning_recipient_contrac
 }
 
 mod intents;
+mod pruning;

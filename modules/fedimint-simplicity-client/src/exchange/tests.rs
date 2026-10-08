@@ -76,14 +76,23 @@ fn environment(
 }
 
 fn execute(program: &ContractProgram, env: &Environment, witness: WitnessValues) -> bool {
-    let input = program
-        .input(
-            env.inputs[env.input_index as usize].outpoint,
-            key(7).public_key(),
-            witness,
-        )
-        .unwrap();
-    runtime::execute(&input, env).is_ok()
+    let input = match program.input_with_environment(
+        env.inputs[env.input_index as usize].outpoint,
+        key(7).public_key(),
+        witness,
+        env,
+    ) {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("pruning error: {error:#}");
+            return false;
+        }
+    };
+    let result = runtime::execute(&input, env);
+    if let Err(error) = &result {
+        eprintln!("execution error: {error:#}");
+    }
+    result.is_ok()
 }
 
 fn order() -> LimitOrder {

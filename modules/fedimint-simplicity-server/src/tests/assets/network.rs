@@ -197,6 +197,38 @@ impl Federation {
             }
         }
     }
+    async fn sign(&self, tx: &mut Transaction, keys: &[Keypair]) -> anyhow::Result<()> {
+        let mut snapshot = fedimint_simplicity_client::pruning::PruningSnapshot {
+            session_index: self.api.session_count().await?,
+            block_count: self
+                .api
+                .with_module(self.simplicity)
+                .request_current_consensus("block_count".to_owned(), ApiRequestErased::new(()))
+                .await?,
+            ..Default::default()
+        };
+        for input in tx
+            .inputs
+            .iter()
+            .filter(|input| input.module_instance_id() == self.simplicity)
+        {
+            let input = input.as_any().downcast_ref::<ContractInput>().unwrap();
+            let stored: Option<StoredContract> = self
+                .api
+                .with_module(self.simplicity)
+                .request_current_consensus(
+                    "contract".to_owned(),
+                    ApiRequestErased::new(input.outpoint),
+                )
+                .await?;
+            if let Some(stored) = stored {
+                snapshot.contracts.insert(input.outpoint, stored);
+            }
+        }
+        crate::tests::pruning::prune_fixture(tx, self.id, self.simplicity, &snapshot);
+        sign_transaction(tx, keys)
+    }
+
     async fn submit(&self, tx: &Transaction) {
         let outcome = self
             .api
@@ -416,7 +448,7 @@ async fn network_market() {
         ],
     );
     assets::sign_creation(&mut genesis, fed.id, fed.simplicity, &creator).unwrap();
-    sign_transaction(&mut genesis, &[sponsor]).unwrap();
+    fed.sign(&mut genesis, &[sponsor]).await.unwrap();
     fed.submit(&genesis).await;
     let initial = fed.wait_contract(point(&genesis, 0)).await;
     assert_eq!(initial.creation_block_count, 5);
@@ -468,7 +500,7 @@ async fn network_market() {
         ],
     );
     let issue_sponsor = sponsor;
-    sign_transaction(&mut issue, &[operator, sponsor]).unwrap();
+    fed.sign(&mut issue, &[operator, sponsor]).await.unwrap();
     fed.submit(&issue).await;
     fed.wait_contract(point(&issue, 0)).await;
     let owner_input = |program: &ContractProgram, point, owner: &Keypair, signature| {
@@ -509,14 +541,16 @@ async fn network_market() {
         &alice,
         assets::signature_value(fed.id, fed.simplicity, &trade, &alice).unwrap(),
     );
-    sign_transaction(&mut trade, &[alice, sponsor]).unwrap();
+    fed.sign(&mut trade, &[alice, sponsor]).await.unwrap();
     fed.submit(&trade).await;
     fed.wait_contract(point(&trade, 0)).await;
     let (mut resolution, sponsor) = fed.sponsored(
         vec![input(point(&issue, 0), 2, 1)],
         vec![vault_output(2000, 1)],
     );
-    sign_transaction(&mut resolution, &[operator, sponsor]).unwrap();
+    fed.sign(&mut resolution, &[operator, sponsor])
+        .await
+        .unwrap();
     // The remaining three guardians must make progress while one is down.
     fed.stop(PeerId::from(3));
     fed.submit(&resolution).await;
@@ -587,7 +621,9 @@ async fn network_market() {
         &bob,
         assets::signature_value(fed.id, fed.simplicity, &redeem, &bob).unwrap(),
     );
-    sign_transaction(&mut redeem, &[operator, bob, sponsor]).unwrap();
+    fed.sign(&mut redeem, &[operator, bob, sponsor])
+        .await
+        .unwrap();
     fed.submit(&redeem).await;
     assert_eq!(
         fed.wait_contract(point(&redeem, 0)).await.output.amount,
@@ -600,7 +636,9 @@ async fn network_market() {
     // A different transaction cannot resurrect the spent vault after restart.
     let mut stale = issue.clone();
     stale.nonce = rand::random();
-    sign_transaction(&mut stale, &[operator, issue_sponsor]).unwrap();
+    fed.sign(&mut stale, &[operator, issue_sponsor])
+        .await
+        .unwrap();
     let rejected = fed
         .api
         .submit_transaction(stale)
