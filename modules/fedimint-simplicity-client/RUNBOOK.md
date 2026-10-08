@@ -1,9 +1,9 @@
 # Simplicity testnet beta: guardian and native SDK walkthrough
 
 This is an unaudited, opt-in module. Use a new federation on a Bitcoin test
-network. These instructions prepare a native SDK deployment; they do not claim
-that Pi 5 calibration, cross-architecture execution, or a sustained pilot has
-been completed. The [execution baseline](../fedimint-simplicity-common/README.md#beta-execution-baseline)
+network. These instructions prepare a native SDK deployment. Consult the
+[candidate evidence](RELEASE-v0.12.2.md) for completed checks and their limits;
+a sustained pilot remains separate. The [execution baseline](../fedimint-simplicity-common/README.md#beta-execution-baseline)
 defines the versions and rules all guardians must preserve.
 
 Track remaining release work and the scope of completed rehearsals in the
@@ -29,6 +29,31 @@ The equivalent Cargo build is:
 ```sh
 nix develop -c cargo build --locked --release -p fedimintd --features experimental-simplicity
 ```
+
+For Raspberry Pi OS on a Pi 5, check `getconf PAGESIZE` before building. The
+qualification machine uses 16 KiB OS pages. The Linux ARM64 Cargo build below
+uses jemalloc's logarithmic page-size setting `16` (64 KiB), which supports
+that machine; it does **not** mean 16 KiB. Build in an ARM64 Linux environment
+with Rust 1.93.0, Clang/libclang, CMake, pkg-config, protoc, and SQLite development
+libraries. The tested environment was Debian 12 in an ARM64 container, with
+native execution on Raspberry Pi OS. This was not a Linux Nix-package test.
+
+```sh
+JEMALLOC_SYS_WITH_LG_PAGE=16 CC=clang CXX=clang++ \
+RUSTFLAGS='--cfg tokio_unstable' \
+cargo build --locked --release -p fedimintd -p fedimint-cli \
+    -p fedimint-simplicity-client --features fedimintd/experimental-simplicity \
+    --bins --example wallet
+```
+
+Avoid `target-cpu=native` when the build host differs from the destination.
+Preserve the exact source revision when building from an archive; Fedimint's
+`FEDIMINT_BUILD_FORCE_GIT_HASH` must identify that verified source, not an
+unverified label. Copy the daemon, CLI and wallet example into a new deployment
+directory. Check hashes before and after transfer, inspect dynamic dependencies
+with `ldd`, and run `--help` and the daemon's `version-hash` on the destination
+before creating the federation. These Cargo executables depend on their target
+system libraries; they are not a portable Nix closure.
 
 Before distributing a candidate, run the focused checks for this patch set and
 repository lint; keep logs tied to the exact revision and platform. The hosted
@@ -180,6 +205,13 @@ descriptors or receipt application data. Protect the local database: it contains
 decrypted wallet material. Recovery does not recreate abandoned intents,
 original local operation IDs, local-only labels or watch-only subscriptions.
 Low-level program imports have no implicit recovery guarantee.
+
+For market wallets, calling `watch_market` alone is a local subscription.
+Participation can store its encrypted descriptor in federation history, but
+previously observed public predecessors from before that participation need
+not be reconstructed. Compare owned contracts and recoverable interactions,
+not the complete local watch cache. This does not permit dropping confirmed
+wallet interactions or fully spent owned-contract history.
 
 ## Operational failures and restoration
 
