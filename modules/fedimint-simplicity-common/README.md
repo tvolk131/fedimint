@@ -42,13 +42,62 @@ federations and default builds do not enable it. Wallet applications register
 `SimplicityClientInit::default()` in their client module registry. There is no
 CLI wallet integration yet.
 
-Guardian initialization, configuration validation, and client-config export reject
-module consensus versions other than `0.1` before decoding the configuration.
-Version `0.1` alone does not identify the rules of this undeployed prototype:
-mandatory pruning tightens acceptance without a version bump. Start a fresh
-federation with the exact same candidate on every guardian. Older configurations
-are not an upgrade boundary, and replay of older unpruned history or mixed-version
-rolling upgrades is unsupported.
+Guardian initialization, configuration validation, and client-config export require
+the `0.2` configuration baseline. It introduces an extensible consensus-item
+envelope and upgrade voting; it does not change contract execution versions,
+commitments, descriptors, jets or fees. Start a fresh federation with matching
+clients and guardians. Earlier `0.1` configurations/history used a different
+consensus-item encoding and are not an upgrade source. Old unpruned conditional
+history is also incompatible with the mandatory-pruning baseline.
+
+## Module upgrades
+
+Configuration version `0.2` is the fixed deployment baseline. The compiled
+`SUPPORTED_CONSENSUS_VERSION` and the active consensus version are separate.
+Installing a newer binary does not activate its rules or rewrite the original
+configuration. This release supports only the baseline; no new jets or execution
+environment are introduced by the upgrade mechanism.
+
+Every guardian polls the existing module API connections for every other
+guardian's `supported_consensus_version` (API 0.2). Polls have a ten-second
+per-peer timeout and repeat after thirty seconds. Missing, malformed or older
+responses prevent proposing a higher version. Observations are local and
+short-lived: they are neither consensus state nor a promise that a guardian will
+stay online. A peer can go offline after reporting support. There is no manual
+quorum-only activation override.
+
+Readiness permits a `ModuleConsensusVersion` vote in the ordinary ordered
+consensus stream. Each peer's highest vote is stored; missing votes mean the
+baseline. The active version is the highest version supported by a threshold of
+votes. It changes at the ordered item that reaches the threshold, including
+within a session. Rejected/redundant votes cannot lower it. After activation,
+losing a peer's readiness does not roll back the rules. Fewer than one third of
+guardians being faulty remains the security assumption; polling is a rollout
+policy, while ordered votes are the consensus boundary.
+
+The vote encoding accepts future version numbers even on old binaries. An old
+binary records minority votes but stops at unsupported activation; returning a
+normal item-rejection error would let it continue under divergent rules. Startup,
+transaction preparation/validation, and proposals also check support. A guardian
+restored from an older checkpoint stops when replay reaches that boundary.
+An activated database cannot be downgraded by reinstalling an old binary.
+
+`active_consensus_version` (API 0.2) exposes the durable version; the SDK queries
+it with federation quorum authentication before constructing submission snapshots.
+`SimplicityClientModule::active_consensus_version()` is also available to apps.
+Unsupported active rules produce an update-required error and put automatic
+intents into attention rather than indefinite transport retries. Actual funding
+and submission still require guardian validation against the current ordered
+state. Offline `PruningSnapshot::default()` conservatively assumes the baseline.
+
+When adding a future execution environment, extend the explicit execution-version
+activation table, preserve previous environments' semantics and cost schedules,
+and gate both creation and spending before expensive decoding. Keep accepting the
+original configuration baseline and the existing version-vote envelope. Unknown
+consensus variants round-trip through history decoding, but an old client is not
+promised to understand future contract formats. Spend-authorized migration, rather
+than activation alone, changes a contract's execution environment. Each concrete
+future release still needs its own compatibility fixtures and mixed-version tests.
 
 ## Guardian and client API
 
@@ -354,7 +403,7 @@ name or the shared workspace package version is not a sufficient identity.
 
 | Component | Pinned interpretation |
 | --- | --- |
-| Module kind / consensus version | `simplicity` / `0.1` |
+| Module kind / configuration baseline | `simplicity` / `0.2` |
 | Contract execution versions | `0` (bitcoin), `1` (bitcoin and explicit assets) |
 | Guardian Rust runtime | `simplicity-lang =0.9.0` |
 | C runtime and frame adapters | `simplicity-sys =0.8.0` |
@@ -389,12 +438,10 @@ is required by this baseline. Deployment and recovery procedures are in the
 
 ## Explicit assets and execution version one
 
-Module consensus version 0.1 adds execution version 1. Existing v0 outputs keep
-exactly their previous binary encoding, digest, jet allowlist, and fee behavior;
-v0 database records need no migration. New asset jets and `multiply_64` are
-rejected when spending a v0 output. Moving bitcoin into v1 requires an authorized
-transaction. All guardians must agree on the upgraded module consensus version;
-this is not automatic activation in an existing federation.
+The baseline supports execution versions 0 and 1. Version 1 adds explicit assets;
+v0 keeps its binary encoding, digest, jet allowlist and fee behavior. New asset
+jets and `multiply_64` are rejected when spending a v0 output. Moving bitcoin
+into v1 requires an authorized transaction.
 
 `program.asset_output(bitcoin, state, recovery, AssetBundle { balances,
 authorities })` creates a v1 UTXO. Balances have strictly sorted unique asset IDs

@@ -8,6 +8,16 @@ changes. The development branch remains available independently.
 
 ## Compatibility boundaries
 
+The upgrade-aware baseline uses module configuration version `0.2` and a new
+extensible consensus-item envelope. It requires fresh federation initialization;
+`0.1` prototype history/configurations are not a migration source. It preserves
+contract execution versions 0/1, jet costs, fees, commitments and descriptors.
+Future compatible releases retain the `0.2` config while separately advertising
+support and activating through ordered votes. See the
+[module upgrade protocol](../fedimint-simplicity-common/README.md#module-upgrades).
+Earlier qualification records below are evidence for their named revisions;
+they do not automatically qualify these new activation rules.
+
 The original port preserved the development module's wire formats, consensus
 rules, fee formula, contract templates, funding reservations and authenticated
 session-history recovery. The subsequent maximal-pruning change restricts accepted

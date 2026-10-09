@@ -1,6 +1,6 @@
 # Simplicity: remaining beta work
 
-Checkpoint: 2026-10-08. The [v0.12.2 port](RELEASE-v0.12.2.md) records the
+Checkpoint: 2026-10-09. The [v0.12.2 port](RELEASE-v0.12.2.md) records the
 release baseline and focused checks; earlier evidence remains tied to its
 original development revision. These seven release workstreams include completed bounded
 tests and work still requiring a chosen release candidate. The native market
@@ -89,9 +89,13 @@ they retain the outstanding platform, operational, or candidate-specific work.
    baseline under the October 6 evidence directory, plus a new 74-file
    v0.12.2 baseline retained outside build caches. Its four wallet copies loaded
    offline with networking denied, and its guardian checkpoint restored and
-   caught up live. A successor version is needed for the actual upgrade rehearsal.
+   caught up live. The new `0.2` baseline adds all-peer readiness, durable ordered
+   activation, fail-stop downgrade handling, and client capability discovery.
+   Deterministic tests emulate successor support; a concrete feature-bearing
+   successor still needs a mixed-binary rehearsal. The earlier `0.1` fixtures are
+   not an upgrade source for the new envelope.
 
-6. [x] **Exact release-candidate checks and packaging.** After fixes, run the
+6. [ ] **Exact release-candidate checks and packaging.** After fixes, run the
    focused module and affected shared-component checks, repository lint,
    native consensus comparison, sanitizers, and both guardian builds against
    one pinned revision atop the official release. Upstream general release
@@ -112,6 +116,8 @@ they retain the outstanding platform, operational, or candidate-specific work.
    not certify old unpruned history or a rolling upgrade. A new private
    71-file fixture baseline is retained. The appended release documentation
    changes no production code.
+   The upgrade-aware `0.2` baseline requires fresh candidate checks and deployment
+   fixtures; earlier Mac/Pi qualification does not certify this change.
    Linux Nix packaging and other deployment targets remain unqualified; use
    the documented, tested artifact paths.
 

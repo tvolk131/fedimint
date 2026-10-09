@@ -116,6 +116,7 @@ fn pruning_authorization(source: &str) -> (Authorization, Transaction) {
         receipt: None,
         max_fee: None,
         snapshot: crate::pruning::PruningSnapshot {
+            consensus_version: common::MODULE_CONSENSUS_VERSION,
             session_index: 3,
             block_count: 10,
             contracts: [(

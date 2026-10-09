@@ -329,7 +329,13 @@ async fn retention_budget_changes_neither_execution_result_nor_fees() {
             let mut dbtx = db.begin_transaction_nc().await;
             let mut dbtx = dbtx.to_ref_with_prefix_module_id(4).0;
             let mut context = context(&tx, 4);
-            let resolved = resolve(&mut dbtx, &context).await.unwrap();
+            let resolved = resolve(
+                &mut dbtx,
+                &context,
+                fedimint_simplicity_common::MODULE_CONSENSUS_VERSION,
+            )
+            .await
+            .unwrap();
             let prepared =
                 prepare_with_budget(&context, BTreeMap::from([(4, resolved)]), budget).unwrap();
             assert_eq!(
@@ -357,4 +363,38 @@ async fn retention_budget_changes_neither_execution_result_nor_fees() {
             assert_eq!(results[0], Err(input_error(4, ContractError::Rejected)));
         }
     }
+}
+
+#[tokio::test]
+async fn activation_gates_inputs_and_outputs_before_program_decoding() {
+    let (db, _) = federation();
+    let (mut input, stored) = spend(0, true);
+    seed(&db, 4, &input, &stored).await;
+    input.program = vec![255]; // Version rejection must precede a decoding failure.
+    let mut tx = transaction(vec![(4, input)]);
+    let before = ModuleConsensusVersion::new(0, 1);
+    let active = fedimint_simplicity_common::MODULE_CONSENSUS_VERSION;
+    let scoped = db.with_prefix_module_id(4).0;
+    let mut dbtx = scoped.begin_transaction_nc().await;
+    let error = resolve(&mut dbtx, &context(&tx, 4), before)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error, input_error(4, ContractError::Version));
+    assert!(resolve(&mut dbtx, &context(&tx, 4), active).await.is_ok());
+    tx.inputs.clear();
+    tx.outputs
+        .push(fedimint_core::core::DynOutput::from_typed(4, stored.output));
+    let error = resolve(&mut dbtx, &context(&tx, 4), before)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        error,
+        TransactionError::Output(fedimint_core::core::DynOutputError::from_typed(
+            4,
+            fedimint_simplicity_common::ContractOutputError(ContractError::Version),
+        ))
+    );
+    assert!(resolve(&mut dbtx, &context(&tx, 4), active).await.is_ok());
 }

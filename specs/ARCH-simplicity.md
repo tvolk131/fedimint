@@ -103,11 +103,28 @@ one uses existing point-query APIs and discloses the requested outpoints to the
 guardians. Applications can instead supply metadata already authenticated from
 history. No new guardian endpoint or shared finalization interface is introduced.
 
-This is a predeployment consensus restriction on the experimental release branch,
-without a version bump. It preserves contract commitments and descriptor formats,
-but old unpruned conditional spends are no longer valid. Qualify fresh federations
-using the same revision on every guardian; do not replay older unpruned history
-or mix old and new validators without a separately designed upgrade boundary.
+The deployment baseline preserves contract commitments and descriptor formats,
+but old unpruned conditional spends are no longer valid. Fresh deployments use
+the upgrade-aware consensus envelope described below; earlier prototype history
+is not an upgrade source.
+
+## Consensus activation
+
+The configuration baseline remains fixed while compiled support and active module
+rules are distinct. Guardian-local all-peer capability observations authorize
+proposing upgrade votes only. Ordinary ordered consensus persists monotone
+per-peer votes, and a threshold determines activation at an exact item boundary.
+Readiness observations never enter validation or recovery decisions. Missing peers
+delay automatic proposals; they do not reverse an activation already committed.
+
+Guardians must recognize future version votes independently of whether they can
+execute those rules. Unsupported activation stops the guardian, including on
+startup or checkpoint replay, instead of becoming an ordinary rejected item.
+Existing contracts retain the semantics and costs of their execution version;
+new environments require an activated module version before creation or spending.
+Clients discover active rules with quorum-authenticated module queries and check
+construction before reserving funding. History decoding preserves unknown consensus
+variants, without promising old wallets can interpret arbitrary future contracts.
 
 ## Execution versions and explicit assets
 

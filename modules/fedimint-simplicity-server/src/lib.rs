@@ -5,6 +5,7 @@ mod metrics;
 mod preparation;
 #[cfg(test)]
 mod tests;
+mod upgrades;
 mod validation;
 
 use std::collections::BTreeMap;
@@ -33,9 +34,12 @@ use fedimint_simplicity_common::assets::{AssetId, AssetRecord};
 use fedimint_simplicity_common::config::{
     SimplicityClientConfig, SimplicityConfig, SimplicityConfigConsensus, SimplicityConfigPrivate,
 };
+use fedimint_simplicity_common::consensus::{
+    ACTIVE_CONSENSUS_VERSION_ENDPOINT, SUPPORTED_CONSENSUS_VERSION_ENDPOINT,
+};
 use fedimint_simplicity_common::{
-    BlockCountVote, ContractError, ContractInput, ContractOutcome, ContractOutput,
-    ContractOutputError, MAX_CONTRACTS, MODULE_CONSENSUS_VERSION, SimplicityCommonInit,
+    ContractError, ContractInput, ContractOutcome, ContractOutput, ContractOutputError,
+    MAX_CONTRACTS, MODULE_CONSENSUS_VERSION, SimplicityCommonInit, SimplicityConsensusItem,
     SimplicityModuleTypes, output_fee,
 };
 use futures::StreamExt;
@@ -85,10 +89,20 @@ impl ServerModuleInit for SimplicityInit {
     }
     async fn init(&self, args: &ServerModuleInitArgs<Self>) -> anyhow::Result<Simplicity> {
         let cfg = load_config(args.cfg())?;
-        Ok(Simplicity {
+        let mut module = Simplicity {
             cfg,
             monitor: Some(args.server_bitcoin_rpc_monitor()),
-        })
+            upgrades: upgrades::Upgrades::new(args.our_peer_id()),
+        };
+        module
+            .ensure_supported(&mut args.db().begin_transaction_nc().await)
+            .await?;
+        module.upgrades.readiness = Some(upgrades::spawn_readiness(
+            args.module_api().clone(),
+            args.task_group(),
+            args.our_peer_id(),
+        ));
+        Ok(module)
     }
     fn trusted_dealer_gen(
         &self,
@@ -162,6 +176,7 @@ fn validate_peers(peers: &[PeerId]) -> anyhow::Result<()> {
 pub struct Simplicity {
     cfg: SimplicityConfig,
     monitor: Option<ServerBitcoinRpcMonitor>,
+    upgrades: upgrades::Upgrades,
 }
 
 impl Simplicity {
@@ -170,6 +185,7 @@ impl Simplicity {
     pub fn new_for_testing(peers: Vec<PeerId>) -> anyhow::Result<Self> {
         validate_peers(&peers)?;
         Ok(Self {
+            upgrades: upgrades::Upgrades::new(peers[0]),
             cfg: config(peers),
             monitor: None,
         })
@@ -195,23 +211,41 @@ impl ServerModule for Simplicity {
     type Common = SimplicityModuleTypes;
     type Init = SimplicityInit;
 
-    async fn consensus_proposal(&self, _dbtx: &mut DatabaseTransaction<'_>) -> Vec<BlockCountVote> {
-        self.monitor
-            .as_ref()
-            .and_then(|monitor| monitor.status())
-            .map(|status| vec![BlockCountVote(status.block_count)])
-            .unwrap_or_default()
+    async fn consensus_proposal(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+    ) -> Vec<SimplicityConsensusItem> {
+        self.assert_supported(dbtx).await;
+        let mut items = Vec::new();
+        if let Some(status) = self.monitor.as_ref().and_then(|monitor| monitor.status()) {
+            items.push(SimplicityConsensusItem::BlockCount(status.block_count));
+        }
+        if let Some(version) = self.upgrade_proposal(dbtx).await {
+            items.push(SimplicityConsensusItem::ModuleConsensusVersion(version));
+        }
+        items
     }
     async fn process_consensus_item<'a, 'b>(
         &'a self,
         dbtx: &mut DatabaseTransaction<'b>,
-        item: BlockCountVote,
+        item: SimplicityConsensusItem,
         peer: PeerId,
     ) -> anyhow::Result<()> {
+        self.assert_supported(dbtx).await;
         ensure!(self.cfg.consensus.peers.contains(&peer), "unknown guardian");
-        let previous = dbtx.get_value(&BlockVoteKey(peer)).await.unwrap_or(0);
-        ensure!(item.0 > previous, "redundant block count vote");
-        dbtx.insert_entry(&BlockVoteKey(peer), &item.0).await;
+        match item {
+            SimplicityConsensusItem::BlockCount(count) => {
+                let previous = dbtx.get_value(&BlockVoteKey(peer)).await.unwrap_or(0);
+                ensure!(count > previous, "redundant block count vote");
+                dbtx.insert_entry(&BlockVoteKey(peer), &count).await;
+            }
+            SimplicityConsensusItem::ModuleConsensusVersion(version) => {
+                self.process_version_vote(dbtx, peer, version).await?;
+            }
+            SimplicityConsensusItem::Default { variant, .. } => {
+                anyhow::bail!("unknown Simplicity consensus item {variant}");
+            }
+        }
         Ok(())
     }
     fn verify_transaction(
@@ -233,7 +267,9 @@ impl ServerModule for Simplicity {
         context: &ModuleTransactionContext<'_>,
     ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
         let call = metrics::VALIDATION.start(metrics::Phase::Resolve);
-        call.finish(preparation::resolve(dbtx, context).await)
+        self.assert_supported(dbtx).await;
+        let active = self.active_consensus_version(dbtx).await;
+        call.finish(preparation::resolve(dbtx, context, active).await)
     }
     fn prepare_kind_transaction(
         context: &ModuleTransactionContext<'_>,
@@ -264,6 +300,7 @@ impl ServerModule for Simplicity {
         context: &ModuleTransactionContext<'_>,
     ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
         let call = metrics::VALIDATION.start(metrics::Phase::Validate);
+        self.assert_supported(dbtx).await;
         call.finish(
             validation::validate(self, dbtx, context)
                 .await
@@ -357,6 +394,18 @@ impl ServerModule for Simplicity {
     }
     fn api_endpoints(&self) -> Vec<ApiEndpoint<Self>> {
         vec![
+            public_api_endpoint! {
+                ACTIVE_CONSENSUS_VERSION_ENDPOINT, ApiVersion::new(0, 2),
+                async |module: &Simplicity, context, _params: ()| -> ModuleConsensusVersion {
+                    Ok(module.active_consensus_version(&mut context.db().begin_transaction_nc().await).await)
+                }
+            },
+            public_api_endpoint! {
+                SUPPORTED_CONSENSUS_VERSION_ENDPOINT, ApiVersion::new(0, 2),
+                async |module: &Simplicity, _context, _params: ()| -> ModuleConsensusVersion {
+                    Ok(module.upgrades.supported)
+                }
+            },
             public_api_endpoint! {
                 "contract", ApiVersion::new(0, 0),
                 async |_module: &Simplicity, context, point: OutPoint| -> Option<StoredContract> {
