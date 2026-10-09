@@ -152,7 +152,7 @@ pub(crate) fn spawn_readiness(
             sender.send_replace(None);
             let ready = readiness(&api, our_peer, SUPPORTED_CONSENSUS_VERSION).await;
             sender.send_replace(ready);
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            fedimint_core::runtime::sleep(Duration::from_secs(30)).await;
         }
     });
     receiver
