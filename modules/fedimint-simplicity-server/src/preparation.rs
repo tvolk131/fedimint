@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use fedimint_core::core::{DynInputError, ModuleInstanceId};
 use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
+use fedimint_core::module::ModuleConsensusVersion;
 use fedimint_core::transaction::TransactionError;
 use fedimint_server_core::{ModuleTransactionContext, ModuleTransactionValidation};
-use fedimint_simplicity_common::assets::ASSET_VERSION;
+use fedimint_simplicity_common::consensus::check_execution_version;
 use fedimint_simplicity_common::{ContractError, ContractInput, resources, runtime};
 use simplicity::{Cost, RedeemNode};
 
@@ -34,6 +35,7 @@ fn input_error(instance: ModuleInstanceId, error: ContractError) -> TransactionE
 pub(crate) async fn resolve(
     dbtx: &mut DatabaseTransaction<'_>,
     context: &ModuleTransactionContext<'_>,
+    active: ModuleConsensusVersion,
 ) -> Result<ModuleTransactionValidation, TransactionError> {
     let mut contracts = Resolved::new();
     for (index, input) in context.transaction.inputs.iter().enumerate() {
@@ -49,10 +51,22 @@ pub(crate) async fn resolve(
             .get_value(&ContractKey(input.outpoint))
             .await
             .ok_or_else(|| error(ContractError::UnknownContract))?;
-        if stored.output.version > ASSET_VERSION {
-            return Err(error(ContractError::Version));
-        }
+        check_execution_version(stored.output.version, active).map_err(error)?;
         contracts.insert(index, stored);
+    }
+    for output in &context.transaction.outputs {
+        if output.module_instance_id() == context.module_instance_id {
+            let output = output
+                .as_any()
+                .downcast_ref::<fedimint_simplicity_common::ContractOutput>()
+                .ok_or_else(|| input_error(context.module_instance_id, ContractError::Context))?;
+            check_execution_version(output.version, active).map_err(|error| {
+                TransactionError::Output(fedimint_core::core::DynOutputError::from_typed(
+                    context.module_instance_id,
+                    fedimint_simplicity_common::ContractOutputError(error),
+                ))
+            })?;
+        }
     }
     Ok(ModuleTransactionValidation::new(contracts))
 }

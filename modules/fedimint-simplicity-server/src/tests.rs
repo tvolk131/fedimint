@@ -3,6 +3,7 @@ mod assets;
 mod config;
 mod preflight;
 mod pruning;
+mod upgrades;
 
 use std::collections::BTreeMap;
 
@@ -33,8 +34,8 @@ use fedimint_simplicity_client::{
     ContractProgram, TOP_UP_OR_RELEASE, placeholder_signature, sign_transaction, signature_value,
 };
 use fedimint_simplicity_common::{
-    BlockCountVote, ContractError, ContractInput, MAX_PROGRAM_BYTES, MAX_RECOVERY_BYTES,
-    MAX_WITNESS_BYTES, output_fee,
+    ContractError, ContractInput, MAX_PROGRAM_BYTES, MAX_RECOVERY_BYTES, MAX_WITNESS_BYTES,
+    SimplicityConsensusItem, output_fee,
 };
 
 use super::Simplicity;
@@ -291,7 +292,10 @@ impl Harness {
             .get_expect(SIMP)
             .process_consensus_item(
                 &mut dbtx.to_ref_nc(),
-                &DynModuleConsensusItem::from_typed(SIMP, BlockCountVote(count)),
+                &DynModuleConsensusItem::from_typed(
+                    SIMP,
+                    SimplicityConsensusItem::BlockCount(count),
+                ),
                 PeerId::from(0),
             )
             .await
@@ -658,30 +662,46 @@ async fn consensus_clock_requires_threshold_and_rejects_unknown_or_stale_votes()
     module
         .process_consensus_item(
             &mut tx.to_ref_nc(),
-            BlockCountVote(999_999),
+            SimplicityConsensusItem::BlockCount(999_999),
             PeerId::from(0),
         )
         .await
         .unwrap();
     module
-        .process_consensus_item(&mut tx.to_ref_nc(), BlockCountVote(100), PeerId::from(1))
+        .process_consensus_item(
+            &mut tx.to_ref_nc(),
+            SimplicityConsensusItem::BlockCount(100),
+            PeerId::from(1),
+        )
         .await
         .unwrap();
     assert_eq!(module.consensus_block_count(&mut tx.to_ref_nc()).await, 0);
     module
-        .process_consensus_item(&mut tx.to_ref_nc(), BlockCountVote(99), PeerId::from(2))
+        .process_consensus_item(
+            &mut tx.to_ref_nc(),
+            SimplicityConsensusItem::BlockCount(99),
+            PeerId::from(2),
+        )
         .await
         .unwrap();
     assert_eq!(module.consensus_block_count(&mut tx.to_ref_nc()).await, 99);
     assert!(
         module
-            .process_consensus_item(&mut tx.to_ref_nc(), BlockCountVote(1000), PeerId::from(99))
+            .process_consensus_item(
+                &mut tx.to_ref_nc(),
+                SimplicityConsensusItem::BlockCount(1000),
+                PeerId::from(99)
+            )
             .await
             .is_err()
     );
     assert!(
         module
-            .process_consensus_item(&mut tx.to_ref_nc(), BlockCountVote(98), PeerId::from(2))
+            .process_consensus_item(
+                &mut tx.to_ref_nc(),
+                SimplicityConsensusItem::BlockCount(98),
+                PeerId::from(2)
+            )
             .await
             .is_err()
     );

@@ -22,6 +22,7 @@ use futures::stream::BoxStream;
 use super::*;
 
 mod range;
+mod upgrades;
 
 #[derive(Clone, Copy, Debug)]
 enum Fault {

@@ -219,6 +219,31 @@ not be reconstructed. Compare owned contracts and recoverable interactions,
 not the complete local watch cache. This does not permit dropping confirmed
 wallet interactions or fully spent owned-contract history.
 
+## Upgrading a federation
+
+The first upgrade-aware deployment uses configuration baseline `0.2`. Create a
+fresh federation; a `0.1` prototype has a different consensus-item wire format.
+Retain this deployment's configuration, history and checkpoints as fixtures.
+
+For a future compatible release, install reviewed binaries on every guardian.
+They keep enforcing the active rules until all peers advertise sufficient support
+and ordered consensus votes activate the successor. Read each guardian's module
+`supported_consensus_version` and compare with the quorum-authenticated
+`active_consensus_version`. A missing or outdated peer delays automatic voting.
+Readiness can become stale if a guardian goes offline after answering; preserve
+normal quorum availability during the rollout.
+
+After activation, verify convergence, historical contract spends and recovery.
+Do not reinstall an older binary as a rollback: it must refuse the activated
+state. Restore with a binary supporting both the checkpoint and subsequent
+history. Never edit votes or the original configuration version to bypass this
+check. An old wallet encountering unsupported active rules needs a software
+update; restoring the mnemonic does not add missing protocol support.
+
+This release introduces the mechanism, not a production successor. Tests emulate
+a successor retaining existing execution environments. The first release adding
+jets or other rules needs its own mixed-binary activation rehearsal and fixtures.
+
 ## Operational failures and restoration
 
 If recovery stalls, check guardian reachability, available authenticated history,

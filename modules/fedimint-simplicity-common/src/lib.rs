@@ -5,6 +5,7 @@ pub mod assets;
 #[cfg(feature = "compiler")]
 pub mod compiler;
 pub mod config;
+pub mod consensus;
 pub mod jet;
 pub mod resources;
 pub mod runtime;
@@ -26,7 +27,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const KIND: ModuleKind = ModuleKind::from_static_str("simplicity");
-pub const MODULE_CONSENSUS_VERSION: ModuleConsensusVersion = ModuleConsensusVersion::new(0, 1);
+/// Immutable configuration baseline for the extensible consensus-item format.
+/// Future activations must keep accepting configurations with this version.
+pub const MODULE_CONSENSUS_VERSION: ModuleConsensusVersion = ModuleConsensusVersion::new(0, 2);
 pub const EXECUTION_VERSION: u32 = 0;
 pub const MAX_CONTRACTS: usize = 32;
 pub const MAX_PROGRAM_BYTES: usize = 8_192;
@@ -65,8 +68,18 @@ pub struct ContractInput {
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
 pub struct ContractOutcome;
 
+/// The version-vote variant and its encoding must remain readable by every
+/// future release, including releases that cannot execute the voted rules.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
-pub struct BlockCountVote(pub u64);
+pub enum SimplicityConsensusItem {
+    BlockCount(u64),
+    ModuleConsensusVersion(ModuleConsensusVersion),
+    #[encodable_default]
+    Default {
+        variant: u64,
+        bytes: Vec<u8>,
+    },
+}
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Error, Encodable, Decodable)]
 pub enum ContractError {
@@ -108,7 +121,7 @@ plugin_types_trait_impl_common!(
     ContractInput,
     ContractOutput,
     ContractOutcome,
-    BlockCountVote,
+    SimplicityConsensusItem,
     ContractError,
     ContractOutputError
 );
@@ -139,7 +152,7 @@ display_type!(
     ContractInput,
     ContractOutput,
     ContractOutcome,
-    BlockCountVote,
+    SimplicityConsensusItem,
     config::SimplicityClientConfig
 );
 

@@ -82,7 +82,7 @@ impl ClientModuleInit for SimplicityClientInit {
     type Module = SimplicityClientModule;
 
     fn supported_api_versions(&self) -> MultiApiVersion {
-        MultiApiVersion::try_from_iter([ApiVersion::new(0, 0)]).expect("one API version")
+        MultiApiVersion::try_from_iter([ApiVersion::new(0, 2)]).expect("one API version")
     }
 
     fn recovery_mode(&self) -> RecoveryMode {
@@ -401,6 +401,20 @@ impl SimplicityClientModule {
             !self.store.is_recovering().await,
             "wallet recovery must finish first"
         );
+        // Do this before durable operations or funding reservations. The
+        // snapshot was fetched before this write transaction was opened.
+        for output in &outputs {
+            crate::common::consensus::check_execution_version(
+                output.version,
+                snapshot.consensus_version,
+            )?;
+        }
+        for stored in snapshot.contracts.values() {
+            crate::common::consensus::check_execution_version(
+                stored.output.version,
+                snapshot.consensus_version,
+            )?;
+        }
         let operation_id = OperationId::new_random();
         let points: Vec<_> = spends.iter().map(|spend| spend.outpoint).collect();
         dbtx.insert_new_entry(&db::OperationResultKey(operation_id), &None)

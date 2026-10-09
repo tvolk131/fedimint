@@ -87,6 +87,17 @@ type-expansion, static execution, and transaction limits are part of this trust
 boundary; production use requires adversarial review of these limits and the
 unsafe adapters, consensus test vectors, and measured fee/cost calibration.
 
+The upgrade-aware configuration baseline is `0.2`; earlier prototype envelopes
+are incompatible and require a fresh federation. Unauthenticated module capability
+endpoints return only supported or active version numbers. Local all-peer support
+polling controls proposals, never validation. Ordered threshold votes activate
+rules durably; an unsupported activation must stop an old guardian instead of
+being rejected as an ordinary invalid item. Restoring an old checkpoint does not
+permit an old binary to continue past that boundary. Existing contract execution
+versions retain their semantics and costs; wallet software still needs to support
+the contract formats it recovers. See the
+[module upgrade protocol](modules/fedimint-simplicity-common/README.md#module-upgrades).
+
 Contract authorization binds the federation, module instance, spending references,
 claim keys, nonce, and all outer outputs. Core funding checks and transaction
 rollback enforce native bitcoin conservation. Bitcoin timelocks trust the

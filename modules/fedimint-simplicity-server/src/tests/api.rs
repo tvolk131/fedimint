@@ -62,7 +62,11 @@ async fn point_queries_bound_records_and_handle_spent_contracts() {
     dbtx.insert_new_entry(&AssetKey(ids[0]), &origin).await;
     for peer in peers {
         module
-            .process_consensus_item(&mut dbtx.to_ref_nc(), BlockCountVote(u64::MAX), peer)
+            .process_consensus_item(
+                &mut dbtx.to_ref_nc(),
+                SimplicityConsensusItem::BlockCount(u64::MAX),
+                peer,
+            )
             .await
             .unwrap();
     }

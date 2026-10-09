@@ -1,5 +1,6 @@
 //! Experimental contract builders and a persistent, history-recoverable wallet.
 mod authorization;
+pub mod capabilities;
 pub mod client;
 pub mod states;
 pub use client::{SimplicityClientInit, SimplicityClientModule, SpendIntent};

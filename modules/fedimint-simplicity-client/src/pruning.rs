@@ -20,11 +20,25 @@ use crate::common::{self, ContractInput, ContractOutput, StoredContract};
 
 /// Applications may reuse a snapshot across many local quotes. Supplying
 /// already authenticated metadata avoids contract-specific network queries.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PruningSnapshot {
+    /// Authenticated active module rules. Offline callers may use the baseline,
+    /// which conservatively enables only the original execution environments.
+    pub consensus_version: fedimint_core::module::ModuleConsensusVersion,
     pub session_index: u64,
     pub block_count: u64,
     pub contracts: BTreeMap<OutPoint, StoredContract>,
+}
+
+impl Default for PruningSnapshot {
+    fn default() -> Self {
+        Self {
+            consensus_version: common::MODULE_CONSENSUS_VERSION,
+            session_index: 0,
+            block_count: 0,
+            contracts: BTreeMap::new(),
+        }
+    }
 }
 
 impl PruningSnapshot {
@@ -57,6 +71,10 @@ impl PruningSnapshot {
             });
         }
         let current = inputs.get(index).context("invalid pruning input index")?;
+        common::consensus::check_execution_version(
+            current.contract.version,
+            self.consensus_version,
+        )?;
         let stored = &self.contracts[&current.outpoint];
         let mut actions = None;
         let mut outputs = Vec::new();
@@ -106,6 +124,8 @@ impl PruningSnapshot {
 /// Transport/quorum failures remain ordinary API errors and may be retried.
 #[derive(Debug, thiserror::Error)]
 pub enum InvalidPruningPlan {
+    #[error("unsupported Simplicity active consensus version {0}; update wallet software")]
+    UnsupportedConsensusVersion(fedimint_core::module::ModuleConsensusVersion),
     #[error("too many pruning inputs")]
     TooManyInputs,
     #[error("pruning input {0} is no longer unspent")]
@@ -126,8 +146,12 @@ impl SimplicityClientModule {
             points.len() <= common::MAX_CONTRACTS,
             InvalidPruningPlan::TooManyInputs
         );
+        let consensus_version = self.active_consensus_version().await?;
         if points.is_empty() {
-            return Ok(PruningSnapshot::default());
+            return Ok(PruningSnapshot {
+                consensus_version,
+                ..Default::default()
+            });
         }
         let api = self.context.module_api();
         let contracts = stream::iter(points)
@@ -150,6 +174,7 @@ impl SimplicityClientModule {
             .try_collect()
             .await?;
         Ok(PruningSnapshot {
+            consensus_version,
             contracts,
             session_index: self.context.global_api().session_count().await?,
             block_count: self.consensus_block_count().await?,
