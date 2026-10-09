@@ -116,8 +116,11 @@ they retain the outstanding platform, operational, or candidate-specific work.
    not certify old unpruned history or a rolling upgrade. A new private
    71-file fixture baseline is retained. The appended release documentation
    changes no production code.
-   The upgrade-aware `0.2` baseline requires fresh candidate checks and deployment
-   fixtures; earlier Mac/Pi qualification does not certify this change.
+   The upgrade-aware `0.2` baseline has a separate
+   [qualification record](RELEASE-v0.12.2.md#upgrade-activation-qualification-october-9-2026).
+   Its focused hosted checks passed at `62f13634bcc`, including both guardian builds.
+   Fresh Mac/Pi deployment artifacts and guardian/wallet fixtures remain outstanding;
+   earlier Mac/Pi qualification does not certify this change.
    Linux Nix packaging and other deployment targets remain unqualified; use
    the documented, tested artifact paths.
 

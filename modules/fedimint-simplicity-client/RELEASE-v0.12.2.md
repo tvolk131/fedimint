@@ -407,3 +407,58 @@ raw logs and public hosted reports. Its Mac Nix closure is protected by a local
 GC root. The bundle contains guardian secrets and synthetic wallet material:
 do not publish it or activate duplicate wallets. This documentation follow-up
 changes no production code.
+
+## Upgrade activation qualification: October 9, 2026
+
+The upgrade-aware code candidate is
+`62f13634bcc233c92f1af41bbcc7744895c9c0e5`: implementation `52e92a62915` plus
+a one-line switch to Fedimint's runtime sleep wrapper required by Linux Semgrep.
+It establishes the fresh `0.2` configuration baseline. The dependency lockfile,
+jet implementation and execution runtime are unchanged from the qualified pruning
+candidate; contract execution versions, commitments, descriptor formats and fee
+coefficients remain unchanged.
+
+Local Mac checks passed 134 tests/scenarios across common, client and server code,
+including four real four-guardian network scenarios. Eleven new regressions cover
+readiness with outdated/offline/malformed/silent peers, ordered threshold
+activation, minority/invalid votes, unsupported-binary stopping, real RocksDB
+reopen and pre-activation checkpoint replay, support/active API separation,
+input/output activation gates before decoding, unchanged v0/v1 spending and fees,
+future consensus-item encodings, and signed mnemonic-history recovery. Clippy,
+formatting and the local repository hooks passed. Independent implementation and
+runtime-wrapper reviews reported no blockers.
+
+[The final hosted run](https://github.com/tvolk131/fedimint/actions/runs/37977337010)
+passed all six jobs: 347 module/shared tests, two legacy mint-v2 migration tests,
+the four network scenarios, example compilation, Clippy, repository lint, both
+ordinary and Simplicity-enabled guardian builds, native architecture comparison,
+and ASan/leak checks. The initial run's only reported failure was the Linux
+Semgrep sleep-wrapper rule; the final candidate resolves it.
+
+The final Linux x86-64, Linux ARM64 and ASan consensus/mutation observations match
+the Mac reports byte-for-byte, with the same hashes recorded in the preceding
+pruning qualification. The sanitizer run also passed its deliberate overflow
+and leak controls. These remain bounded checks, not exhaustive consensus or
+memory-safety proofs.
+
+The tests simulate a successor supporting version `0.3` while retaining the two
+existing execution environments. There is no production `0.3` feature set in this
+release. A concrete future release adding jets, contract formats or other rules
+must retain old semantics and receive its own mixed-binary activation rehearsal.
+
+The Mac's 100,000 seeded mutations used seed `5065796730156482561`, decoded 41,920
+candidates, successfully executed 30,673 and made 100,000 C-frame calls. Its
+consensus and mutation observations match the earlier pruning candidate; the
+new envelope has separate fixed-vector tests. Mac reports were collected at
+`52e92a62915`; the common crate is byte-identical at `62f13634bcc`.
+
+This qualification does not deploy the new baseline onto the existing Mac/Pi
+federation. Earlier `0.1` prototype envelopes/configurations are incompatible.
+Fresh `0.2` deployment artifacts, guardian/wallet fixtures and the chosen testnet
+pilot remain deployment work; earlier Mac/Pi artifact identities and restoration
+evidence must not be attributed to this candidate.
+
+The private evidence bundle `simplicity-v0.12.2-upgrades-20261009` is retained
+outside build caches with the candidate source, environments, local and hosted
+logs, reports and a checksum manifest. Only this summary is committed; this
+qualification follow-up changes no production code.
