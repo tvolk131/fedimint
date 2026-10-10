@@ -3,6 +3,7 @@ mod authorization;
 pub mod capabilities;
 pub mod client;
 pub mod states;
+pub mod status;
 pub use client::{SimplicityClientInit, SimplicityClientModule, SpendIntent};
 pub mod assets;
 pub mod descriptor;
