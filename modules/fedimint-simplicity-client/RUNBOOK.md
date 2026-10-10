@@ -312,3 +312,50 @@ alone is not evidence of an attack. Labels contain no transaction IDs, asset IDs
 contract commitments, wallet identifiers or raw error text. Compare per-guardian
 phase latency and active work with existing session progress and host CPU,
 memory, disk and thermal measurements when calibrating the Pi.
+
+
+## Local preflight diagnostics
+
+`fedimint_simplicity_client::preflight::analyze(&transaction, federation_id,
+&snapshots)` checks an exact candidate using a map of module IDs to
+`PruningSnapshot`s. It never queries guardians, opens a wallet, reserves notes,
+constructs signatures, prunes the candidate, or submits anything. Reuse context
+already held by the application; the existing `pruning_snapshot` helper can
+fetch context separately, disclosing the requested outpoints to guardians.
+Keep collection times and provenance alongside the supplied observations.
+
+The report separates passed, failed, and not-checked conditions. It includes
+aggregate static milliweight and redemption bytes across typed Simplicity
+instances, exact Simplicity input/output fees, per-input outer signatures and
+program execution/pruning, and pure asset conservation/authority checks.
+Funding/change and other modules' fees are outside this report; use the normal
+quote API for those. An unsigned draft can still undergo local program checks,
+but its missing outer authorization is reported as not checked.
+
+Consumed records and clocks are caller-supplied, not an atomic ledger snapshot.
+Default snapshots do not establish fresh clocks. Namespace-use markers and
+asset-registry membership are not checked. A passing report never guarantees
+inclusion: a concurrent spend or a clock transition can invalidate the exact
+same candidate. Unknown active versions stop local execution. Decode every
+known Simplicity instance with its module decoder; opaque foreign bytes cannot
+be inspected as Simplicity.
+
+The native example accepts a bounded JSON request on stdin:
+
+```sh
+cargo run --locked -p fedimint-simplicity-client --example diagnostics -- preflight < request.json
+```
+
+Request fields are `federation_id`, `transaction_hex` (consensus encoding), and
+`modules`, a JSON object mapping **every** Simplicity module ID to either `null`
+(context unavailable) or an object with `consensus_version`, `session_index`,
+`block_count`, and `contracts`. Contracts are a list of `[OutPoint,
+StoredContract]` pairs using their existing Serde representations. Unknown
+foreign modules retain their bytes. Requests are capped at 1 MiB.
+
+Treat this input as spending material: pipe it locally or protect any temporary
+file. The CLI prints only the report; it does not print signatures, witnesses,
+contract identifiers or recovery annotations. Parse errors omit input details.
+Exit zero means no checked condition failed, **not** that all checks were possible
+or that the transaction will be accepted. No networking is initialized for this
+command. Do not send the request to guardians or a remote diagnostic service.

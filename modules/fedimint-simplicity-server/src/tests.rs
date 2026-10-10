@@ -1,6 +1,7 @@
 mod api;
 mod assets;
 mod config;
+mod diagnostics;
 mod preflight;
 mod pruning;
 mod upgrades;

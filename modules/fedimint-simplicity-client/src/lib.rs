@@ -143,6 +143,7 @@ pub fn sign_transaction(transaction: &mut Transaction, keys: &[Keypair]) -> anyh
 
 pub mod intent;
 
+pub mod preflight;
 pub mod pruning;
 mod quote;
 

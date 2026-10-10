@@ -14,9 +14,9 @@ use fedimint_core::secp256k1::{Message, SECP256K1};
 use fedimint_core::transaction::{Transaction, TransactionError};
 use fedimint_core::{OutPoint, TransactionId};
 use fedimint_server_core::ModuleTransactionContext;
+use fedimint_simplicity_common::assets::accounting::balances;
 use fedimint_simplicity_common::assets::{
-    ASSET_VERSION, AssetActions, AssetId, AssetRecord, MAX_ASSETS, asset_id, namespace,
-    signature_hash_v1,
+    ASSET_VERSION, AssetActions, AssetId, AssetRecord, asset_id, namespace, signature_hash_v1,
 };
 use fedimint_simplicity_common::resources::check_output;
 use fedimint_simplicity_common::runtime::{
@@ -203,16 +203,6 @@ impl<'a> TransactionHashes<'a> {
     }
 }
 
-#[derive(Default)]
-struct Balance {
-    consumed: u128,
-    created: u128,
-    issued: u128,
-    burned: u128,
-    consumed_authorities: u32,
-    created_authorities: u32,
-}
-
 type Creations = Vec<(AssetId, AssetRecord)>;
 
 async fn validate_assets(
@@ -222,36 +212,11 @@ async fn validate_assets(
     outputs: &[EnvironmentOutput],
     actions: &AssetActions,
 ) -> Result<(Creations, Vec<[u8; 32]>), ContractError> {
-    let mut balances = BTreeMap::<AssetId, Balance>::new();
-    for input in inputs {
-        if let Some(bundle) = input.contract.bundle() {
-            for value in &bundle.balances {
-                balances.entry(value.asset).or_default().consumed += u128::from(value.quantity);
-            }
-            for id in &bundle.authorities {
-                balances.entry(*id).or_default().consumed_authorities += 1;
-            }
-        }
-    }
-    for output in outputs.iter().filter_map(|output| output.contract.as_ref()) {
-        if let Some(bundle) = output.bundle() {
-            for value in &bundle.balances {
-                balances.entry(value.asset).or_default().created += u128::from(value.quantity);
-            }
-            for id in &bundle.authorities {
-                balances.entry(*id).or_default().created_authorities += 1;
-            }
-        }
-    }
-    for value in &actions.issuance {
-        balances.entry(value.asset).or_default().issued += u128::from(value.quantity);
-    }
-    for value in &actions.burns {
-        balances.entry(value.asset).or_default().burned += u128::from(value.quantity);
-    }
-    if balances.len() > MAX_ASSETS {
-        return Err(ContractError::Limit);
-    }
+    let balances = balances(
+        inputs.iter().map(|input| &input.contract),
+        outputs.iter().filter_map(|output| output.contract.as_ref()),
+        actions,
+    )?;
     let mut creations = BTreeMap::new();
     let mut namespaces = BTreeSet::new();
     for creation in &actions.creations {
@@ -304,29 +269,15 @@ async fn validate_assets(
     }
     for (id, balance) in balances {
         if creations.contains_key(&id) {
-            // No balances or issuance may exist at genesis. Only one authority.
-            if balance.consumed != 0
-                || balance.created != 0
-                || balance.issued != 0
-                || balance.burned != 0
-                || balance.consumed_authorities != 0
-                || balance.created_authorities != 1
-            {
-                return Err(ContractError::Assets);
-            }
+            balance.check_genesis()?;
         } else {
-            if dbtx.get_value(&AssetKey(id)).await.is_none()
-                || balance.consumed_authorities > 1
-                || balance.created_authorities > balance.consumed_authorities
-                || (balance.issued != 0 && balance.consumed_authorities != 1)
-            {
+            if dbtx.get_value(&AssetKey(id)).await.is_none() {
                 return Err(ContractError::Assets);
             }
-            if balance.consumed + balance.issued != balance.created + balance.burned {
-                return Err(ContractError::Assets);
-            }
+            balance.check_existing()?;
         }
     }
+
     Ok((
         creations.into_iter().collect(),
         namespaces.into_iter().collect(),
