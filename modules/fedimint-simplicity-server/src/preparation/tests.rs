@@ -372,7 +372,7 @@ async fn activation_gates_inputs_and_outputs_before_program_decoding() {
     seed(&db, 4, &input, &stored).await;
     input.program = vec![255]; // Version rejection must precede a decoding failure.
     let mut tx = transaction(vec![(4, input)]);
-    let before = ModuleConsensusVersion::new(0, 1);
+    let before = ModuleConsensusVersion::new(0, 0);
     let active = fedimint_simplicity_common::MODULE_CONSENSUS_VERSION;
     let scoped = db.with_prefix_module_id(4).0;
     let mut dbtx = scoped.begin_transaction_nc().await;

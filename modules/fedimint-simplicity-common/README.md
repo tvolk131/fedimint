@@ -43,23 +43,25 @@ federations and default builds do not enable it. Wallet applications register
 CLI wallet integration yet.
 
 Guardian initialization, configuration validation, and client-config export require
-the `0.2` configuration baseline. It introduces an extensible consensus-item
+the `0.1` configuration baseline. It introduces an extensible consensus-item
 envelope and upgrade voting; it does not change contract execution versions,
 commitments, descriptors, jets or fees. Start a fresh federation with matching
-clients and guardians. Earlier `0.1` configurations/history used a different
-consensus-item encoding and are not an upgrade source. Old unpruned conditional
+clients and guardians. Earlier prototype configurations/history, including prototypes also labeled `0.1`,
+used a different consensus-item encoding and are not an upgrade source. The
+pre-release version label was reused; identify compatible artifacts by their
+source revision, not the version number alone. Old unpruned conditional
 history is also incompatible with the mandatory-pruning baseline.
 
 ## Module upgrades
 
-Configuration version `0.2` is the fixed deployment baseline. The compiled
+Configuration version `0.1` is the fixed deployment baseline. The compiled
 `SUPPORTED_CONSENSUS_VERSION` and the active consensus version are separate.
 Installing a newer binary does not activate its rules or rewrite the original
 configuration. This release supports only the baseline; no new jets or execution
 environment are introduced by the upgrade mechanism.
 
 Every guardian polls the existing module API connections for every other
-guardian's `supported_consensus_version` (API 0.2). Polls have a ten-second
+guardian's `supported_consensus_version` (API 0.1). Polls have a ten-second
 per-peer timeout and repeat after thirty seconds. Missing, malformed or older
 responses prevent proposing a higher version. Observations are local and
 short-lived: they are neither consensus state nor a promise that a guardian will
@@ -82,7 +84,7 @@ transaction preparation/validation, and proposals also check support. A guardian
 restored from an older checkpoint stops when replay reaches that boundary.
 An activated database cannot be downgraded by reinstalling an old binary.
 
-`active_consensus_version` (API 0.2) exposes the durable version; the SDK queries
+`active_consensus_version` (API 0.1) exposes the durable version; the SDK queries
 it with federation quorum authentication before constructing submission snapshots.
 `SimplicityClientModule::active_consensus_version()` is also available to apps.
 Unsupported active rules produce an update-required error and put automatic
@@ -403,7 +405,7 @@ name or the shared workspace package version is not a sufficient identity.
 
 | Component | Pinned interpretation |
 | --- | --- |
-| Module kind / configuration baseline | `simplicity` / `0.2` |
+| Module kind / configuration baseline | `simplicity` / `0.1` |
 | Contract execution versions | `0` (bitcoin), `1` (bitcoin and explicit assets) |
 | Guardian Rust runtime | `simplicity-lang =0.9.0` |
 | C runtime and frame adapters | `simplicity-sys =0.8.0` |

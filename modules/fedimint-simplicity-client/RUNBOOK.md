@@ -221,8 +221,11 @@ wallet interactions or fully spent owned-contract history.
 
 ## Upgrading a federation
 
-The first upgrade-aware deployment uses configuration baseline `0.2`. Create a
-fresh federation; a `0.1` prototype has a different consensus-item wire format.
+The first upgrade-aware deployment uses configuration baseline `0.1`. Create a
+fresh federation; earlier prototypes, including those also labeled `0.1`, have
+a different consensus-item wire format. The pre-release number was reused; use
+the qualified source revision and artifact hashes to identify this baseline.
+Do not open old prototype databases with these binaries.
 Retain this deployment's configuration, history and checkpoints as fixtures.
 
 For a future compatible release, install reviewed binaries on every guardian.

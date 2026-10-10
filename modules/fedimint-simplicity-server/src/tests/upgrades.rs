@@ -19,7 +19,7 @@ use tokio::sync::watch;
 use super::*;
 use crate::db::VersionVoteKey;
 
-const NEXT: ModuleConsensusVersion = ModuleConsensusVersion::new(0, 3);
+const NEXT: ModuleConsensusVersion = ModuleConsensusVersion::new(0, 2);
 
 fn module(supported: ModuleConsensusVersion) -> Simplicity {
     let mut module = Simplicity::new_for_testing((0..4).map(PeerId::from).collect()).unwrap();

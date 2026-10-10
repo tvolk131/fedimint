@@ -8,11 +8,14 @@ changes. The development branch remains available independently.
 
 ## Compatibility boundaries
 
-The upgrade-aware baseline uses module configuration version `0.2` and a new
-extensible consensus-item envelope. It requires fresh federation initialization;
-`0.1` prototype history/configurations are not a migration source. It preserves
+The first beta baseline uses module configuration version `0.1` and an
+extensible consensus-item envelope. The unreleased upgrade-aware `0.2` candidate
+was relabeled before the first release. It requires fresh federation initialization;
+earlier prototype history/configurations, including those also labeled `0.1`,
+are not a migration source. Identify compatibility by the qualified source
+revision and artifact hashes, not just the reused pre-release number. It preserves
 contract execution versions 0/1, jet costs, fees, commitments and descriptors.
-Future compatible releases retain the `0.2` config while separately advertising
+Future compatible releases retain the `0.1` config while separately advertising
 support and activating through ordered votes. See the
 [module upgrade protocol](../fedimint-simplicity-common/README.md#module-upgrades).
 Earlier qualification records below are evidence for their named revisions;
