@@ -465,3 +465,96 @@ The private evidence bundle `simplicity-v0.12.2-upgrades-20261009` is retained
 outside build caches with the candidate source, environments, local and hosted
 logs, reports and a checksum manifest. Only this summary is committed; this
 qualification follow-up changes no production code.
+
+## First-beta 0.1 qualification: October 9, 2026
+
+Candidate `d64925adb96b9705507cefd0786ef22ce44044ea` relabels the unreleased
+upgrade-aware baseline as module config/consensus/API `0.1`. Tests now emulate
+successor `0.2`; no production `0.2` feature set is introduced. Contract execution
+versions 0/1, dependency locks, VM/jets, fees and descriptors are unchanged.
+Earlier qualifications retain their original version labels and source identities.
+A fresh federation is required: earlier prototypes also called `0.1` are not a
+migration source. The existing application federation was left in place.
+
+The Mac passed 130 ordinary module tests, Clippy and repository commit hooks.
+Two explicit observation/mutation tests passed all 100,000 seeded cases. Linux
+ARM64, Linux x86-64, Mac ARM64 and Linux ASan observations match byte-for-byte,
+with the same report hashes and campaign counts recorded above.
+[All six hosted jobs passed](https://github.com/tvolk131/fedimint/actions/runs/38019201881):
+repository lint, both native architectures, their comparison, Linux ASan/leak
+checking, and the combined module/shared/guardian job. The last job passed 347
+ordinary module/shared tests, two mint-v2 migration tests, four network tests,
+module Clippy, example checks, and ordinary/opt-in guardian builds. Hosted build
+provenance is the exact checkout and retained release environment; `--version`
+reports `fedimintd 0.12.2` for both variants.
+
+The fresh rehearsal used two Mac guardians from the opt-in Nix package and two
+Pi guardians built in native Linux ARM64 with Rust 1.93.0. Linux used release
+optimization, LTO disabled, debug info disabled, one build job and
+`JEMALLOC_SYS_WITH_LG_PAGE=16`; startup and hashes were verified on the Pi's
+16 KiB-page Debian 13 OS. The initial 3 GiB compiler-container limit caused a
+confirmed cgroup OOM in `fedimintd`; the unchanged build passed with 5 GiB.
+This was a build-resource failure, not a module test failure. The Mac SDK and
+private rehearsal example were built from the candidate archive. The guardian
+artifacts report the candidate Git hash:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Mac Nix guardian | `a06245929d5e6aa6a1bbca8df23123628aa376de09854aac4423e7013af10e7c` |
+| Linux ARM64 guardian | `83cf277c5e8e11d37d370a544f298c8850a468dac4b7c53169ba7a1e3e17e7ef` |
+
+The four-guardian rehearsal passed:
+
+- Real Bitcoin Core regtest deposit and confirmed 10,000-sat withdrawal.
+- All peers reporting config, supported and active version `0.1`, including
+  after guardian restarts and checkpoint restoration.
+- Owner and market mnemonic-only recovery, identical recoverable holdings and
+  confirmed history, followed by spending; YES, NO and void market outcomes.
+- Competing intents, lost acknowledgement, funding reuse, and recovery of a
+  pending wallet operation after a forced process kill.
+- Recovery killed with durable cursor `1`, target `3` and incomplete progress.
+  Offline database inspection proved completed historical sessions remained
+  unprocessed; restart recovered identical holdings and 22 history entries.
+- Each guardian stopped or killed individually, continued transactions with
+  the remaining quorum, and catch-up after restart.
+- Restoration of the session-0 guardian checkpoint, matching all four signed
+  session outcomes through session 3 and all three markets' asset/vault records.
+- A frozen 71-file compatibility baseline: two recovered market wallets, two
+  pending-intent wallets and a guardian checkpoint. Disposable wallet copies
+  loaded with OS-enforced network denial and reproduced template commitments.
+
+The market-history comparison preserves the documented boundary:
+locally watched, spent public vault predecessors are not wallet-owned recovery
+records. The recovery checks used the software, mnemonics and federation, with
+no external wallet backup file.
+
+The 60-second idle and 900-second functional-window samples recorded Pi RSS
+below 189 MiB, sampled process high-water marks below 191 MiB and temperature
+below 59 C; final throttling status was zero. Idle kernel-attributed writes were
+about 1.24 MiB/s per guardian versus 22.5 KiB/s of logical syscall writes. This
+repeats the existing upstream write-amplification concern. Whole-device counters
+include other services; kernel accounting is not NAND wear. The window includes
+waiting/idle periods and competing host workloads, not saturated throughput,
+storage endurance or a DoS bound.
+
+Five caught upstream `submit_guardian_metadata` WriteConflict panics recurred
+on the Pi. All other error-level entries were expected consensus-network stream
+closures during deliberate shutdowns. No other panic or unsupported-version
+error was observed. The guardians continued and passed the live checks; the
+metadata conflict and background write volume remain separate upstream concerns.
+The proposed [metadata retry fix](https://github.com/fedimint/fedimint/pull/9313)
+is still open at qualification time and is not included in this candidate.
+
+All isolated rehearsal services were stopped. The private evidence bundle
+`simplicity-v0.12.2-beta01-20261009` is retained outside build caches with source,
+build settings, tested Mac/Pi binaries, SDK probes, fixtures, logs and hosted
+reports. All 991 manifest entries and the original 71 fixture checksums were
+verified after copying; the tested Mac Nix closure has a persistent GC root.
+The relabel, rehearsal harness and retention helper passed independent review.
+This qualification follow-up changes no production code.
+
+These checks qualify the fresh baseline for a controlled testnet beta using the
+documented artifact paths. Deployment storage, operators, Bitcoin backends and
+a small signet pilot remain to be chosen/run before a broader beta. Longer load
+and fuzzing campaigns remain ongoing hardening; a feature-bearing successor
+needs its own mixed-binary upgrade rehearsal.
