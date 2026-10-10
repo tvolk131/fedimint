@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ContractError, ContractInput, ContractOutput, MAX_CONTRACTS};
 
+pub mod accounting;
+
 pub const ASSET_VERSION: u32 = 1;
 pub const MAX_ASSETS: usize = 32;
 pub const CREATION_FEE_MSAT: u64 = 100;

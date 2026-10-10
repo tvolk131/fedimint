@@ -28,6 +28,12 @@ pub const CREATION_SIGNATURE_MILLIWEIGHT: u32 = 100_000;
 /// This does not verify funding, signatures, UTXO existence or asset
 /// accounting.
 pub fn check_transaction(transaction: &Transaction) -> Result<(), ContractError> {
+    transaction_cost(transaction).map(|_| ())
+}
+
+/// The same unsigned resource check, retaining the aggregate static cost for
+/// local diagnostics. No program executes until this whole-kind check passes.
+pub fn transaction_cost(transaction: &Transaction) -> Result<Cost, ContractError> {
     let cost = check_structure(transaction)?;
     check_programs(transaction, cost)
 }
@@ -41,6 +47,7 @@ pub fn check_signed_transaction(
 ) -> Result<(), TransactionError> {
     let cost = check_signed_structure(transaction, error_instance)?;
     check_programs(transaction, cost)
+        .map(|_| ())
         .map_err(|error| TransactionError::Input(DynInputError::from_typed(error_instance, error)))
 }
 
@@ -167,7 +174,7 @@ fn check_structure(transaction: &Transaction) -> Result<Cost, ContractError> {
     Ok(cost)
 }
 
-fn check_programs(transaction: &Transaction, mut cost: Cost) -> Result<(), ContractError> {
+fn check_programs(transaction: &Transaction, mut cost: Cost) -> Result<Cost, ContractError> {
     let limit = Cost::from_milliweight(MAX_TRANSACTION_MILLIWEIGHT);
     for input in &transaction.inputs {
         if let Some(contract) = input.as_any().downcast_ref::<ContractInput>() {
@@ -177,7 +184,7 @@ fn check_programs(transaction: &Transaction, mut cost: Cost) -> Result<(), Contr
             }
         }
     }
-    Ok(())
+    Ok(cost)
 }
 
 /// Output-only structural rules, shared with snapshot-dependent guardian
