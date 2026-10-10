@@ -35,16 +35,16 @@ fn consensus_envelope_preserves_future_votes_and_unknown_variants() {
     assert_eq!(
         SimplicityConsensusItem::ModuleConsensusVersion(MODULE_CONSENSUS_VERSION)
             .consensus_encode_to_vec(),
-        vec![1, 2, 0, 2]
+        vec![1, 2, 0, 1]
     );
 }
 
 #[test]
 fn execution_versions_require_activation_and_unknown_versions_are_never_enabled() {
     for execution in [0, 1] {
-        assert!(check_execution_version(execution, ModuleConsensusVersion::new(0, 1)).is_err());
+        assert!(check_execution_version(execution, ModuleConsensusVersion::new(0, 0)).is_err());
         check_execution_version(execution, MODULE_CONSENSUS_VERSION).unwrap();
-        check_execution_version(execution, ModuleConsensusVersion::new(0, 3)).unwrap();
+        check_execution_version(execution, ModuleConsensusVersion::new(0, 2)).unwrap();
     }
     assert!(check_execution_version(2, ModuleConsensusVersion::new(u32::MAX, u32::MAX)).is_err());
 }

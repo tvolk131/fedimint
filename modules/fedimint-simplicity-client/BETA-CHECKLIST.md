@@ -89,10 +89,10 @@ they retain the outstanding platform, operational, or candidate-specific work.
    baseline under the October 6 evidence directory, plus a new 74-file
    v0.12.2 baseline retained outside build caches. Its four wallet copies loaded
    offline with networking denied, and its guardian checkpoint restored and
-   caught up live. The new `0.2` baseline adds all-peer readiness, durable ordered
+   caught up live. The first beta `0.1` baseline adds all-peer readiness, durable ordered
    activation, fail-stop downgrade handling, and client capability discovery.
    Deterministic tests emulate successor support; a concrete feature-bearing
-   successor still needs a mixed-binary rehearsal. The earlier `0.1` fixtures are
+   successor still needs a mixed-binary rehearsal. Earlier prototype fixtures, including those also labeled `0.1`, are
    not an upgrade source for the new envelope.
 
 6. [ ] **Exact release-candidate checks and packaging.** After fixes, run the
@@ -116,9 +116,11 @@ they retain the outstanding platform, operational, or candidate-specific work.
    not certify old unpruned history or a rolling upgrade. A new private
    71-file fixture baseline is retained. The appended release documentation
    changes no production code.
-   The upgrade-aware `0.2` baseline has a separate
+   The upgrade mechanism has a separate
    [qualification record](RELEASE-v0.12.2.md#upgrade-activation-qualification-october-9-2026).
    Its focused hosted checks passed at `62f13634bcc`, including both guardian builds.
+   That unreleased `0.2` candidate is now relabeled `0.1` for the first beta;
+   the new candidate must record its own checks and deployment identities.
    Fresh Mac/Pi deployment artifacts and guardian/wallet fixtures remain outstanding;
    earlier Mac/Pi qualification does not certify this change.
    Linux Nix packaging and other deployment targets remain unqualified; use

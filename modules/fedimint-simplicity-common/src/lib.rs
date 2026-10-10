@@ -29,7 +29,7 @@ use thiserror::Error;
 pub const KIND: ModuleKind = ModuleKind::from_static_str("simplicity");
 /// Immutable configuration baseline for the extensible consensus-item format.
 /// Future activations must keep accepting configurations with this version.
-pub const MODULE_CONSENSUS_VERSION: ModuleConsensusVersion = ModuleConsensusVersion::new(0, 2);
+pub const MODULE_CONSENSUS_VERSION: ModuleConsensusVersion = ModuleConsensusVersion::new(0, 1);
 pub const EXECUTION_VERSION: u32 = 0;
 pub const MAX_CONTRACTS: usize = 32;
 pub const MAX_PROGRAM_BYTES: usize = 8_192;

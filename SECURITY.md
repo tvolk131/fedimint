@@ -87,8 +87,10 @@ type-expansion, static execution, and transaction limits are part of this trust
 boundary; production use requires adversarial review of these limits and the
 unsafe adapters, consensus test vectors, and measured fee/cost calibration.
 
-The upgrade-aware configuration baseline is `0.2`; earlier prototype envelopes
-are incompatible and require a fresh federation. Unauthenticated module capability
+The upgrade-aware configuration baseline is `0.1`; earlier prototype envelopes
+(including prototypes also labeled `0.1`) are incompatible and require a fresh
+federation. Compatibility requires the qualified source revision, not merely
+a matching pre-release version number. Unauthenticated module capability
 endpoints return only supported or active version numbers. Local all-peer support
 polling controls proposals, never validation. Ordered threshold votes activate
 rules durably; an unsupported activation must stop an old guardian instead of

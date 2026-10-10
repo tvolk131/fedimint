@@ -395,13 +395,13 @@ impl ServerModule for Simplicity {
     fn api_endpoints(&self) -> Vec<ApiEndpoint<Self>> {
         vec![
             public_api_endpoint! {
-                ACTIVE_CONSENSUS_VERSION_ENDPOINT, ApiVersion::new(0, 2),
+                ACTIVE_CONSENSUS_VERSION_ENDPOINT, ApiVersion::new(0, 1),
                 async |module: &Simplicity, context, _params: ()| -> ModuleConsensusVersion {
                     Ok(module.active_consensus_version(&mut context.db().begin_transaction_nc().await).await)
                 }
             },
             public_api_endpoint! {
-                SUPPORTED_CONSENSUS_VERSION_ENDPOINT, ApiVersion::new(0, 2),
+                SUPPORTED_CONSENSUS_VERSION_ENDPOINT, ApiVersion::new(0, 1),
                 async |module: &Simplicity, _context, _params: ()| -> ModuleConsensusVersion {
                     Ok(module.upgrades.supported)
                 }

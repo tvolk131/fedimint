@@ -82,7 +82,7 @@ impl ClientModuleInit for SimplicityClientInit {
     type Module = SimplicityClientModule;
 
     fn supported_api_versions(&self) -> MultiApiVersion {
-        MultiApiVersion::try_from_iter([ApiVersion::new(0, 2)]).expect("one API version")
+        MultiApiVersion::try_from_iter([ApiVersion::new(0, 1)]).expect("one API version")
     }
 
     fn recovery_mode(&self) -> RecoveryMode {

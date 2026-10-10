@@ -20,7 +20,7 @@ fn supported_configuration_loads_and_exports_client_config() {
 fn incompatible_versions_fail_before_decoding_the_payload() {
     for version in [
         ModuleConsensusVersion::new(0, 0),
-        ModuleConsensusVersion::new(0, 1),
+        ModuleConsensusVersion::new(0, 2),
         ModuleConsensusVersion::new(0, 3),
         ModuleConsensusVersion::new(1, 0),
     ] {
