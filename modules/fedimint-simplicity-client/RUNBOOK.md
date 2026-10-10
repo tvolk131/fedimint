@@ -313,7 +313,6 @@ contract commitments, wallet identifiers or raw error text. Compare per-guardian
 phase latency and active work with existing session progress and host CPU,
 memory, disk and thermal measurements when calibrating the Pi.
 
-
 ## Local preflight diagnostics
 
 `fedimint_simplicity_client::preflight::analyze(&transaction, federation_id,
@@ -359,3 +358,48 @@ contract identifiers or recovery annotations. Parse errors omit input details.
 Exit zero means no checked condition failed, **not** that all checks were possible
 or that the transaction will be accepted. No networking is initialized for this
 command. Do not send the request to guardians or a remote diagnostic service.
+
+## One-shot operator status
+
+The `status::query` SDK helper accepts an existing `DynGlobalApi`, module ID and
+positive request timeout. It queries existing supported/active-version and
+block-count module endpoints, plus the existing core `status` endpoint. It opens
+no wallet, touches no database, submits no votes or transactions, and requires
+no wallet/admin credentials (a federation's API access secret can still apply).
+
+```sh
+# The invite is read from stdin; no wallet directory or mnemonic is needed.
+cargo run --locked -p fedimint-simplicity-client --example diagnostics -- status --module 4 < invite.txt
+# Machine-readable report, including each guardian's existing core status:
+cargo run --locked -p fedimint-simplicity-client --example diagnostics -- status --module 4 --json < invite.txt
+```
+
+Replace `4` with the configured Simplicity instance ID. Configuration download
+and each individual query have a bounded timeout (default 10 seconds,
+`--timeout-seconds` accepts 1–300). The report issues four endpoint requests per
+guardian, at most four guardians concurrently, once each without retries.
+Configuration bootstrap uses the existing invite downloader with its own retries
+inside the same deadline. Bootstrap requires a quorum to download configuration,
+so the invite-only CLI cannot produce a partial report when fewer than a quorum
+are reachable. Applications with an already initialized API can call
+`status::query` directly without that bootstrap requirement. The invite and raw
+transport errors are not printed.
+
+Each field independently reports a value, timeout, or unavailable response.
+Unavailable includes an unsupported endpoint or malformed response; do not infer
+that the entire guardian is offline. Unknown future version numbers remain
+printable. A quorum-observed active version requires the normal Fedimint threshold
+of identical replies from distinct configured peers. Exit zero means this
+agreement was observed, not that every guardian is healthy or upgrade-ready.
+
+Collection start/end times delimit separate observations, not an atomic snapshot.
+Core status describes the responding guardian's view of peer connectivity,
+contributions and attention flags. Reachability from the operator's machine is a
+different observation. Equal session counts do not prove full synchronization;
+the module block count is not an individual Bitcoin backend tip. Differing active
+versions during activation/catch-up are not automatically a consensus failure.
+The endpoints do not expose pending upgrade votes or the local readiness cache.
+
+Use the existing guardian Prometheus endpoint and the validation metric guidance
+above for ongoing monitoring. This command adds no daemon, monitoring endpoint,
+watch mode, inferred health score, or new consensus behavior.

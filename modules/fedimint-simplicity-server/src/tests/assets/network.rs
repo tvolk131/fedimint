@@ -2,6 +2,8 @@
 //! module initialization and RocksDB. Bitcoin RPC and funding are simulated;
 //! exact ecash funding is covered by the separate transaction tests. Keep this
 //! separate from fast contract-policy tests.
+mod status;
+
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
