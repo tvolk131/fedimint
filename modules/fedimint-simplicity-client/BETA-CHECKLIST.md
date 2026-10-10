@@ -2,8 +2,8 @@
 
 Checkpoint: 2026-10-09. The [v0.12.2 port](RELEASE-v0.12.2.md) records the
 release baseline and focused checks; earlier evidence remains tied to its
-original development revision. These seven release workstreams include completed bounded
-tests and work still requiring a chosen release candidate. The native market
+original development revision. These seven workstreams separate bounded
+code/artifact qualification from the deployment and pilot work still outstanding. The native market
 application exercises the SDK, but does not replace module release checks. Use test
 funds throughout. The [runbook](RUNBOOK.md) covers deployment and recovery;
 the [module documentation](../fedimint-simplicity-common/README.md) describes
@@ -31,7 +31,7 @@ they retain the outstanding platform, operational, or candidate-specific work.
    [release evidence](RELEASE-v0.12.2.md). This is bounded vector coverage,
    not an exhaustive consensus-equivalence proof.
 
-2. [ ] **Execution fuzzing and sanitizers.** Extend the deterministic mutation
+2. [x] **Bounded execution fuzzing and sanitizers.** Extend the deterministic mutation
    probes into decoding, type inference, witnesses, VM execution, and the
    custom Rust/C frame adapters. Run bounded, instrumented campaigns and keep
    actionable reproducers as regression tests. This needs suitable sanitizer
@@ -41,10 +41,11 @@ they retain the outstanding platform, operational, or candidate-specific work.
    passed with leak detection enabled and verified deliberate Rust/C overflow
    and leak controls, resolving the Mac shutdown-scan tooling gap. See the
    [hosted CI evidence](BETA-EVIDENCE-2026-10-07-CI.md). **Remaining:**
-   broader/coverage-guided campaigns as warranted. The v0.12.2 candidate's
+   broader/coverage-guided campaigns as ongoing hardening, not an unfinished
+   first-beta gate. The v0.12.2 candidate's
    bounded native/ASan/leak checks passed. No memory-safety proof is implied.
 
-3. [ ] **Persistent failure and conflict coverage.** Exercise crashes and lost
+3. [x] **Persistent failure and conflict coverage.** Exercise crashes and lost
    responses around funding reservation, transaction submission/acceptance,
    release, retries, and cancellation. Add precise clock/deadline tests,
    including clock votes ordered before a transaction in the same session,
@@ -58,8 +59,9 @@ they retain the outstanding platform, operational, or candidate-specific work.
    price history. The v0.12.2 candidate passed the four automated guardian
    scenarios and a fresh real-Bitcoin Mac/Pi rehearsal of lost acknowledgement,
    conflict/funding reuse, operation kill, and mnemonic recovery followed by
-   spending. Recovery was killed before its first scanned page; interruption
-   after a nonzero history cursor remains additional coverage.
+   spending. The first-beta `0.1` rehearsal also killed recovery with durable cursor `1`
+   and target `3`, then resumed to identical holdings and 22 confirmed history
+   entries. This closes the previously outstanding nonzero-cursor case.
 
 4. [ ] **Longer mixed-load and storage runs.** Extend the bounded Pi/Mac runs
    with sustained valid/invalid traffic and growing recovery history. Measure
@@ -78,53 +80,37 @@ they retain the outstanding platform, operational, or candidate-specific work.
    pilot observation window; bounded bursts do not establish saturated
    throughput, storage endurance or DoS immunity.
 
-5. [ ] **Compatibility fixtures and coordinated upgrades.** Preserve guardian
+5. [x] **Compatibility baseline and upgrade foundation.** Preserve guardian
    and client databases, descriptors, pending operations, and template versions
    from the first deployment baseline. Establish fixtures now and freeze them
    against the chosen candidate. Exercise coordinated upgrade/recovery when a
    successor exists; full future-version validation cannot happen beforehand.
    Do not imply support for rolling mixed-version consensus or migrations from
    every undeployed prototype.
-   **Completed:** private, checksummed guardian/client/template/pending-operation
-   baseline under the October 6 evidence directory, plus a new 74-file
-   v0.12.2 baseline retained outside build caches. Its four wallet copies loaded
-   offline with networking denied, and its guardian checkpoint restored and
-   caught up live. The first beta `0.1` baseline adds all-peer readiness, durable ordered
-   activation, fail-stop downgrade handling, and client capability discovery.
-   Deterministic tests emulate successor support; a concrete feature-bearing
-   successor still needs a mixed-binary rehearsal. Earlier prototype fixtures, including those also labeled `0.1`, are
-   not an upgrade source for the new envelope.
+   **Completed:** the first-beta `0.1` candidate has a private, checksummed
+   71-file guardian/client/template/pending-operation baseline retained outside
+   build caches, with all checksums verified. Its four wallet copies loaded
+   offline with networking denied;
+   the guardian checkpoint restored and caught up live. The upgrade foundation
+   adds all-peer readiness, durable ordered activation, fail-stop downgrade
+   handling, and client capability discovery. Deterministic tests emulate
+   successor `0.2` support. A concrete feature-bearing successor still needs
+   its own mixed-binary rehearsal; that is future-release work. Earlier
+   prototype fixtures, including those also labeled `0.1`, are not an upgrade
+   source for this envelope.
 
-6. [ ] **Exact release-candidate checks and packaging.** After fixes, run the
-   focused module and affected shared-component checks, repository lint,
-   native consensus comparison, sanitizers, and both guardian builds against
-   one pinned revision atop the official release. Upstream general release
-   qualification is not repeated wholesale. Resolve or explicitly disposition outstanding lint
-   failures, verify reproducible deployment including the Pi's 16 KiB pages,
-   and obtain focused independent review. Update the runbook and retain the
-   artifact identities and validation evidence. Prior rehearsals do not certify
-   a later candidate; desktop-app packaging is a separate deliverable.
-   The [v0.12.2 candidate evidence](RELEASE-v0.12.2.md#candidate-validation-october-7-2026)
-   records this port's exact revision and focused validation. Candidate
-   `41100ea9a5e` now has a built/launched macOS Nix package, installed Linux ARM64
-   Cargo binaries on the Pi's 16 KiB-page OS, matching native SDK, real Bitcoin
-   deposit/withdrawal, and isolated four-guardian recovery/outage/restoration
-   evidence. The maximal-pruning candidate `928747c0538` repeated the focused hosted checks
-   and fresh Mac/Pi rehearsal; see its
-   [qualification record](RELEASE-v0.12.2.md#maximal-pruning-qualification-october-8-2026).
-   It requires a fresh federation with matching clients and guardians; it does
-   not certify old unpruned history or a rolling upgrade. A new private
-   71-file fixture baseline is retained. The appended release documentation
-   changes no production code.
-   The upgrade mechanism has a separate
-   [qualification record](RELEASE-v0.12.2.md#upgrade-activation-qualification-october-9-2026).
-   Its focused hosted checks passed at `62f13634bcc`, including both guardian builds.
-   That unreleased `0.2` candidate is now relabeled `0.1` for the first beta;
-   the new candidate must record its own checks and deployment identities.
-   Fresh Mac/Pi deployment artifacts and guardian/wallet fixtures remain outstanding;
-   earlier Mac/Pi qualification does not certify this change.
+6. [x] **Exact release-candidate checks and packaging.** The first-beta
+   candidate is `d64925adb96`, on official Fedimint v0.12.2. Its
+   [qualification record](RELEASE-v0.12.2.md#first-beta-01-qualification-october-9-2026)
+   identifies the source, dependency locks, artifacts, review and checks.
+   The fresh two-Mac/two-Pi federation passed real Bitcoin funding/withdrawal,
+   market/recovery/conflict/interruption tests, all four outage/rejoin cases,
+   and populated-checkpoint restoration. All peers report active/supported
+   `0.1` before and after restoration. All six exact-candidate hosted jobs passed,
+   including 349 ordinary/migration tests and four network tests. The private
+   evidence bundle is retained outside build caches with verified checksums.
    Linux Nix packaging and other deployment targets remain unqualified; use
-   the documented, tested artifact paths.
+   the documented, tested artifact paths. Desktop-app packaging is separate.
 
 7. [ ] **Small private signet pilot.** Before broader beta, operate the chosen
    candidate with actual testnet deposits/withdrawals, monitoring, retained
@@ -136,7 +122,9 @@ they retain the outstanding platform, operational, or candidate-specific work.
 Separate upstream follow-up: the v0.12.2 rehearsal observed caught API-handler
 panics when concurrent guardian-metadata updates encountered database write
 conflicts. The unchanged upstream handler lacks an optimistic-transaction retry;
-the guardians continued and passed the qualification. See the release evidence.
+the guardians continued and passed the qualification.
+[The retry fix](https://github.com/fedimint/fedimint/pull/9313) remains an open
+upstream PR at this checkpoint and is not included here. See the release evidence.
 This and the existing background write-volume concern are not Simplicity
 consensus changes.
 
