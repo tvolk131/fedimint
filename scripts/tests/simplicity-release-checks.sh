@@ -25,7 +25,8 @@ case "${1:-tests}" in
         rustup run "$simplicity_toolchain" cargo test --release --locked \
             -p fedimint-mintv2-tests --test fedimint_mintv2_tests db::test_ -- \
             --test-threads=2
-        rustup run "$simplicity_toolchain" cargo check --release --locked \
+        # Compile every client example and execute their embedded CLI tests.
+        rustup run "$simplicity_toolchain" cargo test --release --locked \
             -p fedimint-simplicity-client --examples
         ;;
     network)
