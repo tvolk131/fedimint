@@ -1,6 +1,6 @@
 # Simplicity: remaining beta work
 
-Checkpoint: 2026-10-09. The [v0.12.2 port](RELEASE-v0.12.2.md) records the
+Checkpoint: 2026-10-10. The [v0.12.2 port](RELEASE-v0.12.2.md) records the
 release baseline and focused checks; earlier evidence remains tied to its
 original development revision. These seven workstreams separate bounded
 code/artifact qualification from the deployment and pilot work still outstanding. The native market
@@ -99,18 +99,22 @@ they retain the outstanding platform, operational, or candidate-specific work.
    prototype fixtures, including those also labeled `0.1`, are not an upgrade
    source for this envelope.
 
-6. [x] **Exact release-candidate checks and packaging.** The first-beta
-   candidate is `d64925adb96`, on official Fedimint v0.12.2. Its
-   [qualification record](RELEASE-v0.12.2.md#first-beta-01-qualification-october-9-2026)
+6. [x] **Exact release-candidate checks and packaging.** Release
+   `v0.12.2-simplicity-beta.1` tags code candidate `ac5b7094c77` on official
+   Fedimint v0.12.2; module config/consensus/API remain `0.1`. Its
+   [final qualification record](RELEASE-v0.12.2.md#final-beta-candidate-october-10-2026)
    identifies the source, dependency locks, artifacts, review and checks.
-   The fresh two-Mac/two-Pi federation passed real Bitcoin funding/withdrawal,
-   market/recovery/conflict/interruption tests, all four outage/rejoin cases,
-   and populated-checkpoint restoration. All peers report active/supported
-   `0.1` before and after restoration. All six exact-candidate hosted jobs passed,
-   including 349 ordinary/migration tests and four network tests. The private
-   evidence bundle is retained outside build caches with verified checksums.
-   Linux Nix packaging and other deployment targets remain unqualified; use
-   the documented, tested artifact paths. Desktop-app packaging is separate.
+   All six exact-candidate hosted jobs passed, including 361 ordinary/migration/
+   CLI tests and five network scenarios. All 303 retained evidence entries and
+   both release archives' binary hashes were verified after copying.
+   The final artifacts passed a fresh two-Mac/two-Pi rehearsal of real Bitcoin
+   funding/withdrawal, mnemonic recovery and spending, operator status, and
+   one guardian's outage/rejoin with continued quorum transactions. The earlier
+   first-beta qualification retains the broader market/conflict/interruption,
+   all-four-outage and populated-checkpoint campaigns, plus compatibility fixtures.
+   Packaged Mac Nix and Linux ARM64 binaries are checksummed; the Mac closure and
+   private evidence are retained outside build caches. Linux Nix and other
+   deployment targets remain unqualified; desktop-app packaging is separate.
 
 7. [ ] **Small private signet pilot.** Before broader beta, operate the chosen
    candidate with actual testnet deposits/withdrawals, monitoring, retained
