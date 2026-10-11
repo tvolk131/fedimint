@@ -558,3 +558,80 @@ documented artifact paths. Deployment storage, operators, Bitcoin backends and
 a small signet pilot remain to be chosen/run before a broader beta. Longer load
 and fuzzing campaigns remain ongoing hardening; a feature-bearing successor
 needs its own mixed-binary upgrade rehearsal.
+
+## Final beta candidate: October 10, 2026
+
+Release `v0.12.2-simplicity-beta.1` identifies the Simplicity distribution on
+Fedimint v0.12.2. Cargo package versions remain `0.12.2`; module
+config/consensus/API versions remain `0.1`. The tag points to code candidate
+`ac5b7094c77e201d31b624182b20e6fae6439016`; this qualification record is a later,
+documentation-only commit. Deploy by source revision and artifact hashes.
+
+Since the first-beta qualification above, the SDK adds exact-candidate local
+preflight and bounded read-only operator status using existing endpoints. Pure
+asset-accounting helpers moved into common code so preflight and guardian
+validation share them. Consensus rules, encodings, fees and versions are
+unchanged. The release script now executes the client example tests rather
+than only checking compilation, closing the diagnostics CLI coverage gap.
+
+[All six hosted jobs passed](https://github.com/tvolk131/fedimint/actions/runs/38097095020)
+at the exact candidate: 357 ordinary module/shared tests, two legacy mint-v2
+migration tests, two diagnostics CLI tests, five four-guardian network scenarios,
+module Clippy, repository format/lint, ordinary and opt-in guardian builds,
+native architecture comparison, and ASan/leak checks. The full job completed in
+95 minutes; sanitizer negative controls also passed.
+
+The Mac release example tests passed both diagnostics CLI tests. The Mac native
+observations and 100,000 seeded mutations passed and match hosted Linux x86-64,
+Linux ARM64 and ASan observations byte-for-byte. The observation hashes and
+mutation seed remain those recorded in the preceding qualification. Dependency
+locks are unchanged from `d64925adb96`: Cargo.lock SHA-256
+`5e4e619d073fb822ad29bc3fb95d2eb56af6f43f85f529dd6d143bd69b989751`,
+flake.lock SHA-256
+`fb4553899cb56f234b3cf639855d9e7c90ec1bf7f9961c19b16a58393167dba5`.
+
+The final guardian artifacts passed a fresh two-Mac/two-Pi rehearsal. The Mac
+uses the opt-in Nix package; Linux ARM64 uses Rust 1.93.0, release optimization,
+LTO/debug disabled and `JEMALLOC_SYS_WITH_LG_PAGE=16`. Both guardian artifacts
+report the exact candidate revision. The Mac CLI/wallet/diagnostics tools were
+built in release mode with thin LTO; Linux ARM64 versions were also built and
+the diagnostics binary's help command passed on the Pi's 16 KiB-page OS.
+
+| Guardian artifact | SHA-256 |
+| --- | --- |
+| Mac Nix | `fdeeadb6f428b3b14a787bb536714ff4b2376b0c11fdc5c830e9702924464165` |
+| Linux ARM64 | `e106b6632113914a9199b016d42ced553ff47009db633fa21a29cc5a813e8388` |
+
+The final-artifact rehearsal passed real Bitcoin Core regtest funding and a
+confirmed 10,000-sat withdrawal; owner mnemonic recovery with identical holdings
+and history, a recovered spend, and fully spent history recovery; status reports
+with all four guardians and one offline; a quorum transaction during that outage;
+and the restarted guardian's catch-up followed by another contract spend.
+All peers reported active/supported `0.1`. The broader market, interruption,
+checkpoint and compatibility evidence remains tied to the earlier first-beta
+candidate above; those whole campaigns were not repeated for these SDK tools.
+
+Two caught upstream `submit_guardian_metadata` WriteConflict panics recurred on
+one Pi guardian. The guardians continued; all other error-level log entries were
+consensus-stream closures during intentional shutdown. No other panic or
+unsupported-version error was observed. The [metadata retry fix](https://github.com/fedimint/fedimint/pull/9313)
+remained open when checked and is not included. All isolated rehearsal services
+were stopped; the existing application federation was untouched.
+
+The private evidence bundle `v0.12.2-simplicity-beta.1-20261010` is retained
+outside build caches. All 303 manifest entries and both packaged archives' binary
+hashes were verified after copying; the Mac Nix closure has a persistent GC root
+and an exported runtime archive. Only `release-files/` contains distributable
+artifacts; private wallet/guardian evidence must not be published. Its SHA256SUMS
+and per-platform manifests identify the guardian, CLI, wallet and diagnostics
+binaries. CI, harness, packaging and qualification prose passed independent
+review. This follow-up changes documentation only.
+
+The tag and explicit artifact manifests distinguish this distribution from
+unmodified Fedimint v0.12.2. Linux Nix and other deployment artifacts remain
+unqualified. The previous 71-file first-beta compatibility baseline is retained
+separately. Earlier prototype envelopes also labeled `0.1` require a fresh
+federation; this qualification does not introduce or validate an arbitrary
+future feature upgrade. Deployment storage, operators, Bitcoin backends, retained
+history and the private signet pilot remain the next decisions. Longer load and
+fuzzing campaigns remain ongoing hardening.
