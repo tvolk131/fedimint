@@ -16,7 +16,7 @@ use fedimint_core::config::{
     TypedServerModuleConsensusConfig,
 };
 use fedimint_core::core::ModuleInstanceId;
-use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
+use fedimint_core::db::{DatabaseTransaction, DatabaseVersion, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::{
     Amounts, ApiEndpoint, ApiVersion, CoreConsensusVersion, InputMeta, ModuleConsensusVersion,
@@ -25,6 +25,7 @@ use fedimint_core::module::{
 use fedimint_core::{InPoint, NumPeersExt, OutPoint, PeerId};
 use fedimint_server_core::bitcoin_rpc::ServerBitcoinRpcMonitor;
 use fedimint_server_core::config::PeerHandleOps;
+use fedimint_server_core::migration::ServerModuleDbMigrationFn;
 use fedimint_server_core::{
     ConfigGenModuleArgs, ModuleTransactionContext, ModuleTransactionValidation, ServerModule,
     ServerModuleInit, ServerModuleInitArgs,
@@ -41,8 +42,8 @@ use fedimint_simplicity_common::{
 use futures::StreamExt;
 
 use crate::db::{
-    AssetKey, BlockVoteKey, BlockVotePrefix, ContractKey, ContractPrefix, NamespaceKey,
-    StoredContract,
+    AssetKey, BlockVoteKey, BlockVotePrefix, ContractKey, ContractPrefix, LiveContractTotalPrefix,
+    NamespaceKey, StoredContract, insert_contract, remove_contract,
 };
 use crate::validation::ValidatedTransaction;
 
@@ -122,6 +123,17 @@ impl ServerModuleInit for SimplicityInit {
             "guardian missing from configured peers"
         );
         Ok(())
+    }
+    fn get_database_migrations(
+        &self,
+    ) -> BTreeMap<DatabaseVersion, ServerModuleDbMigrationFn<Simplicity>> {
+        let mut migrations: BTreeMap<DatabaseVersion, ServerModuleDbMigrationFn<Simplicity>> =
+            BTreeMap::new();
+        migrations.insert(
+            DatabaseVersion(0),
+            Box::new(|ctx| Box::pin(db::migrate_to_v1(ctx))),
+        );
+        migrations
     }
 }
 
@@ -286,11 +298,7 @@ impl ServerModule for Simplicity {
             .filter(|(_, input)| input.module_instance_id() == context.module_instance_id)
             .position(|(index, _)| index as u64 == point.in_idx)
             .ok_or(ContractError::Context)?;
-        if dbtx
-            .remove_entry(&ContractKey(input.outpoint))
-            .await
-            .is_none()
-        {
+        if remove_contract(dbtx, input.outpoint).await.is_none() {
             return Err(ContractError::UnknownContract);
         }
         let meta = validated.inputs.get(index).ok_or(ContractError::Context)?;
@@ -330,7 +338,7 @@ impl ServerModule for Simplicity {
             creation_session: context.consensus.session_index,
             creation_block_count: self.consensus_block_count(dbtx).await,
         };
-        dbtx.insert_new_entry(&ContractKey(point), &stored).await;
+        insert_contract(dbtx, point, &stored).await?;
         Ok(TransactionItemAmounts {
             amounts: Amounts::new_bitcoin(output.amount),
             fees: Amounts::new_bitcoin(output_fee(output)),
@@ -350,8 +358,8 @@ impl ServerModule for Simplicity {
         module_id: ModuleInstanceId,
     ) {
         audit
-            .add_items(dbtx, module_id, &ContractPrefix, |_, contract| {
-                -(contract.output.amount.msats as i64)
+            .add_items(dbtx, module_id, &LiveContractTotalPrefix, |_, total| {
+                -i64::try_from(total.msats).expect("bitcoin supply fits in i64 msats")
             })
             .await;
     }
