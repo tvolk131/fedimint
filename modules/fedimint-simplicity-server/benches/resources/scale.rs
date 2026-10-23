@@ -115,9 +115,7 @@ async fn generate(path: &Path, count: u32, stride: u32) {
         .await;
     let module_db = db.with_prefix_module_id(MODULE).0;
     let mut clean = module_db.begin_transaction().await;
-    clean
-        .remove_entry(&ContractKey(fixture.inputs[0].outpoint))
-        .await;
+    remove_contract(&mut clean.to_ref_nc(), fixture.inputs[0].outpoint).await;
     clean.commit_tx().await;
     let own = WalletKeys::new(&root(1), federation(), MODULE);
     let foreign = WalletKeys::new(&root(2), federation(), MODULE);

@@ -226,6 +226,9 @@ fresh federation; earlier prototypes, including those also labeled `0.1`, have
 a different consensus-item wire format. The pre-release number was reused; use
 the qualified source revision and artifact hashes to identify this baseline.
 Do not open old prototype databases with these binaries.
+Guardian databases from before the stored live contract total, including the
+beta.1 candidate's, are not supported either: they lack the total, so spending
+a contract created earlier stops every guardian.
 Retain this deployment's configuration, history and checkpoints as fixtures.
 
 For a future compatible release, install reviewed binaries on every guardian.

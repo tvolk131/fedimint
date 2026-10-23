@@ -97,7 +97,10 @@ they retain the outstanding platform, operational, or candidate-specific work.
    successor `0.2` support. A concrete feature-bearing successor still needs
    its own mixed-binary rehearsal; that is future-release work. Earlier
    prototype fixtures, including those also labeled `0.1`, are not an upgrade
-   source for this envelope.
+   source for this envelope. The baseline's guardian checkpoint is no longer
+   one either: the stored live contract total was added without a database
+   migration because no federation is deployed. Its client fixtures are
+   unaffected.
 
 6. [x] **Exact release-candidate checks and packaging.** Release
    `v0.12.2-simplicity-beta.1` tags code candidate `ac5b7094c77` on official
