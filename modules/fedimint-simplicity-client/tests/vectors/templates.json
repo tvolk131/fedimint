@@ -1,0 +1,10 @@
+{
+  "owner/v1": { "execution_version": 1, "cmr": "ca2d9715bcabcfc2896789708b49e6e5244ba329c9f9bb8ff0dcfd21401053a6" },
+  "top-up-or-release/v1": { "execution_version": 0, "cmr": "71fb57a6e314492cca2b7945e557961498a4bd1376c7e51fc0c97e69a22ef80f" },
+  "binary-market/v1": { "execution_version": 1, "cmr": "a9a8a893c65a2be8141ddf4824c2fd5d4f09d750acb53d231a664f0043bb36cd" },
+  "limit-order/sell": { "cmr": "8ed5e382683e9e6f49f7ea29406b9a4214fcaa7f717cd3885162becc0708f052" },
+  "limit-order/buy": { "cmr": "24afb7fc23408a07ca8878a1e9a3724e1e76f4033f2defea57f390b7923ab72e" },
+  "partial-order/sell": { "cmr": "f1ac83848e65138f5b74ab7f1b95290f8559ba8ba868f032e7dbcc08d3ea460c" },
+  "partial-order/buy": { "cmr": "c2c7c78eada27d16f1adc8ab29c6f3e68cdf9737a35f18dfb446c1aed1f25828" },
+  "constant-product": { "cmr": "23d8e7a2176941886223d44d3a5a255aaa92d92ee17502f0a6c2da72a5c55066" }
+}
