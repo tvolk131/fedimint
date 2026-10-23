@@ -1,5 +1,6 @@
 mod api;
 mod assets;
+mod audit;
 mod config;
 mod preflight;
 

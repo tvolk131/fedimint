@@ -6,7 +6,7 @@ use fedimint_simplicity_common::assets::{
 use fedimint_simplicity_common::{ContractOutput, resources};
 
 use super::*;
-use crate::db::AssetKey;
+use crate::db::{AssetKey, insert_contract, remove_contract};
 
 // Exercise the real typed endpoint wrappers, including parameter decoding and
 // JSON serialization. These budgets concern valid stored records, not the
@@ -58,7 +58,9 @@ async fn point_queries_bound_records_and_handle_spent_contracts() {
         authority_state: [255; 32],
     };
     let mut dbtx = db.begin_transaction().await;
-    dbtx.insert_new_entry(&ContractKey(point), &stored).await;
+    insert_contract(&mut dbtx.to_ref_nc(), point, &stored)
+        .await
+        .unwrap();
     dbtx.insert_new_entry(&AssetKey(ids[0]), &origin).await;
     for peer in peers {
         module
@@ -113,7 +115,7 @@ async fn point_queries_bound_records_and_handle_spent_contracts() {
     // Missing and spent contracts return null, with no historical descriptor
     // fallback or additional listing response. Asset origins remain available.
     let mut dbtx = db.begin_transaction().await;
-    dbtx.remove_entry(&ContractKey(point)).await;
+    remove_contract(&mut dbtx.to_ref_nc(), point).await;
     dbtx.commit_tx().await;
     for (path, params, expected) in [
         (

@@ -34,7 +34,9 @@ use fedimint_simplicity_common::{
     MAX_WITNESS_BYTES, output_fee, resources,
 };
 use fedimint_simplicity_server::Simplicity;
-use fedimint_simplicity_server::db::{AssetKey, BlockVoteKey, ContractKey, StoredContract};
+use fedimint_simplicity_server::db::{
+    AssetKey, BlockVoteKey, ContractKey, StoredContract, insert_contract, remove_contract,
+};
 use simplicity::jet::Core;
 use simplicity::node::CoreConstructible;
 use simplicity::{BitWriter, ConstructNode, encode};
@@ -182,15 +184,17 @@ impl Fixture {
     async fn seed(&self, db: &Database) {
         let mut dbtx = db.begin_transaction().await;
         for (input, output) in self.inputs.iter().zip(&self.consumed) {
-            dbtx.insert_new_entry(
-                &ContractKey(input.outpoint),
+            insert_contract(
+                &mut dbtx.to_ref_nc(),
+                input.outpoint,
                 &StoredContract {
                     output: output.clone(),
                     creation_session: 0,
                     creation_block_count: 0,
                 },
             )
-            .await;
+            .await
+            .unwrap();
         }
         for (id, record) in &self.records {
             dbtx.insert_new_entry(&AssetKey(*id), record).await;

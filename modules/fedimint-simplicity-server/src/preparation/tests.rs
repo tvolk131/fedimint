@@ -17,6 +17,7 @@ use simplicity::ConstructNode;
 use simplicity::node::CoreConstructible;
 
 use super::*;
+use crate::db::{insert_contract, remove_contract};
 use crate::{Simplicity, validation};
 
 fn owner() -> Keypair {
@@ -90,10 +91,13 @@ fn federation() -> (Database, ServerModuleRegistry) {
 
 async fn seed(db: &Database, instance: u16, input: &ContractInput, stored: &StoredContract) {
     let mut tx = db.begin_transaction().await;
-    tx.to_ref_with_prefix_module_id(instance)
-        .0
-        .insert_entry(&ContractKey(input.outpoint), stored)
-        .await;
+    {
+        let mut module = tx.to_ref_with_prefix_module_id(instance).0.into_nc();
+        remove_contract(&mut module, input.outpoint).await;
+        insert_contract(&mut module, input.outpoint, stored)
+            .await
+            .unwrap();
+    }
     tx.commit_tx_result().await.unwrap();
 }
 
@@ -187,10 +191,11 @@ async fn all_instances_resolve_before_decoding_and_check_commitments_before_exec
         check(&db, &modules, &tx, Ok(())).await;
         // A successful admission attempt does not cache state for the next one.
         let mut dbtx = db.begin_transaction().await;
-        dbtx.to_ref_with_prefix_module_id(ids[0])
-            .0
-            .remove_entry(&ContractKey(first.outpoint))
-            .await;
+        remove_contract(
+            &mut dbtx.to_ref_with_prefix_module_id(ids[0]).0.into_nc(),
+            first.outpoint,
+        )
+        .await;
         dbtx.commit_tx_result().await.unwrap();
         check(
             &db,

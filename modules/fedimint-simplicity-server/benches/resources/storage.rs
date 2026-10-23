@@ -41,9 +41,7 @@ async fn measure(scenario: &str, count: u32) {
     let (db, modules) = fixture.core_database_on(db).await;
     let module_db = db.with_prefix_module_id(MODULE).0;
     let mut clean = module_db.begin_transaction().await;
-    clean
-        .remove_entry(&ContractKey(fixture.inputs[0].outpoint))
-        .await;
+    remove_contract(&mut clean.to_ref_nc(), fixture.inputs[0].outpoint).await;
     clean.commit_tx().await;
     let mut history = vec![];
     let mut accepted = 0u64;
