@@ -1,3 +1,5 @@
+mod template_vectors;
+
 use bitcoin::hashes::{Hash, sha256};
 use fedimint_core::config::FederationId;
 use fedimint_core::secp256k1::{Keypair, SECP256K1, SecretKey};
