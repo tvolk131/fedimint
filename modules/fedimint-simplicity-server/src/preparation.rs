@@ -12,6 +12,7 @@ use fedimint_simplicity_common::{ContractError, ContractInput, resources, runtim
 use simplicity::{Cost, RedeemNode};
 
 use crate::db::{ContractKey, StoredContract};
+use crate::executor;
 
 mod retention;
 #[cfg(test)]
@@ -71,56 +72,93 @@ pub(crate) async fn resolve(
     Ok(ModuleTransactionValidation::new(contracts))
 }
 
-pub(crate) fn prepare(
+pub(crate) async fn prepare(
     context: &ModuleTransactionContext<'_>,
     instances: BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
 ) -> Result<ModuleTransactionValidation, TransactionError> {
-    prepare_with_budget(context, instances, RETENTION_BUDGET).map(ModuleTransactionValidation::new)
+    let decoding = Decoding::new(context, instances)?;
+    let prepared = if decoding.inputs.is_empty() {
+        decoding.run(RETENTION_BUDGET)
+    } else {
+        executor::run(context.mode, move || decoding.run(RETENTION_BUDGET)).await
+    };
+    prepared.map(ModuleTransactionValidation::new)
 }
 
-fn prepare_with_budget(
-    context: &ModuleTransactionContext<'_>,
-    instances: BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
-    mut remaining: usize,
-) -> Result<Prepared, TransactionError> {
-    let mut contracts = Resolved::new();
-    for (instance, resolved) in instances {
-        contracts.extend(
-            resolved
-                .into_inner::<Resolved>()
-                .map_err(|_| input_error(instance, ContractError::MissingContext))?,
-        );
-    }
-    // Repeat the cheap check so this hook also has a safe standalone boundary.
-    let mut cost =
-        resources::check_signed_structure(context.transaction, context.module_instance_id)?;
-    let mut programs = BTreeMap::new();
-    for (index, input) in context.transaction.inputs.iter().enumerate() {
-        let Some(contract) = input.as_any().downcast_ref::<ContractInput>() else {
-            continue;
-        };
-        let error = |error| input_error(input.module_instance_id(), error);
-        let stored = contracts
-            .get(&index)
-            .ok_or_else(|| error(ContractError::MissingContext))?;
-        let program = runtime::decode_program(contract).map_err(error)?;
-        cost = cost + program.bounds().cost;
-        if cost > Cost::from_milliweight(resources::MAX_TRANSACTION_MILLIWEIGHT) {
-            return Err(error(ContractError::Limit));
+/// Owned copy of everything kind-wide decoding reads, so it can run off the
+/// async runtime.
+struct Decoding {
+    contracts: Resolved,
+    /// Cost of the signed structure, before any program.
+    cost: Cost,
+    /// Every Simplicity input with its transaction index and instance.
+    inputs: Vec<(usize, ModuleInstanceId, ContractInput)>,
+}
+
+impl Decoding {
+    fn new(
+        context: &ModuleTransactionContext<'_>,
+        instances: BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
+    ) -> Result<Self, TransactionError> {
+        let mut contracts = Resolved::new();
+        for (instance, resolved) in instances {
+            contracts.extend(
+                resolved
+                    .into_inner::<Resolved>()
+                    .map_err(|_| input_error(instance, ContractError::MissingContext))?,
+            );
         }
-        runtime::check_commitment(&program, &stored.output).map_err(error)?;
-        // A cache miss changes only performance. Every input has already passed
-        // decoding, cost, version and commitment checks before execution starts.
-        let retained = retention::charge(&program, remaining).map(|charge| {
-            remaining -= charge;
-            program
-        });
-        programs.insert(index, retained);
+        // Repeat the cheap check so this hook also has a safe standalone boundary.
+        let cost =
+            resources::check_signed_structure(context.transaction, context.module_instance_id)?;
+        let inputs = context
+            .transaction
+            .inputs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, input)| {
+                let contract = input.as_any().downcast_ref::<ContractInput>()?;
+                Some((index, input.module_instance_id(), contract.clone()))
+            })
+            .collect();
+        Ok(Self {
+            contracts,
+            cost,
+            inputs,
+        })
     }
-    Ok(Prepared {
-        contracts,
-        programs,
-    })
+
+    fn run(self, mut remaining: usize) -> Result<Prepared, TransactionError> {
+        let Self {
+            contracts,
+            mut cost,
+            inputs,
+        } = self;
+        let mut programs = BTreeMap::new();
+        for (index, instance, contract) in &inputs {
+            let error = |error| input_error(*instance, error);
+            let stored = contracts
+                .get(index)
+                .ok_or_else(|| error(ContractError::MissingContext))?;
+            let program = runtime::decode_program(contract).map_err(error)?;
+            cost = cost + program.bounds().cost;
+            if cost > Cost::from_milliweight(resources::MAX_TRANSACTION_MILLIWEIGHT) {
+                return Err(error(ContractError::Limit));
+            }
+            runtime::check_commitment(&program, &stored.output).map_err(error)?;
+            // A cache miss changes only performance. Every input has already passed
+            // decoding, cost, version and commitment checks before execution starts.
+            let retained = retention::charge(&program, remaining).map(|charge| {
+                remaining -= charge;
+                program
+            });
+            programs.insert(*index, retained);
+        }
+        Ok(Prepared {
+            contracts,
+            programs,
+        })
+    }
 }
 
 pub(crate) fn get<'a>(

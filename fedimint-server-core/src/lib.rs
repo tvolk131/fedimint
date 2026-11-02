@@ -64,12 +64,25 @@ impl std::fmt::Debug for ModuleTransactionValidation {
     }
 }
 
+/// Why core is processing a transaction. Module validation hooks must reach
+/// the same result in both modes. Modules may use the mode to schedule work,
+/// e.g. to keep agreed transactions ahead of API submissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxProcessingMode {
+    /// Checking a transaction submitted through the API against the current
+    /// state. Writes are discarded.
+    Submission,
+    /// Applying a transaction that consensus has agreed on.
+    Consensus,
+}
+
 /// Authenticated transaction view. This is constructed by the core, never
 /// decoded from a module input. Existing modules may ignore it.
 #[derive(Debug)]
 pub struct ModuleTransactionContext<'a> {
     pub transaction: &'a fedimint_core::transaction::Transaction,
     pub consensus: TransactionConsensusContext,
+    pub mode: TxProcessingMode,
     pub module_instance_id: ModuleInstanceId,
     /// Preparation for this module kind, scoped to this validation attempt.
     pub preparation: Option<&'a ModuleTransactionValidation>,
@@ -170,8 +183,9 @@ pub trait ServerModule: Debug + Sized {
     /// Core completes every kind's preparation before calling any validation
     /// hook. The result is available to this kind's validation hooks and is
     /// dropped before input/output processing. The context uses the lowest
-    /// participating instance ID, as in `verify_transaction`.
-    fn prepare_kind_transaction(
+    /// participating instance ID, as in `verify_transaction`. CPU-heavy work
+    /// belongs on a dedicated thread, not the async runtime.
+    async fn prepare_kind_transaction(
         _context: &ModuleTransactionContext<'_>,
         _instances: std::collections::BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
     ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
@@ -368,7 +382,7 @@ pub trait IServerModule: Debug {
         context: &ModuleTransactionContext<'_>,
     ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError>;
 
-    fn prepare_kind_transaction(
+    async fn prepare_kind_transaction(
         &self,
         context: &ModuleTransactionContext<'_>,
         instances: std::collections::BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
@@ -549,12 +563,12 @@ where
         <Self as ServerModule>::prepare_transaction(self, dbtx, context).await
     }
 
-    fn prepare_kind_transaction(
+    async fn prepare_kind_transaction(
         &self,
         context: &ModuleTransactionContext<'_>,
         instances: std::collections::BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
     ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
-        <Self as ServerModule>::prepare_kind_transaction(context, instances)
+        <Self as ServerModule>::prepare_kind_transaction(context, instances).await
     }
 
     async fn validate_transaction(

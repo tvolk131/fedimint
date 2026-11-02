@@ -42,6 +42,12 @@ only, never transaction validity or fees. Preparations are owned by one validati
 attempt and dropped before input/output processing; admission and consensus do
 not share cached state.
 
+Simplicity decodes and executes programs on dedicated worker threads, not the
+async runtime that serves the API and drives consensus. Agreed transactions use
+one thread and submissions a separate bounded pool, so queued submissions never
+delay consensus. Core passes its processing mode to module hooks for this
+scheduling only; validation results do not depend on it.
+
 Core invokes a module validation hook against the unmodified transaction snapshot
 before processing inputs or outputs. A transaction-local, type-erased result is
 passed only to that module's processing hooks. Simplicity uses the prepared

@@ -1023,6 +1023,7 @@ pub async fn validate_module(
             federation_id: federation(),
             session_index: 10,
         },
+        mode: TxProcessingMode::Consensus,
         module_instance_id: MODULE,
         preparation: None,
         validation: None,
@@ -1032,7 +1033,8 @@ pub async fn validate_module(
     let prepared = <Simplicity as ServerModule>::prepare_kind_transaction(
         &context,
         BTreeMap::from([(MODULE, resolved)]),
-    )?;
+    )
+    .await?;
     context.preparation = Some(&prepared);
     module.validate_transaction(dbtx, &context).await
 }
