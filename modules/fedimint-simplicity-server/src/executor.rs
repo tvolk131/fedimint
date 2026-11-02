@@ -40,7 +40,7 @@ impl Pools {
         Ok(Self {
             consensus: pool("simplicity-consensus", 1)?,
             submission: pool("simplicity-submission", threads)?,
-            admission: Arc::new(Semaphore::new(admission_permits())),
+            admission: Arc::new(Semaphore::new(admission_permits(threads))),
         })
     }
 
@@ -61,8 +61,8 @@ fn submission_threads() -> usize {
 
 /// Lets each submission thread have a job queued while the next submission
 /// reads the database.
-fn admission_permits() -> usize {
-    2 * submission_threads()
+fn admission_permits(submission_threads: usize) -> usize {
+    2 * submission_threads
 }
 
 fn pool(name: &'static str, threads: usize) -> anyhow::Result<rayon::ThreadPool> {
@@ -192,15 +192,36 @@ impl Drop for Waiting {
     }
 }
 
-/// Hold every submission permit, so tests can observe submissions waiting.
+/// Every submission permit but a few, held so tests can observe submissions
+/// waiting.
 #[cfg(test)]
-pub(crate) async fn hold_all_permits() -> OwnedSemaphorePermit {
-    pools()
+pub(crate) struct HeldPermits {
+    _permits: OwnedSemaphorePermit,
+    _turn: tokio::sync::OwnedMutexGuard<()>,
+}
+
+/// Hold every submission permit but `free`. Callers take turns, so two tests
+/// cannot each hold part of the permits while waiting for the rest.
+#[cfg(test)]
+pub(crate) async fn hold_permits(free: usize) -> HeldPermits {
+    static TURN: std::sync::LazyLock<Arc<tokio::sync::Mutex<()>>> =
+        std::sync::LazyLock::new(Arc::default);
+    let turn = TURN.clone().lock_owned().await;
+    let pools = pools();
+    // The pool's actual size, in case the available parallelism has changed.
+    let held = admission_permits(pools.submission.current_num_threads())
+        .checked_sub(free)
+        .expect("tests leave fewer permits free than exist");
+    let permits = pools
         .admission
         .clone()
-        .acquire_many_owned(u32::try_from(admission_permits()).expect("at most 16 permits"))
+        .acquire_many_owned(u32::try_from(held).expect("at most 16 permits"))
         .await
-        .expect("the admission semaphore is never closed")
+        .expect("the admission semaphore is never closed");
+    HeldPermits {
+        _permits: permits,
+        _turn: turn,
+    }
 }
 
 #[cfg(test)]
