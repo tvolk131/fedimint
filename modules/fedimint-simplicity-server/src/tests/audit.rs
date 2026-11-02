@@ -1,9 +1,15 @@
+use std::sync::Arc;
+
 use fedimint_core::TransactionId;
+use fedimint_core::db::apply_migrations_dbtx;
+use fedimint_server::consensus::db::ServerDbMigrationContext;
+use fedimint_server_core::IServerModuleInit;
 use fedimint_simplicity_common::{ContractOutput, resources};
 use futures::StreamExt;
 
 use super::*;
-use crate::db::{ContractPrefix, insert_contract, live_contract_total};
+use crate::SimplicityInit;
+use crate::db::{ContractPrefix, insert_contract, live_contract_total, remove_contract};
 
 /// Audit the module alone, returning its item count and net assets. Each item
 /// is one line between the balance sheet header and the net assets footer.
@@ -275,4 +281,54 @@ async fn audit_reads_one_total_regardless_of_contract_count() {
     .await;
     dbtx.commit_tx().await;
     assert_eq!(audit(&module, &db).await, (1, -(expected as i64)));
+}
+
+/// A beta.1 guardian database holds contracts but no running total. Without
+/// the migration, spending one of those contracts would underflow the total
+/// and stop every guardian.
+#[tokio::test]
+async fn migration_seeds_total_from_existing_contracts() {
+    let db = Database::new(MemDatabase::new(), ModuleDecoderRegistry::default());
+    let output = contract_program(&key(), 0, 0)
+        .output(Amount::ZERO, [0; 32], vec![])
+        .unwrap();
+    let amounts = [0, 1, 2_100_000_000_000_000_000].map(Amount::from_msats);
+    let mut dbtx = db.begin_transaction().await;
+    {
+        // Contracts stored before the running total existed.
+        let mut module = dbtx.to_ref_with_prefix_module_id(SIMP).0;
+        for (index, amount) in amounts.into_iter().enumerate() {
+            module
+                .insert_new_entry(&ContractKey(point(index as u64)), &stored(&output, amount))
+                .await;
+        }
+    }
+    apply_migrations_dbtx(
+        &mut dbtx.to_ref_nc(),
+        Arc::new(ServerDbMigrationContext) as Arc<_>,
+        fedimint_simplicity_common::KIND.to_string(),
+        IServerModuleInit::get_database_migrations(&SimplicityInit),
+        Some(SIMP),
+        None,
+    )
+    .await
+    .unwrap();
+    dbtx.commit_tx().await;
+
+    let module = db.with_prefix_module_id(SIMP).0;
+    let mut dbtx = module.begin_transaction().await;
+    assert_eq!(
+        live_contract_total(&mut dbtx.to_ref_nc()).await,
+        Amount::from_msats(2_100_000_000_000_000_001)
+    );
+    // Spending a contract stored before the migration keeps the total exact.
+    assert!(
+        remove_contract(&mut dbtx.to_ref_nc(), point(2))
+            .await
+            .is_some()
+    );
+    assert_eq!(
+        live_contract_total(&mut dbtx.to_ref_nc()).await,
+        Amount::from_msats(1)
+    );
 }
