@@ -281,9 +281,15 @@ records before declaring restoration complete.
 Monitor disk growth and consensus progress during load. Per-transaction caps do
 not limit the number of concurrent submissions. Program decoding and execution
 run on dedicated threads: one for agreed transactions, and for submissions a pool
-of half the CPU cores (one to eight threads). Submissions queue for that pool
-rather than being refused, so heavy admission load shows up as slower submission
-responses, not as delayed consensus. Keep a coordinated rollback/upgrade plan:
+of half the CPU cores (one to eight threads). At most twice that many submissions
+hold decoded programs at once. Others wait for admission before decoding rather
+than being refused, so heavy submission load shows up as slower submission
+responses and a rising `fm_simplicity_admission_waiting`. Agreed transactions
+never wait for admission or queue behind submissions, but all these threads share
+the CPU, so heavy submission load can still slow consensus, especially with two
+guardians on one board. API requests keep running after their client
+disconnects, so connection limits do not cap this load. Keep a coordinated
+rollback/upgrade plan:
 restoring an old binary or old database is not automatically safe after newer
 state is accepted.
 
@@ -291,14 +297,17 @@ state is accepted.
 
 The module uses the existing guardian Prometheus endpoint. Scrape each guardian
 process separately, including two guardians sharing a Pi; keep the existing
-metrics endpoint access controls. The module adds four metric families:
+metrics endpoint access controls. The module adds five metric families:
 
 - `fm_simplicity_validation_seconds`: histogram of hook wall time by `phase`.
 - `fm_simplicity_validation_calls_total`: finished/dropped hook calls by `phase`
   and fixed `outcome` category (`ok`, `interrupted`, or a rejection category).
 - `fm_simplicity_validation_active`: calls currently inside each hook, including
-  those awaiting database access or a worker thread. This is not a queue-length
-  or CPU-use gauge.
+  those awaiting database access, admission or a worker thread. This is not a
+  queue-length or CPU-use gauge.
+- `fm_simplicity_admission_waiting`: submissions waiting for admission before
+  decoding their programs. A sustained non-zero value means submissions arrive
+  faster than this guardian can check them.
 - `fm_simplicity_program_cache_total`: decoded-program cache lookups by `outcome`
   (`hit` or `miss`). A miss decodes the program.
 

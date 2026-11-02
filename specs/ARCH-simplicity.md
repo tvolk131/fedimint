@@ -47,9 +47,15 @@ performance.
 
 Simplicity decodes and executes programs on dedicated worker threads, not the
 async runtime that serves the API and drives consensus. Agreed transactions use
-one thread and submissions a separate bounded pool, so queued submissions never
-delay consensus. Core passes its processing mode to module hooks for this
-scheduling only; validation results do not depend on it.
+one thread and submissions a separate pool, so agreed transactions never queue
+behind submissions, although all of these threads share the CPU. Before decoding,
+each submission waits for one of a fixed number of admissions and keeps it until
+its decoded programs are freed, which bounds how many submissions hold decoded
+programs at once. Submissions are delayed, never refused, and connection limits
+do not bound them because API requests outlive their connections. Decoded
+programs are freed on worker threads, whose large stacks fit deeply nested types.
+Core passes its processing mode to module hooks for this scheduling only;
+validation results do not depend on it.
 
 Core invokes a module validation hook against the unmodified transaction snapshot
 before processing inputs or outputs. A transaction-local, type-erased result is
