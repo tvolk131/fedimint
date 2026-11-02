@@ -5,7 +5,10 @@
 //!
 //! A program enters the cache only after it has passed the cost and commitment
 //! checks against a stored contract, so programs that match no contract cannot
-//! displace ones that do.
+//! displace ones that do. The commitment does not cover the witness, though:
+//! anyone who owns a contract can submit spends of it with ever-new witnesses
+//! that fail execution, and so churn the cache. At worst every lookup misses
+//! and validation decodes as it would without a cache, within the same bound.
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use fedimint_core::bitcoin::hashes::{Hash, HashEngine, sha256};

@@ -23,6 +23,10 @@ smaller encodings decode successfully. No consensus limit or fee changed.
 
 ## Concurrent follow-up
 
+These runs predate the worker pools and the admission limit, which now admits
+twice as many submissions as there are submission threads. Later runs with more
+callers than that are not directly comparable.
+
 Two fresh-process passes per workload/backend/concurrency cell ran 80 iterations
 per caller at 1/2/4/8/16 callers. This includes warm RocksDB and a real Mint v2
 control but drops all writes. Selected RocksDB results:

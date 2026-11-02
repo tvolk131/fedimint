@@ -44,6 +44,9 @@ cache holds decoded programs that passed the cost and commitment checks against 
 stored contract, keyed by SHA-256 of the program and witness bytes and bounded by
 the same accounting. Decoding depends only on those bytes, so admission,
 revalidation and consensus share it, and it too changes only performance.
+The commitment does not cover the witness, so a contract's owner can still churn
+the cache with spends that fail execution; validation then decodes as it would
+without a cache.
 
 Simplicity decodes and executes programs on dedicated worker threads, not the
 async runtime that serves the API and drives consensus. Agreed transactions use
