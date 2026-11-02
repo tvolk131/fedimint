@@ -69,6 +69,7 @@ fn context(tx: &Transaction, instance: u16) -> ModuleTransactionContext<'_> {
             federation_id: fedimint_core::config::FederationId(sha256::Hash::all_zeros()),
             session_index: 0,
         },
+        mode: TxProcessingMode::Consensus,
         module_instance_id: instance,
         preparation: None,
         validation: None,
@@ -341,8 +342,10 @@ async fn retention_budget_changes_neither_execution_result_nor_fees() {
             )
             .await
             .unwrap();
-            let prepared =
-                prepare_with_budget(&context, BTreeMap::from([(4, resolved)]), budget).unwrap();
+            let prepared = Decoding::new(&context, BTreeMap::from([(4, resolved)]))
+                .unwrap()
+                .run(budget)
+                .unwrap();
             assert_eq!(
                 prepared.programs.values().filter(|p| p.is_some()).count(),
                 count

@@ -12,7 +12,7 @@ use fedimint_core::encoding::Encodable;
 use fedimint_core::module::{Amounts, InputMeta, TransactionItemAmounts};
 use fedimint_core::secp256k1::{Message, SECP256K1};
 use fedimint_core::transaction::{Transaction, TransactionError};
-use fedimint_core::{OutPoint, TransactionId};
+use fedimint_core::{Amount, OutPoint, TransactionId};
 use fedimint_server_core::ModuleTransactionContext;
 use fedimint_simplicity_common::assets::accounting::balances;
 use fedimint_simplicity_common::assets::{
@@ -25,9 +25,10 @@ use fedimint_simplicity_common::runtime::{
 use fedimint_simplicity_common::{
     ContractError, ContractInput, ContractOutput, ContractOutputError, signature_hash,
 };
+use simplicity::RedeemNode;
 
 use crate::db::{AssetKey, NamespaceKey};
-use crate::{Simplicity, preparation, validate_shape};
+use crate::{Simplicity, executor, preparation, validate_shape};
 
 #[derive(Debug)]
 pub(crate) struct ValidatedTransaction {
@@ -119,42 +120,53 @@ pub(crate) async fn validate(
     let block_count = module.consensus_block_count(dbtx).await;
     let outputs: Arc<[EnvironmentOutput]> = outputs.into();
     let actions = Arc::new(actions);
-    let mut metadata = Vec::new();
-    for (index, (input, stored)) in inputs.iter().zip(&stored_inputs).enumerate() {
-        let signature_hash = hashes.intent(stored.output.version).map_err(input_err)?;
-        let environment = Environment {
-            signature_hash,
-            session_index: context.consensus.session_index,
-            block_count,
-            current: stored.output.clone(),
-            creation_session: stored.creation_session,
-            creation_block_count: stored.creation_block_count,
-            input_index: index as u32,
-            input_count: inputs.len() as u32,
-            outputs: outputs.clone(),
-            inputs: resolved.clone(),
-            actions: actions.clone(),
-        };
-        let cached = prepared
-            .programs
-            .get(&input_indices[index])
-            .ok_or_else(|| input_err(ContractError::MissingContext))?;
-        let decoded;
-        let program = if let Some(program) = cached {
-            program
-        } else {
-            decoded = decode_program(input).map_err(input_err)?;
-            &decoded
-        };
-        let fee = execute_decoded(input, &environment, program).map_err(input_err)?;
-        metadata.push(InputMeta {
+    let executions = inputs
+        .iter()
+        .zip(&stored_inputs)
+        .zip(&input_indices)
+        .enumerate()
+        .map(|(index, ((input, stored), input_index))| Execution {
+            input: (*input).clone(),
+            environment: hashes
+                .intent(stored.output.version)
+                .map(|signature_hash| Environment {
+                    signature_hash,
+                    session_index: context.consensus.session_index,
+                    block_count,
+                    current: stored.output.clone(),
+                    creation_session: stored.creation_session,
+                    creation_block_count: stored.creation_block_count,
+                    input_index: index as u32,
+                    input_count: inputs.len() as u32,
+                    outputs: outputs.clone(),
+                    inputs: resolved.clone(),
+                    actions: actions.clone(),
+                }),
+            program: prepared
+                .programs
+                .get(input_index)
+                .cloned()
+                .ok_or(ContractError::MissingContext),
+        })
+        .collect::<Vec<_>>();
+    let fees = if executions.is_empty() {
+        Ok(Vec::new())
+    } else {
+        executor::run(context.mode, move || execute(executions)).await
+    }
+    .map_err(input_err)?;
+    let metadata = inputs
+        .iter()
+        .zip(&stored_inputs)
+        .zip(fees)
+        .map(|((input, stored), fee)| InputMeta {
             pub_key: input.claim_key,
             amount: TransactionItemAmounts {
                 amounts: Amounts::new_bitcoin(stored.output.amount),
                 fees: Amounts::new_bitcoin(fee),
             },
-        });
-    }
+        })
+        .collect();
     Ok(ValidatedTransaction {
         txid: hashes.txid(),
         inputs: metadata,
@@ -163,9 +175,33 @@ pub(crate) async fn validate(
     })
 }
 
-/// Scoped to one immutable outer transaction and one module instance. Evaluate
-/// lazily at the original validation step so rejected transactions retain their
-/// error ordering and do not incur hashes they previously skipped.
+/// One input's execution, owned so it can run off the async runtime. A failure
+/// computing the environment or finding the program surfaces only when
+/// [`execute`] reaches this input, after every earlier input has executed.
+struct Execution {
+    input: ContractInput,
+    environment: Result<Environment, ContractError>,
+    program: Result<Option<Arc<RedeemNode>>, ContractError>,
+}
+
+/// Execute inputs in transaction order and stop at the first failure.
+fn execute(executions: Vec<Execution>) -> Result<Vec<Amount>, ContractError> {
+    executions
+        .into_iter()
+        .map(|execution| {
+            let environment = execution.environment?;
+            let program = match execution.program? {
+                Some(program) => program,
+                None => decode_program(&execution.input)?,
+            };
+            execute_decoded(&execution.input, &environment, &program)
+        })
+        .collect()
+}
+
+/// Scoped to one immutable outer transaction and one module instance. Each hash
+/// is computed at most once, only if needed, and failures are cached so they
+/// are reported at the step that needs the hash.
 struct TransactionHashes<'a> {
     transaction: &'a Transaction,
     federation_id: FederationId,

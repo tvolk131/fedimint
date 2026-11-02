@@ -3,18 +3,13 @@ use fedimint_core::db::DatabaseTransaction;
 use fedimint_core::module::{Amounts, CoreConsensusVersion, TransactionItemAmounts};
 use fedimint_core::transaction::{TRANSACTION_OVERFLOW_ERROR, Transaction, TransactionError};
 use fedimint_core::{InPoint, OutPoint};
+pub use fedimint_server_core::TxProcessingMode;
 use fedimint_server_core::{
     ModuleTransactionContext, ServerModuleRegistry, TransactionConsensusContext,
 };
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::metrics::{CONSENSUS_TX_PROCESSED_INPUTS, CONSENSUS_TX_PROCESSED_OUTPUTS};
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum TxProcessingMode {
-    Submission,
-    Consensus,
-}
 
 pub async fn process_transaction_with_dbtx(
     modules: ServerModuleRegistry,
@@ -50,6 +45,7 @@ pub async fn process_transaction_with_dbtx(
             module.verify_transaction(&ModuleTransactionContext {
                 transaction,
                 consensus,
+                mode,
                 module_instance_id,
                 preparation: None,
                 validation: None,
@@ -83,6 +79,7 @@ pub async fn process_transaction_with_dbtx(
                 &ModuleTransactionContext {
                     transaction,
                     consensus,
+                    mode,
                     module_instance_id,
                     preparation: None,
                     validation: None,
@@ -98,16 +95,19 @@ pub async fn process_transaction_with_dbtx(
     for &module_instance_id in &module_ids {
         let module = modules.get_expect(module_instance_id);
         if let Some(instances) = resolved.remove(&module.module_kind()) {
-            let preparation = module.prepare_kind_transaction(
-                &ModuleTransactionContext {
-                    transaction,
-                    consensus,
-                    module_instance_id,
-                    preparation: None,
-                    validation: None,
-                },
-                instances,
-            )?;
+            let preparation = module
+                .prepare_kind_transaction(
+                    &ModuleTransactionContext {
+                        transaction,
+                        consensus,
+                        mode,
+                        module_instance_id,
+                        preparation: None,
+                        validation: None,
+                    },
+                    instances,
+                )
+                .await?;
             preparations.insert(module.module_kind(), preparation);
         }
     }
@@ -121,6 +121,7 @@ pub async fn process_transaction_with_dbtx(
                 &ModuleTransactionContext {
                     transaction,
                     consensus,
+                    mode,
                     module_instance_id,
                     preparation: preparations
                         .get(&modules.get_expect(module_instance_id).module_kind()),
@@ -163,6 +164,7 @@ pub async fn process_transaction_with_dbtx(
                 &ModuleTransactionContext {
                     transaction,
                     consensus,
+                    mode,
                     module_instance_id: input.module_instance_id(),
                     preparation: None,
                     validation: validations.get(&input.module_instance_id()),
@@ -205,6 +207,7 @@ pub async fn process_transaction_with_dbtx(
                 &ModuleTransactionContext {
                     transaction,
                     consensus,
+                    mode,
                     module_instance_id: output.module_instance_id(),
                     preparation: None,
                     validation: validations.get(&output.module_instance_id()),
