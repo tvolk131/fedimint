@@ -4922,6 +4922,7 @@ dependencies = [
  "fedimint-testing-core",
  "futures",
  "libc",
+ "lru 0.16.3",
  "rand 0.8.5",
  "rayon",
  "serde",

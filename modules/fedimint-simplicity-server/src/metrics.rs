@@ -15,6 +15,22 @@ use fedimint_simplicity_common::{ContractError, ContractOutputError};
 pub(crate) static VALIDATION: LazyLock<ValidationMetrics> =
     LazyLock::new(|| ValidationMetrics::new(&REGISTRY));
 
+/// Shared decoded-program cache lookups by `hit` or `miss`.
+pub(crate) static PROGRAM_CACHE: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let lookups = IntCounterVec::new(
+        opts!(
+            "simplicity_program_cache_total",
+            "Decoded program cache lookups by outcome; a miss decodes the program"
+        ),
+        &["outcome"],
+    )
+    .expect("valid fixed counter descriptor");
+    REGISTRY
+        .register(Box::new(lookups.clone()))
+        .expect("unique Simplicity program cache metric");
+    lookups
+});
+
 #[derive(Clone, Copy)]
 pub(crate) enum Phase {
     Structure,

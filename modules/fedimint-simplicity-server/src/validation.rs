@@ -20,7 +20,7 @@ use fedimint_simplicity_common::assets::{
 };
 use fedimint_simplicity_common::resources::check_output;
 use fedimint_simplicity_common::runtime::{
-    Environment, EnvironmentInput, EnvironmentOutput, decode_program, execute_decoded,
+    Environment, EnvironmentInput, EnvironmentOutput, execute_decoded,
 };
 use fedimint_simplicity_common::{
     ContractError, ContractInput, ContractOutput, ContractOutputError, signature_hash,
@@ -192,7 +192,7 @@ fn execute(executions: Vec<Execution>) -> Result<Vec<Amount>, ContractError> {
             let environment = execution.environment?;
             let program = match execution.program? {
                 Some(program) => program,
-                None => decode_program(&execution.input)?,
+                None => preparation::decode(&execution.input)?,
             };
             execute_decoded(&execution.input, &environment, &program)
         })
