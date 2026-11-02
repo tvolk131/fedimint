@@ -4,8 +4,10 @@
 //! separate from fast contract-policy tests.
 mod status;
 
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fedimint_api_client::api::{DynGlobalApi, FederationApiExt};
@@ -34,8 +36,16 @@ use crate::SimplicityInit;
 
 mod wallet;
 
+/// Bitcoin height every guardian reports until a test advances it.
+const INITIAL_BLOCK_COUNT: u64 = 5;
+const BLOCK_COUNT_FILE: &str = "block_count";
+
+/// Guardians run as separate processes, so a test advances their simulated
+/// Bitcoin height through a file in the federation directory.
 #[derive(Debug)]
-struct Bitcoin;
+struct Bitcoin {
+    height: PathBuf,
+}
 #[async_trait::async_trait]
 impl IServerBitcoinRpc for Bitcoin {
     fn get_bitcoin_rpc_config(&self) -> BitcoinRpcConfig {
@@ -48,7 +58,11 @@ impl IServerBitcoinRpc for Bitcoin {
         "http://unused.invalid".parse().unwrap()
     }
     async fn get_block_count(&self) -> anyhow::Result<u64> {
-        Ok(5)
+        match std::fs::read_to_string(&self.height) {
+            Ok(count) => Ok(count.parse()?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(INITIAL_BLOCK_COUNT),
+            Err(error) => Err(error.into()),
+        }
     }
     async fn get_chain_id(&self) -> anyhow::Result<ChainId> {
         Ok(ChainId(bitcoin::BlockHash::all_zeros()))
@@ -80,6 +94,7 @@ struct Federation {
     id: FederationId,
     simplicity: u16,
     dummy: u16,
+    block_count: AtomicU64,
     completed: bool,
 }
 impl Federation {
@@ -136,6 +151,7 @@ impl Federation {
             decoders,
             simplicity,
             dummy,
+            block_count: AtomicU64::new(INITIAL_BLOCK_COUNT),
             completed: false,
         };
         for peer in peers {
@@ -184,6 +200,17 @@ impl Federation {
         child.kill().unwrap();
         child.wait().unwrap();
     }
+    /// Move every guardian's simulated Bitcoin height and wait until each
+    /// running guardian reports it as the consensus block count.
+    async fn set_block_count(&self, count: u64) {
+        let height = self.directory.path().join(BLOCK_COUNT_FILE);
+        let staged = height.with_extension("tmp");
+        std::fs::write(&staged, count.to_string()).unwrap();
+        // Guardians poll concurrently; never let them read a partial write.
+        std::fs::rename(staged, height).unwrap();
+        self.block_count.store(count, Ordering::SeqCst);
+        self.wait_all_clock().await;
+    }
     async fn wait_all_clock(&self) {
         for peer in self.guardians.keys() {
             loop {
@@ -192,7 +219,7 @@ impl Federation {
                     .with_module(self.simplicity)
                     .request_single_peer("block_count".to_owned(), ApiRequestErased::new(()), *peer)
                     .await;
-                if matches!(count, Ok(5)) {
+                if count.is_ok_and(|count| count == self.block_count.load(Ordering::SeqCst)) {
                     break;
                 }
                 fedimint_core::runtime::sleep(Duration::from_millis(100)).await;
@@ -342,6 +369,7 @@ async fn run_guardian(config_path: std::path::PathBuf) {
         ReconnectP2PConnections::new(cfg.local.identity, connector, &tasks, senders, None)
             .into_dyn();
     let path = config_path.parent().unwrap().to_path_buf();
+    let height = path.parent().unwrap().join(BLOCK_COUNT_FILE);
     let registry = registry();
     let decoders = registry
         .available_decoders(cfg.consensus.iter_module_instances())
@@ -371,7 +399,7 @@ async fn run_guardian(config_path: std::path::PathBuf) {
         path,
         env!("CARGO_PKG_VERSION").to_owned(),
         "simplicity-network-test".to_owned(),
-        Arc::new(Bitcoin),
+        Arc::new(Bitcoin { height }),
         format!("127.0.0.1:{}", port + 2).parse().unwrap(),
         Box::new(|_| axum::Router::new()),
         1,
@@ -418,7 +446,7 @@ async fn network_market() {
         event: [7; 32],
         rules: [8; 32],
         oracle: oracle.x_only_public_key().0,
-        resolution_start: 5,
+        resolution_start: INITIAL_BLOCK_COUNT + 1,
         deadline: 10,
     };
     let program = terms.program().unwrap();
@@ -546,6 +574,8 @@ async fn network_market() {
     fed.sign(&mut trade, &[alice, sponsor]).await.unwrap();
     fed.submit(&trade).await;
     fed.wait_contract(point(&trade, 0)).await;
+    // Resolution opens only after issuance and recombination close.
+    fed.set_block_count(terms.resolution_start).await;
     let (mut resolution, sponsor) = fed.sponsored(
         vec![input(point(&issue, 0), 2, 1)],
         vec![vault_output(2000, 1)],

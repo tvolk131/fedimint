@@ -528,8 +528,8 @@ must be module input 0 and recreate itself at outer output 0. `ACTION` witnesses
 
 | Action | Rule |
 | --- | --- |
-| 0: issue | Before the deadline, deposit q sats and issue q YES plus q NO |
-| 1: recombine | While unresolved, burn q of each and release q sats |
+| 0: issue | Before the resolution window, deposit q sats and issue q YES plus q NO |
+| 1: recombine | Before the resolution window, burn q of each and release q sats |
 | 2: resolve | During the resolution window, verify an oracle signature for YES=1, NO=2, or INVALID=3; at/after the deadline only INVALID timeout is allowed |
 | 3: redeem | Burn winners for 1000 msat/unit, or either side for 500 msat/unit when INVALID |
 
@@ -537,7 +537,11 @@ State 0 means unresolved. Resolution permanently commits state 1, 2, or 3 in the
 vault lineage. Authorities remain in the resolved vault but its program forbids
 further issuance. Even an empty vault retains its recorded outcome. Concurrent
 collateral operations contend for that output and must be rebuilt after a
-conflict. Ordinary position transfers do not touch it.
+conflict. Ordinary position transfers do not touch it. Issue and recombine close
+when the resolution window opens, so during the window only resolution can
+spend the vault. Holders of the losing side therefore cannot keep it moving to
+make oracle resolutions conflict until the INVALID timeout. A complete pair
+still redeems for 1000 msat after any outcome.
 
 Oracle messages commit the federation, module, both asset IDs, event identifier,
 resolution-rules hash, oracle key, window, and outcome. Guardians never contact the

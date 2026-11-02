@@ -86,7 +86,7 @@ async fn genesis(fed: &Federation) -> (market::BinaryMarket, OutPoint, Keypair) 
         event: [31; 32],
         rules: [32; 32],
         oracle: oracle.x_only_public_key().0,
-        resolution_start: 5,
+        resolution_start: INITIAL_BLOCK_COUNT + 1,
         deadline: 10,
     };
     let vault = market
@@ -500,6 +500,8 @@ async fn run() {
     // Resolve after a stale mint was persisted. Rebuilding must not turn it
     // into redemption or issue into a market that has ceased to be unresolved.
     let (grace_db, grace_id) = prepare(&fed, 47, &market, 1, auto).await;
+    // Resolution opens only after issuance and recombination close.
+    fed.set_block_count(market.resolution_start).await;
     let current = a.watch_market(&market).await.unwrap();
     let input = SpendIntent {
         outpoint: current,

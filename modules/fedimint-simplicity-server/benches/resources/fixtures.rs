@@ -782,7 +782,8 @@ fn market_case(name: &str) -> Fixture {
         event: [3; 32],
         rules: [4; 32],
         oracle: key().x_only_public_key().0,
-        resolution_start: 5,
+        // Fixtures execute at block 5: issuance must precede resolution.
+        resolution_start: if name == "market_issue" { 6 } else { 5 },
         deadline: 10,
     };
     let program = terms.program().expect("market compiles");
