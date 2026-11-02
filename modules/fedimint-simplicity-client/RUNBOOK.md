@@ -291,7 +291,7 @@ state is accepted.
 
 The module uses the existing guardian Prometheus endpoint. Scrape each guardian
 process separately, including two guardians sharing a Pi; keep the existing
-metrics endpoint access controls. The module adds three metric families:
+metrics endpoint access controls. The module adds four metric families:
 
 - `fm_simplicity_validation_seconds`: histogram of hook wall time by `phase`.
 - `fm_simplicity_validation_calls_total`: finished/dropped hook calls by `phase`
@@ -299,6 +299,8 @@ metrics endpoint access controls. The module adds three metric families:
 - `fm_simplicity_validation_active`: calls currently inside each hook, including
   those awaiting database access or a worker thread. This is not a queue-length
   or CPU-use gauge.
+- `fm_simplicity_program_cache_total`: decoded-program cache lookups by `outcome`
+  (`hit` or `miss`). A miss decodes the program.
 
 The four phases are `structure` (cheap transaction checks), `resolve` (stored
 contract reads), `prepare` (decoding, commitments and aggregate cost checks), and
