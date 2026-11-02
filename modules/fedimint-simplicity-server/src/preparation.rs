@@ -12,7 +12,7 @@ use fedimint_simplicity_common::{ContractError, ContractInput, resources, runtim
 use simplicity::{Cost, RedeemNode};
 
 use crate::db::{ContractKey, StoredContract};
-use crate::executor;
+use crate::executor::Admission;
 
 mod cache;
 mod retention;
@@ -28,6 +28,17 @@ const RETENTION_BUDGET: usize = 8 * 1024 * 1024;
 pub(crate) struct Prepared {
     pub contracts: Resolved,
     pub programs: BTreeMap<usize, Option<Arc<RedeemNode>>>,
+    /// Held until the programs are freed. Execution runs under it too.
+    pub admission: Admission,
+}
+
+impl Drop for Prepared {
+    fn drop(&mut self) {
+        let programs = std::mem::take(&mut self.programs);
+        if programs.values().any(Option::is_some) {
+            self.admission.clone().release(programs);
+        }
+    }
 }
 
 fn input_error(instance: ModuleInstanceId, error: ContractError) -> TransactionError {
@@ -79,9 +90,14 @@ pub(crate) async fn prepare(
 ) -> Result<ModuleTransactionValidation, TransactionError> {
     let decoding = Decoding::new(context, instances)?;
     let prepared = if decoding.inputs.is_empty() {
-        decoding.run(RETENTION_BUDGET)
+        decoding.run(RETENTION_BUDGET, Admission::unlimited(context.mode))
     } else {
-        executor::run(context.mode, move || decoding.run(RETENTION_BUDGET)).await
+        // Wait before decoding, so waiting submissions hold no programs.
+        let admission = Admission::acquire(context.mode).await;
+        let held = admission.clone();
+        admission
+            .run(move || decoding.run(RETENTION_BUDGET, held))
+            .await
     };
     prepared.map(ModuleTransactionValidation::new)
 }
@@ -129,7 +145,7 @@ impl Decoding {
         })
     }
 
-    fn run(self, mut remaining: usize) -> Result<Prepared, TransactionError> {
+    fn run(self, mut remaining: usize, admission: Admission) -> Result<Prepared, TransactionError> {
         let Self {
             contracts,
             mut cost,
@@ -158,6 +174,7 @@ impl Decoding {
         Ok(Prepared {
             contracts,
             programs,
+            admission,
         })
     }
 }
