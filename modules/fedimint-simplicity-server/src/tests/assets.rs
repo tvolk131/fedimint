@@ -220,7 +220,8 @@ impl Market {
                 .unwrap(),
         )
     }
-    async fn issue(&mut self, owner: &Keypair, quantity: u64) -> OutPoint {
+    /// Sign an issue of `quantity` pairs to `owner` without processing it.
+    async fn issue_tx(&self, owner: &Keypair, quantity: u64) -> Transaction {
         let collateral = self
             .fed
             .contract(self.vault)
@@ -264,10 +265,63 @@ impl Market {
             .sign(&mut tx, &[self.operator, request.key, sponsor])
             .await
             .unwrap();
+        tx
+    }
+    async fn issue(&mut self, owner: &Keypair, quantity: u64) -> OutPoint {
+        let tx = self.issue_tx(owner, quantity).await;
         self.fed.process(&tx, 1).await.unwrap();
         self.vault = point(&tx, 0);
         point(&tx, 1)
     }
+}
+
+/// Once oracle resolution opens, only resolution may spend the vault. Holders
+/// of the losing side must not be able to keep spending it until INVALID.
+#[tokio::test]
+async fn binary_market_closes_issue_and_recombine_at_resolution_start() {
+    let mut market = Market::new().await;
+    let alice = key();
+    let alice_program = market::owner_program(alice.x_only_public_key().0).unwrap();
+    let yes = market.terms.yes;
+    let no = market.terms.no;
+    market.fed.vote(4).await;
+    let positions = market.issue(&alice, 2).await;
+    market.fed.vote(5).await;
+    let late_issue = market.issue_tx(&alice, 1).await;
+    assert_error(market.fed.process(&late_issue, 2).await, "program rejected");
+    let (mut recombine, sponsor) = sponsored(
+        vec![
+            market.input(1, 1, &market.oracle),
+            owner_input(&alice_program, positions, &alice, placeholder_signature()),
+        ],
+        vec![
+            market.vault_output(1000, 0),
+            output(
+                alice_program
+                    .asset_output(
+                        Amount::ZERO,
+                        [0; 32],
+                        vec![],
+                        bundle(&[(yes, 1), (no, 1)], &[]),
+                    )
+                    .unwrap(),
+            ),
+            output(
+                alice_program
+                    .asset_output(Amount::from_msats(1000), [0; 32], vec![], bundle(&[], &[]))
+                    .unwrap(),
+            ),
+            actions(&[], &[(yes, 1), (no, 1)]),
+        ],
+    );
+    sign_owner(&mut recombine, 1, &alice_program, positions, &alice);
+    market
+        .fed
+        .sign(&mut recombine, &[market.operator, alice, sponsor])
+        .await
+        .unwrap();
+    assert_error(market.fed.process(&recombine, 2).await, "program rejected");
+    assert!(market.fed.contract(market.vault).await.is_some());
 }
 
 #[tokio::test]
