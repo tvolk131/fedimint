@@ -28,7 +28,7 @@ use fedimint_simplicity_common::{
 use simplicity::RedeemNode;
 
 use crate::db::{AssetKey, NamespaceKey};
-use crate::{Simplicity, executor, preparation, validate_shape};
+use crate::{Simplicity, preparation, validate_shape};
 
 #[derive(Debug)]
 pub(crate) struct ValidatedTransaction {
@@ -152,7 +152,7 @@ pub(crate) async fn validate(
     let fees = if executions.is_empty() {
         Ok(Vec::new())
     } else {
-        executor::run(context.mode, move || execute(executions)).await
+        prepared.admission.run(move || execute(executions)).await
     }
     .map_err(input_err)?;
     let metadata = inputs

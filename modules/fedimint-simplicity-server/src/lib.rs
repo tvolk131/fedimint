@@ -90,6 +90,7 @@ impl ServerModuleInit for SimplicityInit {
     }
     async fn init(&self, args: &ServerModuleInitArgs<Self>) -> anyhow::Result<Simplicity> {
         let cfg = load_config(args.cfg())?;
+        executor::start()?;
         let mut module = Simplicity {
             cfg,
             monitor: Some(args.server_bitcoin_rpc_monitor()),

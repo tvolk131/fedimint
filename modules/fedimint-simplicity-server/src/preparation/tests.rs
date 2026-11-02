@@ -344,7 +344,7 @@ async fn retention_budget_changes_neither_execution_result_nor_fees() {
             .unwrap();
             let prepared = Decoding::new(&context, BTreeMap::from([(4, resolved)]))
                 .unwrap()
-                .run(budget)
+                .run(budget, Admission::unlimited(TxProcessingMode::Consensus))
                 .unwrap();
             assert_eq!(
                 prepared.programs.values().filter(|p| p.is_some()).count(),
@@ -405,4 +405,40 @@ async fn activation_gates_inputs_and_outputs_before_program_decoding() {
         ))
     );
     assert!(resolve(&mut dbtx, &context(&tx, 4), active).await.is_ok());
+}
+
+#[tokio::test]
+async fn submissions_wait_for_admission_before_decoding_and_consensus_does_not() {
+    let (db, _) = federation();
+    let (input, stored) = spend(0, true);
+    seed(&db, 4, &input, &stored).await;
+    let tx = transaction(vec![(4, input)]);
+    let consensus = context(&tx, 4);
+    let mut submission = context(&tx, 4);
+    submission.mode = TxProcessingMode::Submission;
+    let mut dbtx = db.begin_transaction_nc().await;
+    let mut dbtx = dbtx.to_ref_with_prefix_module_id(4).0;
+    let mut resolved = vec![];
+    for _ in 0..2 {
+        resolved.push(
+            resolve(
+                &mut dbtx,
+                &consensus,
+                fedimint_simplicity_common::MODULE_CONSENSUS_VERSION,
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    let held = crate::executor::hold_all_permits().await;
+    let mut waiting = Box::pin(prepare(
+        &submission,
+        BTreeMap::from([(4, resolved.pop().unwrap())]),
+    ));
+    assert!(futures::poll!(&mut waiting).is_pending());
+    prepare(&consensus, BTreeMap::from([(4, resolved.pop().unwrap())]))
+        .await
+        .unwrap();
+    drop(held);
+    waiting.await.unwrap();
 }

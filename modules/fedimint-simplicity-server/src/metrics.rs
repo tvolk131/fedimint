@@ -31,6 +31,19 @@ pub(crate) static PROGRAM_CACHE: LazyLock<IntCounterVec> = LazyLock::new(|| {
     lookups
 });
 
+/// Submissions waiting for admission before decoding their programs.
+pub(crate) static ADMISSION_WAITING: LazyLock<IntGauge> = LazyLock::new(|| {
+    let waiting = IntGauge::new(
+        "simplicity_admission_waiting",
+        "Submissions waiting for admission before decoding their programs",
+    )
+    .expect("valid fixed gauge descriptor");
+    REGISTRY
+        .register(Box::new(waiting.clone()))
+        .expect("unique Simplicity admission metric");
+    waiting
+});
+
 #[derive(Clone, Copy)]
 pub(crate) enum Phase {
     Structure,
@@ -78,7 +91,7 @@ impl ValidationMetrics {
         let active = IntGaugeVec::new(
             opts!(
                 "simplicity_validation_active",
-                "Module validation hook calls in progress, including those queued for a worker thread"
+                "Module validation hook calls in progress, including those waiting for admission or a worker thread"
             ),
             &["phase"],
         )
