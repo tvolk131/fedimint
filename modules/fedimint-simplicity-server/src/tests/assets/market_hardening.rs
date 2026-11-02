@@ -236,7 +236,8 @@ async fn issuance_preserves_the_vault_policy_authorities_state_and_pair_backing(
             .unwrap();
         assert_error(market.fed.process(&tx, 1).await, "program rejected");
     }
-    for height in [9, 10] {
+    // Issuance closes when oracle resolution opens, not at the deadline.
+    for height in [4, 5] {
         let market = Market::new().await;
         market.fed.vote(height).await;
         let (mut tx, sponsor) = issue_transaction(&market, &owner, 1, 1, 1000, 0);
@@ -245,7 +246,7 @@ async fn issuance_preserves_the_vault_policy_authorities_state_and_pair_backing(
             .sign(&mut tx, &[market.operator, sponsor])
             .await
             .unwrap();
-        if height == 9 {
+        if height < market.terms.resolution_start {
             market.fed.process(&tx, 1).await.unwrap();
         } else {
             assert_error(market.fed.process(&tx, 1).await, "program rejected");
@@ -765,15 +766,16 @@ async fn exact_ecash_funding_charges_static_fees_returns_change_and_rolls_back_s
 #[tokio::test]
 async fn admitted_transactions_are_revalidated_when_the_consensus_clock_changes() {
     let market = Market::new().await;
-    market.fed.vote(9).await;
+    market.fed.vote(4).await;
     let (mut issue, sponsor) = issue_transaction(&market, &key(), 1, 1, 1000, 0);
     market
         .fed
         .sign(&mut issue, &[market.operator, sponsor])
         .await
         .unwrap();
-    let resolution = resolve(&market, 1, 0).await;
     market.fed.check_submission(&issue, 2).await.unwrap();
+    market.fed.vote(9).await;
+    let resolution = resolve(&market, 1, 0).await;
     market.fed.check_submission(&resolution, 2).await.unwrap();
     market.fed.vote(10).await;
     for tx in [&issue, &resolution] {

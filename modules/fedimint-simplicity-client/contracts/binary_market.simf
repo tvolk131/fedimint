@@ -1,6 +1,10 @@
 // One position unit redeems for 1000 msat; INVALID pays 500 msat per unit.
 // Vault is module input 0 and outer output 0. Position owners authorize the
 // entire intent, including payout destinations and change, with their scripts.
+// Issue and recombine close at RESOLUTION_START, so during the resolution
+// window only resolution can spend the vault. Otherwise holders of the losing
+// side could keep spending it to make oracle resolutions conflict until
+// DEADLINE, when INVALID pays them 500 msat per unit.
 fn not(value: bool) -> bool {
     match value { true => false, false => true, }
 }
@@ -33,10 +37,16 @@ fn no_burns() {
     assert!(jet::eq_64(jet::fm_burned_quantity(param::NO), 0));
 }
 
+// Market terms require RESOLUTION_START < DEADLINE, so this also closes issue
+// before DEADLINE.
+fn before_resolution() {
+    assert!(jet::lt_64(jet::fm_block_count(), param::RESOLUTION_START));
+}
+
 fn issue() {
     assert!(jet::eq_256(jet::fm_current_state(), 0));
     assert!(jet::eq_256(jet::fm_output_state(0), 0));
-    assert!(jet::lt_64(jet::fm_block_count(), param::DEADLINE));
+    before_resolution();
     no_burns();
     let quantity: u64 = jet::fm_issued_quantity(param::YES);
     assert!(jet::lt_64(0, quantity));
@@ -48,6 +58,7 @@ fn issue() {
 fn recombine() {
     assert!(jet::eq_256(jet::fm_current_state(), 0));
     assert!(jet::eq_256(jet::fm_output_state(0), 0));
+    before_resolution();
     no_issuance();
     let quantity: u64 = jet::fm_burned_quantity(param::YES);
     assert!(jet::lt_64(0, quantity));
