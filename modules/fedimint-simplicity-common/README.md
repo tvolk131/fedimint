@@ -290,11 +290,13 @@ an input-error envelope. Creation destinations must be asset-bundle outputs in
 their own instance, and several assets may share one destination.
 
 Guardian preparations use an 8 MiB conservative logical retention budget across
-all instances in one transaction, with re-decoding on cache misses. This is not
-an RSS ceiling: decoder/accounting scratch, an uncached program, snapshot records
-and the VM require additional memory. Outer transaction bytes, recovery data,
-assets, types, cells and frames retain their separate limits. None of these
-bounds aggregate guardian load from repeated requests.
+all instances in one transaction, with re-decoding on cache misses. A shared
+32 MiB cache, measured the same way, keeps successfully decoded programs across
+validation attempts. Neither is an RSS ceiling: decoder/accounting scratch, an
+uncached program, snapshot records and the VM require additional memory. Outer
+transaction bytes, recovery data, assets, types, cells and frames retain their
+separate limits. None of these bounds aggregate guardian load from repeated
+requests.
 
 Fixed [consensus vectors](tests/vectors/README.md) pin v0/v1 encodings and signing
 hashes, asset IDs, all custom jet identities/types/costs, and selected execution
