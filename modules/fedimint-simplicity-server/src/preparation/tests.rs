@@ -4,6 +4,7 @@ use fedimint_core::db::Database;
 use fedimint_core::db::mem_impl::MemDatabase;
 use fedimint_core::module::CoreConsensusVersion;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
+use fedimint_core::runtime::{Duration, timeout};
 use fedimint_core::secp256k1::{Keypair, SECP256K1, SecretKey};
 use fedimint_core::transaction::{Transaction, TransactionSignature};
 use fedimint_core::{Amount, OutPoint, TransactionId};
@@ -452,12 +453,15 @@ async fn activation_gates_inputs_and_outputs_before_program_decoding() {
     assert!(resolve(&mut dbtx, &context(&tx, 4), active).await.is_ok());
 }
 
+/// Long enough for a worker to decode a small program that was not waiting.
+const UNADMITTED: Duration = Duration::from_millis(200);
+
 #[tokio::test]
 async fn submissions_wait_for_admission_before_decoding_and_consensus_does_not() {
     let (db, _) = federation();
-    let (input, stored) = spend(0, true);
+    let (input, stored) = tagged_spend(0x7e7e_0000_0003, 0, true);
     seed(&db, 4, &input, &stored).await;
-    let tx = transaction(vec![(4, input)]);
+    let tx = transaction(vec![(4, input.clone())]);
     let consensus = context(&tx, 4);
     let mut submission = context(&tx, 4);
     submission.mode = TxProcessingMode::Submission;
@@ -475,17 +479,59 @@ async fn submissions_wait_for_admission_before_decoding_and_consensus_does_not()
             .unwrap(),
         );
     }
-    let held = crate::executor::hold_all_permits().await;
+    let held = crate::executor::hold_permits(0).await;
     let mut waiting = Box::pin(prepare(
         &submission,
         BTreeMap::from([(4, resolved.pop().unwrap())]),
     ));
-    assert!(futures::poll!(&mut waiting).is_pending());
+    assert!(timeout(UNADMITTED, &mut waiting).await.is_err());
+    // A submission decoding before admission would have cached its program.
+    assert!(!cache::contains(&input));
     prepare(&consensus, BTreeMap::from([(4, resolved.pop().unwrap())]))
         .await
         .unwrap();
+    assert!(cache::contains(&input));
     drop(held);
     waiting.await.unwrap();
+}
+
+#[tokio::test]
+async fn submissions_keep_their_admission_until_their_programs_are_freed() {
+    let (db, _) = federation();
+    let (input, stored) = spend(0, true);
+    seed(&db, 4, &input, &stored).await;
+    let tx = transaction(vec![(4, input)]);
+    let mut submission = context(&tx, 4);
+    submission.mode = TxProcessingMode::Submission;
+    let mut dbtx = db.begin_transaction_nc().await;
+    let mut dbtx = dbtx.to_ref_with_prefix_module_id(4).0;
+    let resolved = resolve(
+        &mut dbtx,
+        &submission,
+        fedimint_simplicity_common::MODULE_CONSENSUS_VERSION,
+    )
+    .await
+    .unwrap();
+    let held = crate::executor::hold_permits(1).await;
+    let prepared = prepare(&submission, BTreeMap::from([(4, resolved)]))
+        .await
+        .unwrap();
+    assert!(
+        prepared
+            .get::<Prepared>()
+            .unwrap()
+            .programs
+            .values()
+            .all(Option::is_some)
+    );
+    // The retained programs keep the last admission after decoding finishes.
+    let mut next = Box::pin(Admission::acquire(TxProcessingMode::Submission));
+    assert!(timeout(UNADMITTED, &mut next).await.is_err());
+    drop(prepared);
+    timeout(Duration::from_secs(10), next)
+        .await
+        .expect("freeing the programs releases the admission");
+    drop(held);
 }
 
 #[tokio::test]
