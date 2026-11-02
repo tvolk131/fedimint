@@ -13,6 +13,7 @@ use fedimint_server_core::{
 };
 use fedimint_simplicity_client::compiler::{Value, arguments, witnesses};
 use fedimint_simplicity_client::{ContractProgram, sign_transaction};
+use fedimint_simplicity_common::compiler::ValueConstructible as _;
 use simplicity::ConstructNode;
 use simplicity::node::CoreConstructible;
 
@@ -35,6 +36,35 @@ fn spend(index: u64, valid: bool) -> (ContractInput, StoredContract) {
             },
             owner().public_key(),
             witnesses([("OK", Value::from(valid))]),
+        )
+        .unwrap();
+    let stored = StoredContract {
+        output: program
+            .output(Amount::from_sats(100), [0; 32], vec![])
+            .unwrap(),
+        creation_session: 0,
+        creation_block_count: 0,
+    };
+    (input, stored)
+}
+
+/// Like [`spend`], but with program bytes that no other test decodes, so
+/// assertions about the shared program cache hold while other tests run.
+fn tagged_spend(tag: u64, index: u64, valid: bool) -> (ContractInput, StoredContract) {
+    let program = ContractProgram::compile(
+        &format!("fn main() {{ assert!(jet::eq_64(witness::TAG, {tag})); }}"),
+        arguments([]),
+    )
+    .unwrap();
+    let witness = if valid { tag } else { tag + 1 };
+    let input = program
+        .input(
+            OutPoint {
+                txid: TransactionId::from_raw_hash(sha256::Hash::all_zeros()),
+                out_idx: index,
+            },
+            owner().public_key(),
+            witnesses([("TAG", Value::u64(witness))]),
         )
         .unwrap();
     let stored = StoredContract {
@@ -318,7 +348,7 @@ async fn retention_budget_changes_neither_execution_result_nor_fees() {
         let (db, _) = federation();
         let mut inputs = vec![];
         for (index, valid) in witnesses.into_iter().enumerate() {
-            let (input, stored) = spend(index as u64, valid);
+            let (input, stored) = tagged_spend(0x7e7e_0000_0001, index as u64, valid);
             seed(&db, 4, &input, &stored).await;
             inputs.push((4, input));
         }
@@ -331,7 +361,13 @@ async fn retention_budget_changes_neither_execution_result_nor_fees() {
         let charge =
             retention::charge(&runtime::decode_program(first).unwrap(), RETENTION_BUDGET).unwrap();
         let mut results = vec![];
-        for (budget, count) in [(0, 0), (charge, 1), (RETENTION_BUDGET, 2)] {
+        // The last case evicts the programs, so execution must decode them again.
+        for (budget, count, evict) in [
+            (0, 0, false),
+            (charge, 1, false),
+            (RETENTION_BUDGET, 2, false),
+            (0, 0, true),
+        ] {
             let mut dbtx = db.begin_transaction_nc().await;
             let mut dbtx = dbtx.to_ref_with_prefix_module_id(4).0;
             let mut context = context(&tx, 4);
@@ -350,6 +386,10 @@ async fn retention_budget_changes_neither_execution_result_nor_fees() {
                 prepared.programs.values().filter(|p| p.is_some()).count(),
                 count
             );
+            if evict {
+                cache::forget(first);
+                assert!(!cache::contains(first));
+            }
             let prepared = ModuleTransactionValidation::new(prepared);
             context.preparation = Some(&prepared);
             results.push(
@@ -362,9 +402,14 @@ async fn retention_budget_changes_neither_execution_result_nor_fees() {
                             .collect::<Vec<_>>()
                     }),
             );
+            if evict {
+                // Execution decoded the first program afresh and cached it.
+                assert!(cache::contains(first));
+            }
         }
         assert_eq!(results[0], results[1]);
         assert_eq!(results[1], results[2]);
+        assert_eq!(results[2], results[3]);
         if witnesses == [true, true] {
             assert!(results[0].is_ok());
         } else {
@@ -441,4 +486,26 @@ async fn submissions_wait_for_admission_before_decoding_and_consensus_does_not()
         .unwrap();
     drop(held);
     waiting.await.unwrap();
+}
+
+#[tokio::test]
+async fn only_programs_that_match_a_contract_are_cached() {
+    let (db, modules) = federation();
+    let (input, mut stored) = tagged_spend(0x7e7e_0000_0002, 0, true);
+    let cmr = stored.output.cmr;
+    stored.output.cmr = [0; 32];
+    seed(&db, 4, &input, &stored).await;
+    let tx = transaction(vec![(4, input.clone())]);
+    check(
+        &db,
+        &modules,
+        &tx,
+        Err(input_error(4, ContractError::Commitment)),
+    )
+    .await;
+    assert!(!cache::contains(&input));
+    stored.output.cmr = cmr;
+    seed(&db, 4, &input, &stored).await;
+    check(&db, &modules, &tx, Ok(())).await;
+    assert!(cache::contains(&input));
 }
