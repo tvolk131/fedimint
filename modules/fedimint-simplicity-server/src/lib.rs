@@ -1,6 +1,7 @@
 //! Experimental Simplicity guardian module.
 
 pub mod db;
+mod executor;
 mod metrics;
 mod preparation;
 #[cfg(test)]
@@ -271,12 +272,12 @@ impl ServerModule for Simplicity {
         let active = self.active_consensus_version(dbtx).await;
         call.finish(preparation::resolve(dbtx, context, active).await)
     }
-    fn prepare_kind_transaction(
+    async fn prepare_kind_transaction(
         context: &ModuleTransactionContext<'_>,
         instances: BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
     ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
         let call = metrics::VALIDATION.start(metrics::Phase::Prepare);
-        call.finish(preparation::prepare(context, instances))
+        call.finish(preparation::prepare(context, instances).await)
     }
     async fn process_input<'a, 'b, 'c>(
         &'a self,

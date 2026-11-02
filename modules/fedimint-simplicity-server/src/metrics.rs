@@ -45,7 +45,7 @@ impl ValidationMetrics {
         let duration = HistogramVec::new(
             histogram_opts!(
                 "simplicity_validation_seconds",
-                "Module validation hook wall time, including interrupted calls",
+                "Module validation hook wall time, including interrupted calls and worker queueing",
                 vec![0.000_01, 0.000_1, 0.001, 0.01, 0.1, 1.0, 10.0]
             ),
             &["phase"],
@@ -62,7 +62,7 @@ impl ValidationMetrics {
         let active = IntGaugeVec::new(
             opts!(
                 "simplicity_validation_active",
-                "Module validation hook calls in progress, not queued requests"
+                "Module validation hook calls in progress, including those queued for a worker thread"
             ),
             &["phase"],
         )

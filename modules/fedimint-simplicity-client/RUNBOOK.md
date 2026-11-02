@@ -279,9 +279,13 @@ the relevant signed outcomes and verify the expected transactions and contract
 records before declaring restoration complete.
 
 Monitor disk growth and consensus progress during load. Per-transaction caps do
-not limit the number of concurrent submissions. There is no module-owned global
-admission queue. Keep a coordinated rollback/upgrade plan: restoring an old
-binary or old database is not automatically safe after newer state is accepted.
+not limit the number of concurrent submissions. Program decoding and execution
+run on dedicated threads: one for agreed transactions, and for submissions a pool
+of half the CPU cores (one to eight threads). Submissions queue for that pool
+rather than being refused, so heavy admission load shows up as slower submission
+responses, not as delayed consensus. Keep a coordinated rollback/upgrade plan:
+restoring an old binary or old database is not automatically safe after newer
+state is accepted.
 
 ## Validation metrics
 
@@ -293,7 +297,8 @@ metrics endpoint access controls. The module adds three metric families:
 - `fm_simplicity_validation_calls_total`: finished/dropped hook calls by `phase`
   and fixed `outcome` category (`ok`, `interrupted`, or a rejection category).
 - `fm_simplicity_validation_active`: calls currently inside each hook, including
-  those awaiting database access. This is not a queue-length or CPU-use gauge.
+  those awaiting database access or a worker thread. This is not a queue-length
+  or CPU-use gauge.
 
 The four phases are `structure` (cheap transaction checks), `resolve` (stored
 contract reads), `prepare` (decoding, commitments and aggregate cost checks), and
