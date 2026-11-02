@@ -157,12 +157,14 @@ impl Decoding {
             let stored = contracts
                 .get(index)
                 .ok_or_else(|| error(ContractError::MissingContext))?;
-            let (program, charge) = cache::decode(contract).map_err(error)?;
-            cost = cost + program.bounds().cost;
+            let decoded = cache::decode(contract).map_err(error)?;
+            cost = cost + decoded.program.bounds().cost;
             if cost > Cost::from_milliweight(resources::MAX_TRANSACTION_MILLIWEIGHT) {
                 return Err(error(ContractError::Limit));
             }
-            runtime::check_commitment(&program, &stored.output).map_err(error)?;
+            runtime::check_commitment(&decoded.program, &stored.output).map_err(error)?;
+            // Only programs that match a stored contract enter the shared cache.
+            let (program, charge) = decoded.keep();
             // A cache miss changes only performance. Every input has already passed
             // decoding, cost, version and commitment checks before execution starts.
             let retained = charge.filter(|charge| *charge <= remaining).map(|charge| {
@@ -180,8 +182,10 @@ impl Decoding {
 }
 
 /// Decode an input that preparation did not retain, through the shared cache.
+/// Preparation has already matched its program to a stored contract, so a
+/// fresh decoding may be cached.
 pub(crate) fn decode(input: &ContractInput) -> Result<Arc<RedeemNode>, ContractError> {
-    cache::decode(input).map(|(program, _)| program)
+    cache::decode(input).map(|decoded| decoded.keep().0)
 }
 
 pub(crate) fn get<'a>(

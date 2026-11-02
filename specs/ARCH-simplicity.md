@@ -40,10 +40,10 @@ Kind preparation retains decoded programs within a local accounting budget;
 uncached programs are decoded again for execution. Retention changes performance
 only, never transaction validity or fees. Preparations are owned by one validation
 attempt and dropped before input/output processing. Separately, a process-wide
-cache holds successfully decoded programs, keyed by SHA-256 of the program and
-witness bytes and bounded by the same accounting. Decoding depends only on those
-bytes, so admission, revalidation and consensus share it, and it too changes only
-performance.
+cache holds decoded programs that passed the cost and commitment checks against a
+stored contract, keyed by SHA-256 of the program and witness bytes and bounded by
+the same accounting. Decoding depends only on those bytes, so admission,
+revalidation and consensus share it, and it too changes only performance.
 
 Simplicity decodes and executes programs on dedicated worker threads, not the
 async runtime that serves the API and drives consensus. Agreed transactions use
