@@ -68,6 +68,7 @@ let
     "fedimint-ui-common/assets/.*"
     "modules/fedimint-simplicity-client/contracts/.*\\.simf"
     "modules/fedimint-simplicity-common/tests/vectors/consensus\\.json"
+    "modules/fedimint-simplicity-client/tests/vectors/templates\\.json"
   ];
 
   commonSrc = builtins.path {
@@ -127,6 +128,7 @@ let
         "fedimint-ui-common/assets/.*"
         "modules/fedimint-simplicity-client/contracts/.*\\.simf"
         "modules/fedimint-simplicity-common/tests/vectors/consensus\\.json"
+        "modules/fedimint-simplicity-client/tests/vectors/templates\\.json"
       ]
     ) src;
 
