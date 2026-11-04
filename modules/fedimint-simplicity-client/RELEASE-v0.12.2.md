@@ -6,6 +6,22 @@ The `simplicity-v0.12.2` branch starts at official tag `v0.12.2`, commit
 upstream base, `487948934b8`. It does not merge the intervening upstream master
 changes. The development branch remains available independently.
 
+## Changes since beta.1
+
+These changes are not beta.2 qualification. Dedicated validation worker pools,
+a submission admission limit and a shared decoded-program cache were added
+after the tag. Live contract accounting now uses a stored running total.
+Commit `b10dd659267` registers the automatic module database version 0-to-1
+migration to initialize that total; beta.1 cannot reopen the migrated database.
+Rollback requires a backup taken before starting the new binary.
+
+Commit `3e19049231d` changes `binary-market/v1` in place so issue and recombine
+close at `RESOLUTION_START`. Both its CMR and the constant-product template CMR
+changed. The new wallet does not recognize beta.1 market vaults or AMM pools;
+recovery silently skips mismatching descriptors. These are abandoned test state
+unless resolved or redeemed before upgrading. See the
+[upgrade procedure](RUNBOOK.md#upgrading-from-beta1).
+
 ## Compatibility boundaries
 
 The first beta baseline uses module configuration version `0.1` and an
@@ -22,7 +38,7 @@ Earlier qualification records below are evidence for their named revisions;
 they do not automatically qualify these new activation rules.
 
 The original port preserved the development module's wire formats, consensus
-rules, fee formula, contract templates, funding reservations and authenticated
+rules, fee formula, original contract templates, funding reservations and authenticated
 session-history recovery. The subsequent maximal-pruning change restricts accepted
 spends in both execution versions before deployment: every revealed node must
 execute and every revealed case must use both branches. Commitments and descriptor
