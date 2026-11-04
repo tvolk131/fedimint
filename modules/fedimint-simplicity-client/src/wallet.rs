@@ -126,9 +126,13 @@ impl WalletStore {
             .unwrap_or(0)
     }
 
-    /// Capture a recovery boundary and resume from the saved session prefix.
+    /// Resume from the saved session prefix up to the current session.
     /// The current session is read through the quorum-authenticated status API;
     /// later syncs extend that prefix rather than skipping its remaining items.
+    ///
+    /// Only the first complete scan persists its target as a recovery barrier
+    /// (see [`Self::is_recovering`]). Later syncs keep the target in memory, so
+    /// an in-flight or failed routine sync never blocks submissions.
     pub async fn sync(
         &self,
         history: &SessionHistory,
@@ -136,6 +140,9 @@ impl WalletStore {
     ) -> anyhow::Result<()> {
         let _lock = self.sync_lock.lock().await;
         let mut dbtx = self.db.begin_transaction().await;
+        // A saved target is an unfinished initial scan. Databases written
+        // before the completion marker existed may also hold a target left by a
+        // failed routine sync; finishing it once is merely conservative.
         let target = if let Some(target) = dbtx.get_value(&db::RecoveryTargetKey).await {
             target
         } else {
@@ -143,7 +150,9 @@ impl WalletStore {
             drop(dbtx);
             let target = history.api.session_count().await?;
             dbtx = self.db.begin_transaction().await;
-            dbtx.insert_entry(&db::RecoveryTargetKey, &target).await;
+            if dbtx.get_value(&db::RecoveryCompleteKey).await.is_none() {
+                dbtx.insert_entry(&db::RecoveryTargetKey, &target).await;
+            }
             target
         };
         dbtx.commit_tx_result().await?;
@@ -186,10 +195,13 @@ impl WalletStore {
         }
         let mut dbtx = self.db.begin_transaction().await;
         dbtx.remove_entry(&db::RecoveryTargetKey).await;
+        dbtx.insert_entry(&db::RecoveryCompleteKey, &()).await;
         dbtx.commit_tx_result().await?;
         Ok(())
     }
 
+    /// Whether the wallet's initial history scan has not completed, so its
+    /// view of owned contracts may be incomplete.
     pub async fn is_recovering(&self) -> bool {
         self.db
             .begin_transaction_nc()

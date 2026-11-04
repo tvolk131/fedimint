@@ -93,3 +93,10 @@ pub struct SuccessorKey(pub OutPoint);
 pub struct SuccessorPrefix;
 impl_db_record!(key = SuccessorKey, value = OutPoint, db_prefix = 0x0e);
 impl_db_lookup!(key = SuccessorKey, query_prefix = SuccessorPrefix);
+
+/// The initial authenticated history scan completed. Written atomically with
+/// the removal of [`RecoveryTargetKey`], so later routine syncs never persist
+/// a target and never block submissions.
+#[derive(Debug, Clone, Encodable, Decodable, Serialize)]
+pub struct RecoveryCompleteKey;
+impl_db_record!(key = RecoveryCompleteKey, value = (), db_prefix = 0x0f);
