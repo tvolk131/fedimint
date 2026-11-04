@@ -203,3 +203,34 @@ async fn failed_authentication_never_applies_a_prefetched_successor() {
         Some(spend.tx_hash())
     );
 }
+
+#[tokio::test]
+async fn incremental_sync_failure_does_not_restart_recovery() {
+    let store = wallet(database()).await;
+    let initial = RangeApi::new(vec![session(&[])], false);
+    store.sync(&initial.history(), |_, _| {}).await.unwrap();
+    let api = RangeApi::new(vec![session(&[]), session(&[])], false);
+    api.fail_one.store(true, Ordering::SeqCst);
+    assert!(store.sync(&api.history(), |_, _| {}).await.is_err());
+    assert!(!store.is_recovering().await);
+    assert!(!wallet(store.db.clone()).await.is_recovering().await);
+}
+
+#[tokio::test]
+async fn only_initial_sync_blocks_while_history_is_in_flight() {
+    let store = wallet(database()).await;
+    let api = RangeApi::new(vec![session(&[])], true);
+    let history = api.history();
+    let mut sync = Box::pin(store.sync(&history, |_, _| {}));
+    assert!(futures::poll!(&mut sync).is_pending());
+    assert!(store.is_recovering().await);
+    api.gates[0].add_permits(4);
+    sync.await.unwrap();
+    let api = RangeApi::new(vec![session(&[]), session(&[])], true);
+    let history = api.history();
+    let mut sync = Box::pin(store.sync(&history, |_, _| {}));
+    assert!(futures::poll!(&mut sync).is_pending());
+    assert!(!store.is_recovering().await);
+    drop(sync);
+    assert!(!wallet(store.db.clone()).await.is_recovering().await);
+}
