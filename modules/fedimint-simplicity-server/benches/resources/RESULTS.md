@@ -1,3 +1,7 @@
+> These results predate the worker pools, submission admission limit and
+> decoded-program cache added in commits after 2026-10-04. Rerun these
+> benchmarks before beta.2 qualification; these numbers do not qualify beta.2.
+
 # Simplicity resource results — 2026-10-02–04
 
 These measurements motivated transaction-wide caps, shared context, early

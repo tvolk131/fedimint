@@ -231,6 +231,33 @@ beta.1 candidate's, are migrated when the new binary starts: the module sums
 its existing contracts into the total before it processes consensus.
 Retain this deployment's configuration, history and checkpoints as fixtures.
 
+### Upgrading from beta.1
+
+Beta.1 markets are throwaway test state. The `binary-market/v1` template
+changed in place: issue and recombine close at `RESOLUTION_START`. Its CMR and
+the constant-product template CMR changed, because the latter embeds the market
+CMR. Tell users before upgrading: the new wallet does not recognize beta.1
+market vaults or AMM pools, and recovery silently skips descriptors whose CMR
+does not match. Resolve or redeem those positions using beta.1 software before
+the upgrade, or treat them as abandoned test state. Mnemonic recovery with the
+new client does not restore compatibility.
+
+1. Stop all guardians. Back up each guardian's complete data directory while
+   stopped, before the first start of the new binary. Retain configuration,
+   secrets and history securely with the exact old binary identity.
+2. Replace the binaries on all guardians with the same reviewed revision, then
+   start them. The module database migration from version 0 to 1 automatically
+   recomputes the live contract total from existing contracts. It is one-way;
+   it does not wait for a module upgrade vote.
+3. Verify consensus progress and expected contract records. Retain the backups.
+   To roll back to beta.1, stop the guardians, restore each pre-upgrade backup,
+   and run the old binary. The old binary refuses the migrated database with
+   `On disk database version ... was higher than the code database version ...`.
+   Coordinate restoration across the federation; restoring a checkpoint loses
+   subsequent state and must not be presented as preserving later transactions.
+
+### Module upgrade votes
+
 For a future compatible release, install reviewed binaries on every guardian.
 They keep enforcing the active rules until all peers advertise sufficient support
 and ordered consensus votes activate the successor. Read each guardian's module
@@ -292,6 +319,40 @@ disconnects, so connection limits do not cap this load. Keep a coordinated
 rollback/upgrade plan:
 restoring an old binary or old database is not automatically safe after newer
 state is accepted.
+
+### Validation takes unexpectedly long
+
+If the consensus session stops advancing, or validation/admission gauges remain
+high, collect evidence before restarting:
+
+1. Compare each guardian's session progress and timestamped samples of
+   `fm_simplicity_validation_active` by `phase`,
+   `fm_simplicity_admission_waiting`, `fm_simplicity_validation_seconds`, and
+   `fm_simplicity_validation_calls_total`. Record host CPU, memory, disk and
+   thermal state. Active calls include waiting; these gauges alone cannot
+   identify a transaction whose validation takes unexpectedly long.
+2. Preserve logs around the last advancing session. In retained `fm::consensus` trace logs, inspect
+   `Processing consensus item` and the session/item indices; correlate any
+   available transaction hash with client submission records. Metrics contain
+   no transaction identifiers. Do not submit the transaction again to diagnose it.
+3. Capture per-thread CPU observations and, with appropriate local diagnostic
+   tooling, thread stacks. Inspect `simplicity-consensus-0` and
+   `simplicity-submission-0` through the configured submission pool's last
+   index. Preserve timestamps, binary revision/hashes, configuration, logs,
+   metric samples and a stopped database copy securely. A transaction may not
+   be identifiable from the available logs; record that limitation.
+4. Report privately to the maintainers with the evidence and any identified
+   transaction. Do not publish the transaction or sensitive database material.
+
+A full process restart clears in-memory submission work, admission permits and
+worker pools, but clients can resubmit. Disconnecting a client does not cancel
+its API request; dropping a waiting caller does not interrupt a running worker
+job. Restart is therefore not a durable remedy. Consensus recovers its persisted
+session and replays agreed items; already committed items are skipped, but a
+transaction already in an agreed consensus item that has not committed will be
+validated again and can stall again. Preserve the database and coordinate with
+maintainers rather than deleting history or editing consensus items. Follow the
+backup-based rollback procedure above only as a coordinated restoration.
 
 ## Validation metrics
 

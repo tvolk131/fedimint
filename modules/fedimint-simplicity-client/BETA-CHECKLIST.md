@@ -1,8 +1,9 @@
 # Simplicity: remaining beta work
 
-Checkpoint: 2026-10-10. The [v0.12.2 port](RELEASE-v0.12.2.md) records the
+Checkpoint: beta.2 preparation, 2026-11-04. Beta.1 qualification does not
+qualify the current HEAD. The [v0.12.2 port](RELEASE-v0.12.2.md) records the
 release baseline and focused checks; earlier evidence remains tied to its
-original development revision. These seven workstreams separate bounded
+original development revision. These workstreams separate bounded
 code/artifact qualification from the deployment and pilot work still outstanding. The native market
 application exercises the SDK, but does not replace module release checks. Use test
 funds throughout. The [runbook](RUNBOOK.md) covers deployment and recovery;
@@ -32,7 +33,7 @@ they retain the outstanding platform, operational, or candidate-specific work.
    not an exhaustive consensus-equivalence proof.
 
 2. [x] **Bounded execution fuzzing and sanitizers.** Extend the deterministic mutation
-   probes into decoding, type inference, witnesses, VM execution, and the
+   probes into decoding, witnesses, VM execution, and the
    custom Rust/C frame adapters. Run bounded, instrumented campaigns and keep
    actionable reproducers as regression tests. This needs suitable sanitizer
    toolchains and compute time; it does not require a new protocol design.
@@ -101,9 +102,10 @@ they retain the outstanding platform, operational, or candidate-specific work.
    a version 0-to-1 module database migration seeds the stored live contract
    total from its existing contracts. The next candidate's qualification must
    open that checkpoint with the new binaries and spend a contract created
-   before the upgrade. Its client fixtures are unaffected.
+   before the upgrade. Beta.1 market/AMM client fixtures are incompatible with the changed template
+   CMRs; see the runbook upgrade procedure.
 
-6. [x] **Exact release-candidate checks and packaging.** Release
+6. [x] **Beta.1 release-candidate checks and packaging.** Release
    `v0.12.2-simplicity-beta.1` tags code candidate `ac5b7094c77` on official
    Fedimint v0.12.2; module config/consensus/API remain `0.1`. Its
    [final qualification record](RELEASE-v0.12.2.md#final-beta-candidate-october-10-2026)
@@ -140,3 +142,10 @@ For each item, record the tested revision, environment, result, limitations, and
 remaining failures before marking it complete. Keep reproducible checks and
 necessary fixtures in the repository; retain bulky raw logs with the release
 evidence rather than committing every run.
+
+- [ ] **Decoder worst-case performance under adversarial programs reviewed and bounded.**
+- [ ] **Beta.2 qualification.** Repeat exact-candidate checks and packaging on
+  beta.2 artifacts. Open the retained beta.1 guardian checkpoint with the new
+  binaries and spend a contract created before the upgrade, as required in
+  item 5. Record the market/AMM incompatibility separately; beta.1 evidence
+  does not qualify beta.2.
