@@ -33,7 +33,7 @@ they retain the outstanding platform, operational, or candidate-specific work.
    not an exhaustive consensus-equivalence proof.
 
 2. [x] **Bounded execution fuzzing and sanitizers.** Extend the deterministic mutation
-   probes into decoding, witnesses, VM execution, and the
+   probes into decoding, type inference, witnesses, VM execution, and the
    custom Rust/C frame adapters. Run bounded, instrumented campaigns and keep
    actionable reproducers as regression tests. This needs suitable sanitizer
    toolchains and compute time; it does not require a new protocol design.
@@ -143,7 +143,9 @@ remaining failures before marking it complete. Keep reproducible checks and
 necessary fixtures in the repository; retain bulky raw logs with the release
 evidence rather than committing every run.
 
-- [ ] **Decoder worst-case performance under adversarial programs reviewed and bounded.**
+- [ ] **Resource benchmarks rerun on beta.2 artifacts.** Repeat the
+  [resource benchmarks](../fedimint-simplicity-server/benches/resources/README.md)
+  after the worker-pool, admission and cache changes, and record the results.
 - [ ] **Beta.2 qualification.** Repeat exact-candidate checks and packaging on
   beta.2 artifacts. Open the retained beta.1 guardian checkpoint with the new
   binaries and spend a contract created before the upgrade, as required in

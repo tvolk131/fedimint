@@ -350,9 +350,10 @@ its API request; dropping a waiting caller does not interrupt a running worker
 job. Restart is therefore not a durable remedy. Consensus recovers its persisted
 session and replays agreed items; already committed items are skipped, but a
 transaction already in an agreed consensus item that has not committed will be
-validated again and can stall again. Preserve the database and coordinate with
-maintainers rather than deleting history or editing consensus items. Follow the
-backup-based rollback procedure above only as a coordinated restoration.
+validated again on restart, so a restart may not clear the condition. Preserve
+the database and coordinate with maintainers rather than deleting history or
+editing consensus items. Follow the backup-based rollback procedure above only
+as a coordinated restoration.
 
 ## Validation metrics
 
