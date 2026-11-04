@@ -205,7 +205,7 @@ impl Federation {
     async fn set_block_count(&self, count: u64) {
         let height = self.directory.path().join(BLOCK_COUNT_FILE);
         let staged = height.with_extension("tmp");
-        std::fs::write(&staged, count.to_string()).unwrap();
+        fedimint_core::util::write_overwrite(&staged, count.to_string()).unwrap();
         // Guardians poll concurrently; never let them read a partial write.
         std::fs::rename(staged, height).unwrap();
         self.block_count.store(count, Ordering::SeqCst);

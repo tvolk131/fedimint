@@ -3,6 +3,8 @@ name: Simplicity release checks
 on:
   push:
     branches: [simplicity-v0.12.2]
+  pull_request:
+    branches: [simplicity-v0.12.2]
   workflow_dispatch:
 
 defaults:
