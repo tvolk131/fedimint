@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use anyhow::ensure;
 use fedimint_api_client::api::FederationApiExt as _;
 use fedimint_core::db::IDatabaseTransactionOpsCoreTyped as _;
@@ -8,7 +6,7 @@ use fedimint_core::module::ApiRequestErased;
 use fedimint_core::{Amount, OutPoint};
 use serde::{Deserialize, Serialize};
 
-use super::{Intent, IntentPlan};
+use super::{Intent, IntentContext, IntentPlan};
 use crate::common::ContractOutput;
 use crate::common::assets::{AssetActions, AssetAmount, AssetBundle, AssetRecord};
 use crate::compiler::{Value, ValueConstructible, witnesses};
@@ -40,7 +38,7 @@ impl MintPairs {
     pub(super) fn build(
         &self,
         wallet: &SimplicityClientModule,
-        contracts: &BTreeMap<OutPoint, WalletContract>,
+        context: &IntentContext,
     ) -> anyhow::Result<IntentPlan> {
         ensure!(
             self.market.federation == wallet.store.federation
@@ -70,7 +68,7 @@ impl MintPairs {
                 "destination must receive exactly the requested positions"
             );
         }
-        let (point, vault) = successor(self.anchor, &self.market, contracts)?;
+        let (point, vault) = successor(self.anchor, &self.market, context)?;
         ensure!(
             vault.output.state == [0; 32],
             "market has resolved; pair issuance no longer matches intent"
@@ -144,11 +142,11 @@ fn matches_market(output: &ContractOutput, market: &BinaryMarket, cmr: [u8; 32])
 fn successor<'a>(
     mut point: OutPoint,
     market: &BinaryMarket,
-    contracts: &'a BTreeMap<OutPoint, WalletContract>,
+    context: &'a IntentContext,
 ) -> anyhow::Result<(OutPoint, &'a WalletContract)> {
     let cmr = market.program()?.cmr();
-    for _ in 0..=contracts.len() {
-        let vault = contracts.get(&point).ok_or_else(|| {
+    for _ in 0..=context.contracts.len() {
+        let vault = context.contracts.get(&point).ok_or_else(|| {
             anyhow::anyhow!("unknown market anchor; watch its authenticated history first")
         })?;
         ensure!(
@@ -158,15 +156,14 @@ fn successor<'a>(
         let Some(spent_by) = vault.spent_by else {
             return Ok((point, vault));
         };
-        let candidates = contracts
-            .iter()
-            .filter(|(p, c)| p.txid == spent_by && matches_market(&c.output, market, cmr))
-            .collect::<Vec<_>>();
+        point = *context
+            .successors
+            .get(&point)
+            .ok_or_else(|| anyhow::anyhow!("missing market successor"))?;
         ensure!(
-            candidates.len() == 1,
-            "missing or ambiguous market successor"
+            point.txid == spent_by,
+            "market successor does not belong to consuming transaction"
         );
-        point = *candidates[0].0;
     }
     anyhow::bail!("cyclic market history")
 }
@@ -175,8 +172,8 @@ impl SimplicityClientModule {
     /// Discover an existing public vault using immutable asset origins and
     /// authenticated session history. This one-time scan also handles a vault
     /// that has advanced before the wallet first learned about the market.
-    /// Watching alone is local; an accepted interaction carries an encrypted
-    /// descriptor so mnemonic recovery rediscovers that participation.
+    /// Watching alone is local; an accepted interaction carries encrypted
+    /// recovery metadata so mnemonic recovery rediscovers that participation.
     pub async fn watch_market(&self, market: &BinaryMarket) -> anyhow::Result<OutPoint> {
         self.watch_market_with_progress(market, &|_| {}).await
     }
@@ -227,8 +224,7 @@ impl SimplicityClientModule {
         }
         // Asset records authenticate the genesis policy, but only the complete
         // transaction establishes its exact balances and authority set.
-        let contracts = self.contracts().await.into_iter().collect();
-        Ok(successor(origin, market, &contracts)?.0)
+        Ok(successor(origin, market, &self.intent_context().await)?.0)
     }
 }
 

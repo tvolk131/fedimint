@@ -2,6 +2,7 @@ use bitcoin::hashes::{Hash, sha256};
 use fedimint_core::TransactionId;
 use fedimint_core::config::FederationId;
 use fedimint_core::secp256k1::{Keypair, SECP256K1};
+use std::collections::BTreeMap;
 
 use super::*;
 use crate::common::assets::AssetId;
@@ -57,29 +58,40 @@ fn follows_the_spending_transaction_and_exact_authorities_not_just_cmr() {
         malformed.output.extension = Some(crate::common::assets::AssetExtension::Bundle(bundle));
         // Correct policy/state and asset origins alone cannot validate the
         // vault: these authenticated funding outputs are unspendable.
-        assert!(successor(point(1), &market, &BTreeMap::from([(point(1), malformed)])).is_err());
+        let context = IntentContext {
+            contracts: BTreeMap::from([(point(1), malformed)]),
+            successors: BTreeMap::new(),
+        };
+        assert!(successor(point(1), &market, &context).is_err());
     }
     initial.spent_by = Some(point(2).txid);
-    let mut contracts = BTreeMap::from([(point(1), initial), (point(3), contract.clone())]);
-    assert!(successor(point(1), &market, &contracts).is_err());
-    contracts.insert(point(2), contract.clone());
-    assert_eq!(
-        successor(point(1), &market, &contracts).unwrap().0,
-        point(2)
-    );
+    let mut context = IntentContext {
+        contracts: BTreeMap::from([(point(1), initial), (point(3), contract.clone())]),
+        successors: BTreeMap::new(),
+    };
+    assert!(successor(point(1), &market, &context).is_err());
+    context.contracts.insert(point(2), contract.clone());
+    assert!(successor(point(1), &market, &context).is_err());
+    context.successors.insert(point(1), point(3));
+    assert!(successor(point(1), &market, &context).is_err());
+    context.successors.insert(point(1), point(2));
+    assert_eq!(successor(point(1), &market, &context).unwrap().0, point(2));
     let mut invalid = contract.clone();
     invalid.output.extension = Some(crate::common::assets::AssetExtension::Bundle(
         AssetBundle::default(),
     ));
-    contracts.insert(point(2), invalid);
-    assert!(successor(point(1), &market, &contracts).is_err());
-    contracts.insert(point(2), contract.clone());
-    contracts.insert(
+    context.contracts.insert(point(2), invalid);
+    assert!(successor(point(1), &market, &context).is_err());
+    context.contracts.insert(point(2), contract.clone());
+    context.contracts.insert(
         OutPoint {
             out_idx: 1,
             ..point(2)
         },
         contract,
     );
-    assert!(successor(point(1), &market, &contracts).is_err());
+    assert_eq!(successor(point(1), &market, &context).unwrap().0, point(2));
+    context.contracts.get_mut(&point(2)).unwrap().spent_by = Some(point(1).txid);
+    context.successors.insert(point(2), point(1));
+    assert!(successor(point(1), &market, &context).is_err());
 }

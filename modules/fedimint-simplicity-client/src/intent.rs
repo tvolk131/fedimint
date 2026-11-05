@@ -190,8 +190,7 @@ impl IntentHandlers for BuiltinIntents {
             intent.template == "binary-market-mint-pairs" && intent.version == 1,
             "unsupported intent template or version"
         );
-        MintPairs::consensus_decode_whole(&intent.data, &Default::default())?
-            .build(wallet, &context.contracts)
+        MintPairs::consensus_decode_whole(&intent.data, &Default::default())?.build(wallet, context)
     }
 }
 
