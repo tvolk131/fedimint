@@ -50,6 +50,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-18 libclang-18-dev cmake pkg-config
           rustup toolchain install 1.93.0 --profile minimal
+      - name: Restore native Cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+          key: >-
+            cargo-v1-${{ runner.os }}-${{ runner.arch }}-native-1.93.0-${{
+            hashFiles('Cargo.lock', '**/Cargo.toml', '.cargo/**',
+            '.github/workflows/simplicity-consensus.yml') }}
       - name: Record environment and verify native architecture
         env:
           EXPECTED_ARCH: ${{ matrix.arch }}
@@ -84,6 +96,15 @@ jobs:
           path: evidence/
           if-no-files-found: error
           retention-days: 14
+      - name: Save native Cargo cache
+        if: ${{ success() && github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   compare:
     name: Compare native consensus observations
@@ -151,6 +172,20 @@ jobs:
             sudo apt-get install -y clang-18 libclang-18-dev cmake pkg-config protobuf-compiler
             rustup toolchain install 1.93.0 --profile minimal --component clippy
           } 2>&1 | tee evidence/setup.log
+      - name: Restore release Cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+          key: >-
+            cargo-v1-${{ runner.os }}-${{ runner.arch }}-release-1.93.0-${{
+            hashFiles('Cargo.lock', '**/Cargo.toml', '.cargo/**',
+            '.github/workflows/simplicity-consensus.yml',
+            'scripts/tests/simplicity-release-checks.sh',
+            'scripts/tests/simplicity-artifacts.sh') }}
       - name: Record public source, configuration and coverage scope
         id: manifest
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
@@ -200,6 +235,15 @@ jobs:
           path: evidence/
           if-no-files-found: error
           retention-days: 14
+      - name: Save release Cargo cache
+        if: ${{ success() && github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   quality:
     name: Repository format and lint
