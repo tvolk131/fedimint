@@ -26,6 +26,15 @@ simplicity_doc_packages=(
     -p fedimint-mintv2-common -p fedimint-mintv2-client -p fedimint-mintv2-server
     -p fedimint-server -p fedimint-server-core
 )
+simplicity_network_tests=(
+    four_guardians_submit_settle_and_recover_a_market_from_disk
+    sessions::creation_sessions_and_expired_policy_replay_match_authenticated_history
+    status::operator_status_observes_four_guardians_and_a_missing_peer
+    wallet::direct_sender_receipts_restore_history_without_owning_recipient_contracts
+    wallet::intents::shared_market_intents_survive_races_restarts_limits_and_resolution
+    wallet::mnemonic_only_client_recovery_preserves_assets_history_and_spendability
+    wallet::receipts::watched_market_submission_survives_mnemonic_only_recovery
+)
 
 case "${1:-tests}" in
     tests)
@@ -40,7 +49,9 @@ case "${1:-tests}" in
         for regression in sends_ecash_out_of_band \
             transaction_with_invalid_signature_is_rejected \
             reissuing_the_same_notes_twice_reports_already_reissued; do
-            rustup run "$simplicity_toolchain" cargo test --release --locked \
+            python3 -B scripts/tests/simplicity_test_selection.py \
+                --name "mint-${regression//_/-}" --require "$regression" -- \
+                rustup run "$simplicity_toolchain" cargo test --release --locked \
                 -p fedimint-mint-tests --test fedimint_mint_tests "$regression" -- \
                 --exact --test-threads=1
         done
@@ -53,7 +64,13 @@ case "${1:-tests}" in
             "${simplicity_doc_packages[@]}" --doc -- --test-threads=2
         ;;
     network)
-        rustup run "$simplicity_toolchain" cargo test --release --locked \
+        required_network_tests=()
+        for scenario in "${simplicity_network_tests[@]}"; do
+            required_network_tests+=(--require "tests::assets::network::$scenario")
+        done
+        python3 -B scripts/tests/simplicity_test_selection.py \
+            --name network "${required_network_tests[@]}" -- \
+            rustup run "$simplicity_toolchain" cargo test --release --locked \
             "${simplicity_test_packages[@]}" --lib --tests tests::assets::network:: -- \
             --nocapture --test-threads=1
         ;;
