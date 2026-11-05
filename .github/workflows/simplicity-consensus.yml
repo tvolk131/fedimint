@@ -143,27 +143,55 @@ jobs:
         with:
           persist-credentials: false
       - name: Install build tools
+        id: setup
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-18 libclang-18-dev cmake pkg-config protobuf-compiler
-          rustup toolchain install 1.93.0 --profile minimal --component clippy
           mkdir -p evidence
           {
-            git rev-parse HEAD
-            sha256sum Cargo.lock
-            rustup run 1.93.0 rustc -vV
-            clang-18 --version
-            df -h .
-          } > evidence/release-environment.txt
-      - name: Module and affected shared-component tests
+            sudo apt-get update
+            sudo apt-get install -y clang-18 libclang-18-dev cmake pkg-config protobuf-compiler
+            rustup toolchain install 1.93.0 --profile minimal --component clippy
+          } 2>&1 | tee evidence/setup.log
+      - name: Record public source, configuration and coverage scope
+        id: manifest
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: bash scripts/tests/simplicity-artifacts.sh environment 2>&1 | tee evidence/manifest.log
+      - name: Module, shared, default-module and mintv2 behavior regressions
+        id: tests
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: scripts/tests/simplicity-release-checks.sh tests 2>&1 | tee evidence/tests.log
+      - name: Affected module and shared-component documentation tests
+        id: docs
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: scripts/tests/simplicity-release-checks.sh docs 2>&1 | tee evidence/docs.log
       - name: Four-guardian consensus, restart and wallet recovery
+        id: network
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         timeout-minutes: 25
         run: scripts/tests/simplicity-release-checks.sh network 2>&1 | tee evidence/network.log
       - name: Module Clippy
+        id: clippy
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: scripts/tests/simplicity-release-checks.sh clippy 2>&1 | tee evidence/clippy.log
       - name: Build ordinary and Simplicity-enabled guardians
+        id: guardian
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: scripts/tests/simplicity-release-checks.sh guardian 2>&1 | tee evidence/guardian.log
+      - name: Record qualification step outcomes
+        if: always()
+        env:
+          STEP_OUTCOMES: ${{ toJSON(steps) }}
+        run: |
+          mkdir -p evidence
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          outcomes = {
+              name: {"outcome": step["outcome"], "conclusion": step["conclusion"]}
+              for name, step in json.loads(os.environ["STEP_OUTCOMES"]).items()
+          }
+          Path("evidence/step-outcomes.json").write_text(json.dumps(outcomes, indent=2, sort_keys=True) + "\n")
+          PY
       - name: Preserve test logs and build identities
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
