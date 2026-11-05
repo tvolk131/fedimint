@@ -292,6 +292,72 @@ jets or other rules needs its own mixed-binary activation rehearsal and fixtures
 
 ## Operational failures and restoration
 
+### Backup, restoration and coordinated halt
+
+Rehearse these steps on the exact candidate before broader beta. Record the
+responsible operator, guardian identities, host failure domains, source revision,
+artifact checksums, checkpoint/session information, results and private evidence
+locations. This procedure does not qualify a prototype migration or a rolling
+mixed-version upgrade.
+
+1. **Prepare recoverable backups.** Preserve each guardian's own configuration,
+   encrypted secrets and required decryption credentials, exact binary identity,
+   and a supported database checkpoint or consistent stopped data-directory
+   copy. A guardian configuration backup alone does not retain the database or
+   authenticated session history needed for client recovery. Do not copy an
+   actively written RocksDB directory as if it were a consistent backup. For a
+   stopped copy, stop that guardian through its normal service/process manager
+   and wait for process exit before copying; keep a quorum running for routine
+   maintenance. In a four-guardian federation, stopping a host with two guardians
+   loses quorum. Preserve client mnemonics and baseline fixtures separately.
+2. **Retain and verify off-host copies.** Encrypt sensitive backups, restrict
+   access and hold decryption credentials separately. Verify checksums after
+   copying, and rehearse opening/restoring the
+   retained copy rather than trusting file presence. Archive required history
+   and selected checkpoints outside automatic retention, build caches and CI
+   artifact expiry. Document backup frequency, retention, the expected recovery
+   point and who holds the credentials. Never publish databases, mnemonics or
+   secrets as release evidence. Do not prune history required by supported
+   contracts, receipts or mnemonic recovery to meet a storage target.
+3. **Restore the same guardian safely.** Keep the original guardian stopped
+   and prevent its automatic restart before starting a restored copy with that
+   identity. Never run two instances using the same guardian secrets. Preserve
+   the failed/current database for diagnosis, restore a supported checkpoint
+   with its matching configuration and secrets, and use the qualified binary.
+   Coordinate reconnection with the other operators and verify catch-up against
+   their authenticated history. Wait for expected signed transaction outcomes,
+   inspect the relevant contract records and spend an unspent contract created
+   before the checkpoint/restart. Rehearse mnemonic recovery and spending with
+   the matching client. Session counters alone are not sufficient evidence.
+4. **Coordinate an emergency halt.** Agree in advance who can call a halt and
+   who may authorize reopening. Pause pilot applications and ask participants
+   not to submit or retry operations; preserve pending operation records rather
+   than assuming they were rejected. Stop the affected guardians through the
+   deployment's normal shutdown procedure, disable automatic restart during
+   investigation, and verify process exit. A coordinated federation-wide halt
+   intentionally stops consensus. Secure stopped database copies, logs, metrics
+   and artifact/configuration identities before making changes. Resolve and
+   privately escalate unexplained validation or accounting failures as needed.
+5. **Verify before reopening.** Resume only the agreed matching candidate and
+   compatible state under operator coordination. Check quorum progress, signed
+   outcomes, contract/accounting state, backend health and a bounded test payment
+   before reopening applications. An older database or binary is not a generic
+   rollback after newer state has been accepted; do not delete consensus items
+   or edit reservation records to make the federation appear healthy. Follow
+   the incident guidance below if restart repeats the failure.
+
+For a private signet pilot, record the intended observation window and monitoring
+limits before starting: consensus progress, API/validation latency, admission
+backlog, memory, disk capacity/write growth and Bitcoin backend health. Assign
+operators to review timestamped samples and alerts. Unexpected accounting or
+recovery results, sustained lack of progress, or breached resource limits require
+pausing traffic and operator review; specify whether they require a full halt in
+the deployment plan. Record deposits, withdrawals, restart/restoration and
+mnemonic-recovery results. Only an observed, reviewed pilot completes its
+checklist gate; these instructions do not claim that it has run.
+
+### Recovery and pending operations
+
 If recovery stalls, check guardian reachability, available authenticated history,
 supported descriptors and local disk space. Preserve the same database so the
 scan can resume. Missing/unauthenticated history must not be skipped to report
