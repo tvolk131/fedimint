@@ -4889,6 +4889,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "fedimint-simplicity-server"
+version = "0.13.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.9",
+ "bitcoin",
+ "divan",
+ "erased-serde",
+ "fedimint-aead",
+ "fedimint-api-client",
+ "fedimint-client",
+ "fedimint-connectors",
+ "fedimint-core",
+ "fedimint-derive-secret",
+ "fedimint-dummy-client",
+ "fedimint-dummy-common",
+ "fedimint-dummy-server",
+ "fedimint-logging",
+ "fedimint-metrics",
+ "fedimint-mintv2-client",
+ "fedimint-mintv2-common",
+ "fedimint-mintv2-server",
+ "fedimint-portalloc",
+ "fedimint-rocksdb",
+ "fedimint-server",
+ "fedimint-server-core",
+ "fedimint-simplicity-client",
+ "fedimint-simplicity-common",
+ "fedimint-tbs",
+ "fedimint-testing-core",
+ "futures",
+ "libc",
+ "lru 0.16.3",
+ "rand 0.8.5",
+ "rayon",
+ "serde",
+ "serde_json",
+ "simplicity-lang",
+ "simplicity-sys",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "fedimint-tbs"
 version = "0.13.0"
 dependencies = [
@@ -5303,6 +5348,7 @@ dependencies = [
  "fedimint-server-bitcoin-rpc",
  "fedimint-server-core",
  "fedimint-server-ui",
+ "fedimint-simplicity-server",
  "fedimint-unknown-common",
  "fedimint-unknown-server",
  "fedimint-wallet-server",

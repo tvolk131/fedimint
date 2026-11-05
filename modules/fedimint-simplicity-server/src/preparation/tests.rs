@@ -1,0 +1,557 @@
+use bitcoin::hashes::{Hash, sha256};
+use fedimint_core::core::DynInput;
+use fedimint_core::db::Database;
+use fedimint_core::db::mem_impl::MemDatabase;
+use fedimint_core::module::CoreConsensusVersion;
+use fedimint_core::module::registry::ModuleDecoderRegistry;
+use fedimint_core::runtime::{Duration, timeout};
+use fedimint_core::secp256k1::{Keypair, SECP256K1, SecretKey};
+use fedimint_core::transaction::{Transaction, TransactionSignature};
+use fedimint_core::{Amount, OutPoint, TransactionId};
+use fedimint_server::consensus::transaction::{TxProcessingMode, process_transaction_with_dbtx};
+use fedimint_server_core::{
+    DynServerModule, ServerModule, ServerModuleRegistry, TransactionConsensusContext,
+};
+use fedimint_simplicity_client::compiler::{Value, arguments, witnesses};
+use fedimint_simplicity_client::{ContractProgram, sign_transaction};
+use fedimint_simplicity_common::compiler::ValueConstructible as _;
+use simplicity::ConstructNode;
+use simplicity::node::CoreConstructible;
+
+use super::*;
+use crate::db::{insert_contract, remove_contract};
+use crate::{Simplicity, validation};
+
+fn owner() -> Keypair {
+    Keypair::from_secret_key(SECP256K1, &SecretKey::from_slice(&[1; 32]).unwrap())
+}
+
+fn spend(index: u64, valid: bool) -> (ContractInput, StoredContract) {
+    let program =
+        ContractProgram::compile("fn main() { assert!(witness::OK); }", arguments([])).unwrap();
+    let input = program
+        .input(
+            OutPoint {
+                txid: TransactionId::from_raw_hash(sha256::Hash::all_zeros()),
+                out_idx: index,
+            },
+            owner().public_key(),
+            witnesses([("OK", Value::from(valid))]),
+        )
+        .unwrap();
+    let stored = StoredContract {
+        output: program
+            .output(Amount::from_sats(100), [0; 32], vec![])
+            .unwrap(),
+        creation_session: 0,
+        creation_block_count: 0,
+    };
+    (input, stored)
+}
+
+/// Like [`spend`], but with program bytes that no other test decodes, so
+/// assertions about the shared program cache hold while other tests run.
+fn tagged_spend(tag: u64, index: u64, valid: bool) -> (ContractInput, StoredContract) {
+    let program = ContractProgram::compile(
+        &format!("fn main() {{ assert!(jet::eq_64(witness::TAG, {tag})); }}"),
+        arguments([]),
+    )
+    .unwrap();
+    let witness = if valid { tag } else { tag + 1 };
+    let input = program
+        .input(
+            OutPoint {
+                txid: TransactionId::from_raw_hash(sha256::Hash::all_zeros()),
+                out_idx: index,
+            },
+            owner().public_key(),
+            witnesses([("TAG", Value::u64(witness))]),
+        )
+        .unwrap();
+    let stored = StoredContract {
+        output: program
+            .output(Amount::from_sats(100), [0; 32], vec![])
+            .unwrap(),
+        creation_session: 0,
+        creation_block_count: 0,
+    };
+    (input, stored)
+}
+
+fn transaction(inputs: Vec<(u16, ContractInput)>) -> Transaction {
+    let mut tx = Transaction {
+        inputs: inputs
+            .into_iter()
+            .map(|(id, input)| DynInput::from_typed(id, input))
+            .collect(),
+        outputs: vec![],
+        nonce: [0; 8],
+        signatures: TransactionSignature::NaiveMultisig(vec![]),
+    };
+    let keys = vec![owner(); tx.inputs.len()];
+    sign_transaction(&mut tx, &keys).unwrap();
+    tx
+}
+
+fn context(tx: &Transaction, instance: u16) -> ModuleTransactionContext<'_> {
+    ModuleTransactionContext {
+        transaction: tx,
+        consensus: TransactionConsensusContext {
+            federation_id: fedimint_core::config::FederationId(sha256::Hash::all_zeros()),
+            session_index: 0,
+        },
+        mode: TxProcessingMode::Consensus,
+        module_instance_id: instance,
+        preparation: None,
+        validation: None,
+    }
+}
+
+fn federation() -> (Database, ServerModuleRegistry) {
+    let decoders = ModuleDecoderRegistry::new(
+        [4, 7].map(|id| (id, fedimint_simplicity_common::KIND, Simplicity::decoder())),
+    );
+    let modules = ServerModuleRegistry::new([4, 7].map(|id| {
+        (
+            id,
+            fedimint_simplicity_common::KIND,
+            DynServerModule::from(Simplicity::new_for_testing(vec![0.into()]).unwrap()),
+        )
+    }));
+    (Database::new(MemDatabase::new(), decoders), modules)
+}
+
+async fn seed(db: &Database, instance: u16, input: &ContractInput, stored: &StoredContract) {
+    let mut tx = db.begin_transaction().await;
+    {
+        let mut module = tx.to_ref_with_prefix_module_id(instance).0.into_nc();
+        remove_contract(&mut module, input.outpoint).await;
+        insert_contract(&mut module, input.outpoint, stored)
+            .await
+            .unwrap();
+    }
+    tx.commit_tx_result().await.unwrap();
+}
+
+async fn check(
+    db: &Database,
+    modules: &ServerModuleRegistry,
+    tx: &Transaction,
+    expected: Result<(), TransactionError>,
+) {
+    for mode in [TxProcessingMode::Submission, TxProcessingMode::Consensus] {
+        let mut dbtx = db.begin_transaction_nc().await;
+        dbtx.ignore_uncommitted();
+        assert_eq!(
+            process_transaction_with_dbtx(
+                modules.clone(),
+                &mut dbtx,
+                tx,
+                CoreConsensusVersion::new(2, 1),
+                mode,
+                context(tx, 4).consensus
+            )
+            .await,
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn all_instances_resolve_before_decoding_and_check_commitments_before_execution() {
+    for ids in [[4, 4], [4, 7], [7, 4]] {
+        let (db, modules) = federation();
+        let (first, stored_first) = spend(0, false);
+        let (last, mut stored_last) = spend(1, true);
+        seed(&db, ids[0], &first, &stored_first).await;
+        let mut malformed = first.clone();
+        malformed.program.clear();
+        let tx = transaction(vec![(ids[0], malformed), (ids[1], last.clone())]);
+        // Missing later state wins even over an earlier malformed program.
+        check(
+            &db,
+            &modules,
+            &tx,
+            Err(input_error(ids[1], ContractError::UnknownContract)),
+        )
+        .await;
+        seed(&db, ids[1], &last, &stored_last).await;
+        check(
+            &db,
+            &modules,
+            &tx,
+            Err(input_error(ids[0], ContractError::Program)),
+        )
+        .await;
+        let tx = transaction(vec![(ids[0], first.clone()), (ids[1], last.clone())]);
+        stored_last.output.cmr = [0; 32];
+        seed(&db, ids[1], &last, &stored_last).await;
+        // The earlier program would fail if it ran; the late CMR must win.
+        check(
+            &db,
+            &modules,
+            &tx,
+            Err(input_error(ids[1], ContractError::Commitment)),
+        )
+        .await;
+        stored_last.output.cmr = runtime::decode_program(&last)
+            .unwrap()
+            .cmr()
+            .to_byte_array();
+        seed(&db, ids[1], &last, &stored_last).await;
+        check(
+            &db,
+            &modules,
+            &tx,
+            Err(input_error(ids[0], ContractError::Rejected)),
+        )
+        .await;
+        let (first, stored_first) = spend(0, true);
+        seed(&db, ids[0], &first, &stored_first).await;
+        // Same CMR/program, different witnesses: never reuse a decoded
+        // witness merely because another input has the same policy.
+        let (bad_last, _) = spend(1, false);
+        let mixed = transaction(vec![(ids[0], first.clone()), (ids[1], bad_last)]);
+        check(
+            &db,
+            &modules,
+            &mixed,
+            Err(input_error(ids[1], ContractError::Rejected)),
+        )
+        .await;
+        let tx = transaction(vec![(ids[0], first.clone()), (ids[1], last)]);
+        check(&db, &modules, &tx, Ok(())).await;
+        // A successful admission attempt does not cache state for the next one.
+        let mut dbtx = db.begin_transaction().await;
+        remove_contract(
+            &mut dbtx.to_ref_with_prefix_module_id(ids[0]).0.into_nc(),
+            first.outpoint,
+        )
+        .await;
+        dbtx.commit_tx_result().await.unwrap();
+        check(
+            &db,
+            &modules,
+            &tx,
+            Err(input_error(ids[0], ContractError::UnknownContract)),
+        )
+        .await;
+    }
+}
+
+fn units(count: usize) -> Vec<u8> {
+    simplicity::types::Context::with_context(|ctx| {
+        let mut power: Arc<ConstructNode> = Arc::unit(&ctx);
+        for _ in 0..count {
+            power = Arc::comp(&power, &power).unwrap();
+        }
+        power.finalize_types().unwrap().to_vec_without_witness()
+    })
+}
+
+#[tokio::test]
+async fn later_execution_version_failure_precedes_earlier_vm_failure() {
+    let (db, modules) = federation();
+    let (first, stored) = spend(0, false);
+    seed(&db, 4, &first, &stored).await;
+    let (mut last, mut stored) = spend(1, true);
+    last.program = simplicity::types::Context::with_context(|ctx| {
+        let word: Arc<ConstructNode> = Arc::const_word(
+            &ctx,
+            simplicity::Value::from_byte_array([0; 16])
+                .to_word()
+                .unwrap(),
+        );
+        let jet = Arc::jet(
+            &ctx,
+            &fedimint_simplicity_common::jet::FedimintJet::Core(simplicity::jet::Core::Multiply64),
+        );
+        Arc::comp(&Arc::comp(&word, &jet).unwrap(), &Arc::unit(&ctx))
+            .unwrap()
+            .finalize_types()
+            .unwrap()
+            .to_vec_without_witness()
+    });
+    last.witness.clear();
+    stored.output.cmr = runtime::decode_program(&last)
+        .unwrap()
+        .cmr()
+        .to_byte_array();
+    seed(&db, 7, &last, &stored).await;
+    let tx = transaction(vec![(4, first), (7, last)]);
+    check(
+        &db,
+        &modules,
+        &tx,
+        Err(input_error(7, ContractError::Version)),
+    )
+    .await;
+}
+
+#[test]
+fn retention_accounting_has_inclusive_boundaries_and_counts_large_values() {
+    for bytes in [32, 4096] {
+        let program = simplicity::types::Context::with_context(|ctx| {
+            let word = simplicity::Value::from_byte_array([0; 4096]);
+            let word = if bytes == 32 {
+                simplicity::Value::from_byte_array([0; 32])
+            } else {
+                word
+            };
+            let node: Arc<ConstructNode> = Arc::const_word(&ctx, word.to_word().unwrap());
+            Arc::comp(&node, &Arc::unit(&ctx))
+                .unwrap()
+                .finalize_types()
+                .unwrap()
+                .to_vec_without_witness()
+        });
+        let (mut input, _) = spend(0, true);
+        input.program = program;
+        input.witness.clear();
+        let decoded = runtime::decode_program(&input).unwrap();
+        let charge = retention::charge(&decoded, RETENTION_BUDGET).unwrap();
+        assert!(charge > bytes);
+        assert_eq!(retention::charge(&decoded, charge), Some(charge));
+        assert_eq!(retention::charge(&decoded, charge - 1), None);
+        assert_eq!(retention::charge(&decoded, 0), None);
+    }
+}
+
+#[tokio::test]
+async fn aggregate_cost_is_checked_across_instances_before_any_execution() {
+    let (db, modules) = federation();
+    let (first, stored) = spend(0, false);
+    seed(&db, 4, &first, &stored).await;
+    let mut inputs = vec![(4, first)];
+    for (id, index) in [(4, 1), (7, 2)] {
+        let (mut input, mut stored) = spend(index, true);
+        input.program = units(13); // 1,638,300 milliweight each, individually valid.
+        input.witness.clear();
+        stored.output.cmr = runtime::decode_program(&input)
+            .unwrap()
+            .cmr()
+            .to_byte_array();
+        seed(&db, id, &input, &stored).await;
+        inputs.push((id, input));
+    }
+    check(
+        &db,
+        &modules,
+        &transaction(inputs),
+        Err(input_error(7, ContractError::Limit)),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn retention_budget_changes_neither_execution_result_nor_fees() {
+    for witnesses in [[true, true], [false, false], [true, false]] {
+        let (db, _) = federation();
+        let mut inputs = vec![];
+        for (index, valid) in witnesses.into_iter().enumerate() {
+            let (input, stored) = tagged_spend(0x7e7e_0000_0001, index as u64, valid);
+            seed(&db, 4, &input, &stored).await;
+            inputs.push((4, input));
+        }
+        let tx = transaction(inputs);
+        let module = Simplicity::new_for_testing(vec![0.into()]).unwrap();
+        let first = tx.inputs[0]
+            .as_any()
+            .downcast_ref::<ContractInput>()
+            .unwrap();
+        let charge =
+            retention::charge(&runtime::decode_program(first).unwrap(), RETENTION_BUDGET).unwrap();
+        let mut results = vec![];
+        // The last case evicts the programs, so execution must decode them again.
+        for (budget, count, evict) in [
+            (0, 0, false),
+            (charge, 1, false),
+            (RETENTION_BUDGET, 2, false),
+            (0, 0, true),
+        ] {
+            let mut dbtx = db.begin_transaction_nc().await;
+            let mut dbtx = dbtx.to_ref_with_prefix_module_id(4).0;
+            let mut context = context(&tx, 4);
+            let resolved = resolve(
+                &mut dbtx,
+                &context,
+                fedimint_simplicity_common::MODULE_CONSENSUS_VERSION,
+            )
+            .await
+            .unwrap();
+            let prepared = Decoding::new(&context, BTreeMap::from([(4, resolved)]))
+                .unwrap()
+                .run(budget, Admission::unlimited(TxProcessingMode::Consensus))
+                .unwrap();
+            assert_eq!(
+                prepared.programs.values().filter(|p| p.is_some()).count(),
+                count
+            );
+            if evict {
+                cache::forget(first);
+                assert!(!cache::contains(first));
+            }
+            let prepared = ModuleTransactionValidation::new(prepared);
+            context.preparation = Some(&prepared);
+            results.push(
+                validation::validate(&module, &mut dbtx, &context)
+                    .await
+                    .map(|v| {
+                        v.inputs
+                            .into_iter()
+                            .map(|i| (i.pub_key, i.amount.amounts, i.amount.fees))
+                            .collect::<Vec<_>>()
+                    }),
+            );
+            if evict {
+                // Execution decoded the first program afresh and cached it.
+                assert!(cache::contains(first));
+            }
+        }
+        assert_eq!(results[0], results[1]);
+        assert_eq!(results[1], results[2]);
+        assert_eq!(results[2], results[3]);
+        if witnesses == [true, true] {
+            assert!(results[0].is_ok());
+        } else {
+            assert_eq!(results[0], Err(input_error(4, ContractError::Rejected)));
+        }
+    }
+}
+
+#[tokio::test]
+async fn activation_gates_inputs_and_outputs_before_program_decoding() {
+    let (db, _) = federation();
+    let (mut input, stored) = spend(0, true);
+    seed(&db, 4, &input, &stored).await;
+    input.program = vec![255]; // Version rejection must precede a decoding failure.
+    let mut tx = transaction(vec![(4, input)]);
+    let before = ModuleConsensusVersion::new(0, 0);
+    let active = fedimint_simplicity_common::MODULE_CONSENSUS_VERSION;
+    let scoped = db.with_prefix_module_id(4).0;
+    let mut dbtx = scoped.begin_transaction_nc().await;
+    let error = resolve(&mut dbtx, &context(&tx, 4), before)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error, input_error(4, ContractError::Version));
+    assert!(resolve(&mut dbtx, &context(&tx, 4), active).await.is_ok());
+    tx.inputs.clear();
+    tx.outputs
+        .push(fedimint_core::core::DynOutput::from_typed(4, stored.output));
+    let error = resolve(&mut dbtx, &context(&tx, 4), before)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        error,
+        TransactionError::Output(fedimint_core::core::DynOutputError::from_typed(
+            4,
+            fedimint_simplicity_common::ContractOutputError(ContractError::Version),
+        ))
+    );
+    assert!(resolve(&mut dbtx, &context(&tx, 4), active).await.is_ok());
+}
+
+/// Long enough for a worker to decode a small program that was not waiting.
+const UNADMITTED: Duration = Duration::from_millis(200);
+
+#[tokio::test]
+async fn submissions_wait_for_admission_before_decoding_and_consensus_does_not() {
+    let (db, _) = federation();
+    let (input, stored) = tagged_spend(0x7e7e_0000_0003, 0, true);
+    seed(&db, 4, &input, &stored).await;
+    let tx = transaction(vec![(4, input.clone())]);
+    let consensus = context(&tx, 4);
+    let mut submission = context(&tx, 4);
+    submission.mode = TxProcessingMode::Submission;
+    let mut dbtx = db.begin_transaction_nc().await;
+    let mut dbtx = dbtx.to_ref_with_prefix_module_id(4).0;
+    let mut resolved = vec![];
+    for _ in 0..2 {
+        resolved.push(
+            resolve(
+                &mut dbtx,
+                &consensus,
+                fedimint_simplicity_common::MODULE_CONSENSUS_VERSION,
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    let held = crate::executor::hold_permits(0).await;
+    let mut waiting = Box::pin(prepare(
+        &submission,
+        BTreeMap::from([(4, resolved.pop().unwrap())]),
+    ));
+    assert!(timeout(UNADMITTED, &mut waiting).await.is_err());
+    // A submission decoding before admission would have cached its program.
+    assert!(!cache::contains(&input));
+    prepare(&consensus, BTreeMap::from([(4, resolved.pop().unwrap())]))
+        .await
+        .unwrap();
+    assert!(cache::contains(&input));
+    drop(held);
+    waiting.await.unwrap();
+}
+
+#[tokio::test]
+async fn submissions_keep_their_admission_until_their_programs_are_freed() {
+    let (db, _) = federation();
+    let (input, stored) = spend(0, true);
+    seed(&db, 4, &input, &stored).await;
+    let tx = transaction(vec![(4, input)]);
+    let mut submission = context(&tx, 4);
+    submission.mode = TxProcessingMode::Submission;
+    let mut dbtx = db.begin_transaction_nc().await;
+    let mut dbtx = dbtx.to_ref_with_prefix_module_id(4).0;
+    let resolved = resolve(
+        &mut dbtx,
+        &submission,
+        fedimint_simplicity_common::MODULE_CONSENSUS_VERSION,
+    )
+    .await
+    .unwrap();
+    let held = crate::executor::hold_permits(1).await;
+    let prepared = prepare(&submission, BTreeMap::from([(4, resolved)]))
+        .await
+        .unwrap();
+    assert!(
+        prepared
+            .get::<Prepared>()
+            .unwrap()
+            .programs
+            .values()
+            .all(Option::is_some)
+    );
+    // The retained programs keep the last admission after decoding finishes.
+    let mut next = Box::pin(Admission::acquire(TxProcessingMode::Submission));
+    assert!(timeout(UNADMITTED, &mut next).await.is_err());
+    drop(prepared);
+    timeout(Duration::from_secs(10), next)
+        .await
+        .expect("freeing the programs releases the admission");
+    drop(held);
+}
+
+#[tokio::test]
+async fn only_programs_that_match_a_contract_are_cached() {
+    let (db, modules) = federation();
+    let (input, mut stored) = tagged_spend(0x7e7e_0000_0002, 0, true);
+    let cmr = stored.output.cmr;
+    stored.output.cmr = [0; 32];
+    seed(&db, 4, &input, &stored).await;
+    let tx = transaction(vec![(4, input.clone())]);
+    check(
+        &db,
+        &modules,
+        &tx,
+        Err(input_error(4, ContractError::Commitment)),
+    )
+    .await;
+    assert!(!cache::contains(&input));
+    stored.output.cmr = cmr;
+    seed(&db, 4, &input, &stored).await;
+    check(&db, &modules, &tx, Ok(())).await;
+    assert!(cache::contains(&input));
+}

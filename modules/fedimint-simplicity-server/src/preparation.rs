@@ -1,0 +1,198 @@
+//! Read the snapshot first, then prepare every instance before any VM runs.
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use fedimint_core::core::{DynInputError, ModuleInstanceId};
+use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
+use fedimint_core::module::ModuleConsensusVersion;
+use fedimint_core::transaction::TransactionError;
+use fedimint_server_core::{ModuleTransactionContext, ModuleTransactionValidation};
+use fedimint_simplicity_common::consensus::check_execution_version;
+use fedimint_simplicity_common::{ContractError, ContractInput, resources, runtime};
+use simplicity::{Cost, RedeemNode};
+
+use crate::db::{ContractKey, StoredContract};
+use crate::executor::Admission;
+
+mod cache;
+mod retention;
+#[cfg(test)]
+mod tests;
+
+type Resolved = BTreeMap<usize, StoredContract>;
+
+/// Local optimization only, not a consensus limit or a bound on process RSS.
+/// The current decoder, accounting scratch space and VM are additional memory.
+const RETENTION_BUDGET: usize = 8 * 1024 * 1024;
+
+pub(crate) struct Prepared {
+    pub contracts: Resolved,
+    pub programs: BTreeMap<usize, Option<Arc<RedeemNode>>>,
+    /// Held until the programs are freed. Execution runs under it too.
+    pub admission: Admission,
+}
+
+impl Drop for Prepared {
+    fn drop(&mut self) {
+        let programs = std::mem::take(&mut self.programs);
+        if programs.values().any(Option::is_some) {
+            self.admission.clone().release(programs);
+        }
+    }
+}
+
+fn input_error(instance: ModuleInstanceId, error: ContractError) -> TransactionError {
+    TransactionError::Input(DynInputError::from_typed(instance, error))
+}
+
+pub(crate) async fn resolve(
+    dbtx: &mut DatabaseTransaction<'_>,
+    context: &ModuleTransactionContext<'_>,
+    active: ModuleConsensusVersion,
+) -> Result<ModuleTransactionValidation, TransactionError> {
+    let mut contracts = Resolved::new();
+    for (index, input) in context.transaction.inputs.iter().enumerate() {
+        if input.module_instance_id() != context.module_instance_id {
+            continue;
+        }
+        let error = |error| input_error(context.module_instance_id, error);
+        let input = input
+            .as_any()
+            .downcast_ref::<ContractInput>()
+            .ok_or_else(|| error(ContractError::Context))?;
+        let stored = dbtx
+            .get_value(&ContractKey(input.outpoint))
+            .await
+            .ok_or_else(|| error(ContractError::UnknownContract))?;
+        check_execution_version(stored.output.version, active).map_err(error)?;
+        contracts.insert(index, stored);
+    }
+    for output in &context.transaction.outputs {
+        if output.module_instance_id() == context.module_instance_id {
+            let output = output
+                .as_any()
+                .downcast_ref::<fedimint_simplicity_common::ContractOutput>()
+                .ok_or_else(|| input_error(context.module_instance_id, ContractError::Context))?;
+            check_execution_version(output.version, active).map_err(|error| {
+                TransactionError::Output(fedimint_core::core::DynOutputError::from_typed(
+                    context.module_instance_id,
+                    fedimint_simplicity_common::ContractOutputError(error),
+                ))
+            })?;
+        }
+    }
+    Ok(ModuleTransactionValidation::new(contracts))
+}
+
+pub(crate) async fn prepare(
+    context: &ModuleTransactionContext<'_>,
+    instances: BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
+) -> Result<ModuleTransactionValidation, TransactionError> {
+    let decoding = Decoding::new(context, instances)?;
+    let prepared = if decoding.inputs.is_empty() {
+        decoding.run(RETENTION_BUDGET, Admission::unlimited(context.mode))
+    } else {
+        // Wait before decoding, so waiting submissions hold no programs.
+        let admission = Admission::acquire(context.mode).await;
+        let held = admission.clone();
+        admission
+            .run(move || decoding.run(RETENTION_BUDGET, held))
+            .await
+    };
+    prepared.map(ModuleTransactionValidation::new)
+}
+
+/// Owned copy of everything kind-wide decoding reads, so it can run off the
+/// async runtime.
+struct Decoding {
+    contracts: Resolved,
+    /// Cost of the signed structure, before any program.
+    cost: Cost,
+    /// Every Simplicity input with its transaction index and instance.
+    inputs: Vec<(usize, ModuleInstanceId, ContractInput)>,
+}
+
+impl Decoding {
+    fn new(
+        context: &ModuleTransactionContext<'_>,
+        instances: BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
+    ) -> Result<Self, TransactionError> {
+        let mut contracts = Resolved::new();
+        for (instance, resolved) in instances {
+            contracts.extend(
+                resolved
+                    .into_inner::<Resolved>()
+                    .map_err(|_| input_error(instance, ContractError::MissingContext))?,
+            );
+        }
+        // Repeat the cheap check so this hook also has a safe standalone boundary.
+        let cost =
+            resources::check_signed_structure(context.transaction, context.module_instance_id)?;
+        let inputs = context
+            .transaction
+            .inputs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, input)| {
+                let contract = input.as_any().downcast_ref::<ContractInput>()?;
+                Some((index, input.module_instance_id(), contract.clone()))
+            })
+            .collect();
+        Ok(Self {
+            contracts,
+            cost,
+            inputs,
+        })
+    }
+
+    fn run(self, mut remaining: usize, admission: Admission) -> Result<Prepared, TransactionError> {
+        let Self {
+            contracts,
+            mut cost,
+            inputs,
+        } = self;
+        let mut programs = BTreeMap::new();
+        for (index, instance, contract) in &inputs {
+            let error = |error| input_error(*instance, error);
+            let stored = contracts
+                .get(index)
+                .ok_or_else(|| error(ContractError::MissingContext))?;
+            let decoded = cache::decode(contract).map_err(error)?;
+            cost = cost + decoded.program.bounds().cost;
+            if cost > Cost::from_milliweight(resources::MAX_TRANSACTION_MILLIWEIGHT) {
+                return Err(error(ContractError::Limit));
+            }
+            runtime::check_commitment(&decoded.program, &stored.output).map_err(error)?;
+            // Only programs that match a stored contract enter the shared cache.
+            let (program, charge) = decoded.keep();
+            // A cache miss changes only performance. Every input has already passed
+            // decoding, cost, version and commitment checks before execution starts.
+            let retained = charge.filter(|charge| *charge <= remaining).map(|charge| {
+                remaining -= charge;
+                program
+            });
+            programs.insert(*index, retained);
+        }
+        Ok(Prepared {
+            contracts,
+            programs,
+            admission,
+        })
+    }
+}
+
+/// Decode an input that preparation did not retain, through the shared cache.
+/// Preparation has already matched its program to a stored contract, so a
+/// fresh decoding may be cached.
+pub(crate) fn decode(input: &ContractInput) -> Result<Arc<RedeemNode>, ContractError> {
+    cache::decode(input).map(|decoded| decoded.keep().0)
+}
+
+pub(crate) fn get<'a>(
+    context: &ModuleTransactionContext<'a>,
+) -> Result<&'a Prepared, TransactionError> {
+    context
+        .preparation
+        .and_then(ModuleTransactionValidation::get)
+        .ok_or_else(|| input_error(context.module_instance_id, ContractError::MissingContext))
+}
