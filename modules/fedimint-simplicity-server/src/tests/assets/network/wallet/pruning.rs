@@ -89,7 +89,9 @@ pub(super) async fn check(client: &ClientHandle) {
     let output = wallet
         .output(&descriptor, Amount::ZERO, [0; 32], Default::default())
         .unwrap();
-    let txid = submit(&wallet, vec![], vec![output], vec![]).await;
+    let (operation, txid) = wallet.submit(vec![], vec![output], vec![]).await.unwrap();
+    wallet.await_operation(operation).await.unwrap();
+    client.await_no_active_states(operation).await;
     let point = OutPoint { txid, out_idx: 0 };
     let destination = wallet
         .receive(Amount::from_sats(20), Default::default())
@@ -173,7 +175,12 @@ pub(super) async fn check(client: &ClientHandle) {
     assert_eq!(client.get_balance_for_btc().await.unwrap(), balance);
     assert_eq!(wallet.history().await, history);
     // The same input remains spendable with a funding-independent branch.
-    submit(&wallet, vec![spend(false)], vec![destination], vec![]).await;
+    let (operation, _) = wallet
+        .submit(vec![spend(false)], vec![destination], vec![])
+        .await
+        .unwrap();
+    wallet.await_operation(operation).await.unwrap();
+    client.await_no_active_states(operation).await;
     // A custom handler returning a stale or oversized plan must stop for
     // attention, rather than spin forever before recording any attempt.
     let notes = super::intents::notes(client).await;
