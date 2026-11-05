@@ -82,6 +82,21 @@ use crate::issuance::NoteIssuanceRequest;
 use crate::output::{MintOutputStateMachine, OutputSMCommon, OutputSMState};
 use crate::receive::{ReceiveSMState, ReceiveStateMachine};
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FundingMode {
+    Ordinary,
+    Reserved,
+}
+
+impl FundingMode {
+    fn initial_state(self) -> InputSMState {
+        match self {
+            Self::Ordinary => InputSMState::Pending,
+            Self::Reserved => InputSMState::Reserved,
+        }
+    }
+}
+
 const TARGET_PER_DENOMINATION: usize = 3;
 const SLICE_SIZE: u64 = 10000;
 /// How long a guardian sits out after failing to answer a slice request.
@@ -516,7 +531,7 @@ impl ClientModule for MintClientModule {
             unit,
             input_amount,
             output_amount,
-            InputSMState::Pending,
+            FundingMode::Ordinary,
         )
         .await
     }
@@ -541,7 +556,7 @@ impl ClientModule for MintClientModule {
             unit,
             input_amount,
             output_amount,
-            InputSMState::Reserved,
+            FundingMode::Reserved,
         )
         .await
     }
@@ -708,7 +723,7 @@ impl MintClientModule {
         unit: AmountUnit,
         mut input_amount: Amount,
         mut output_amount: Amount,
-        initial_state: InputSMState,
+        mode: FundingMode,
     ) -> Result<
         (
             ClientInputBundle<MintInput, MintClientStateMachines>,
@@ -716,7 +731,7 @@ impl MintClientModule {
         ),
         ClientModuleError,
     > {
-        if initial_state == InputSMState::Reserved
+        if mode == FundingMode::Reserved
             && dbtx
                 .get_value(&client_db::FundingReservationKey(operation_id))
                 .await
@@ -787,7 +802,7 @@ impl MintClientModule {
         // We sort the notes by denomination to minimize the leaked information.
         spendable_notes.sort_by_key(|note| note.denomination);
 
-        if initial_state == InputSMState::Reserved && !spendable_notes.is_empty() {
+        if mode == FundingMode::Reserved && !spendable_notes.is_empty() {
             dbtx.insert_new_entry(
                 &client_db::FundingReservationKey(operation_id),
                 &reservation::FundingReservation::AwaitingOutcome,
@@ -799,7 +814,7 @@ impl MintClientModule {
             spendable_notes,
             false,
             self.cfg.amount_unit,
-            initial_state,
+            mode,
         );
 
         let mut denominations = represent_amount_with_fees(
@@ -826,7 +841,7 @@ impl MintClientModule {
         notes: Vec<SpendableNote>,
         include_receive_sm: bool,
         amount_unit: AmountUnit,
-        initial_state: InputSMState,
+        mode: FundingMode,
     ) -> ClientInputBundle<MintInput, MintClientStateMachines> {
         let inputs = notes
             .iter()
@@ -845,7 +860,7 @@ impl MintClientModule {
                         txid: range.txid(),
                         spendable_notes: notes.clone(),
                     },
-                    state: initial_state.clone(),
+                    state: mode.initial_state(),
                 })];
 
                 if include_receive_sm {
@@ -1159,7 +1174,7 @@ impl MintClientModule {
             ecash.notes(),
             true,
             self.cfg.amount_unit,
-            InputSMState::Pending,
+            FundingMode::Ordinary,
         );
         let input = self.client_ctx.make_client_inputs(input);
         let ec = base32::encode_prefixed(FEDIMINT_PREFIX, &ecash);
