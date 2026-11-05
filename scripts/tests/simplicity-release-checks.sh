@@ -58,6 +58,17 @@ case "${1:-tests}" in
             --nocapture --test-threads=1
         ;;
     guardian)
+        untracked_sources="$(git ls-files --others --exclude-standard)"
+        if ! git diff --quiet HEAD || [[ -n "$untracked_sources" ]]; then
+            echo 'Guardian release artifacts require a clean committed source tree' >&2
+            exit 1
+        fi
+        guardian_revision="$(git rev-parse HEAD)"
+        if [[ -n "${FEDIMINT_BUILD_FORCE_GIT_HASH:-}" && "$FEDIMINT_BUILD_FORCE_GIT_HASH" != "$guardian_revision" ]]; then
+            echo 'FEDIMINT_BUILD_FORCE_GIT_HASH must identify the current source revision' >&2
+            exit 1
+        fi
+        export FEDIMINT_BUILD_FORCE_GIT_HASH="$guardian_revision"
         guardian_directory="${CARGO_TARGET_DIR:-target}${CARGO_BUILD_TARGET:+/$CARGO_BUILD_TARGET}/release"
         rustup run "$simplicity_toolchain" cargo build --release --locked -p fedimintd
         bash scripts/tests/simplicity-artifacts.sh guardian default "$guardian_directory/fedimintd"
