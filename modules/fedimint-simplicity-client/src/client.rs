@@ -425,11 +425,13 @@ impl SimplicityClientModule {
             .await;
         let mut inputs = vec![];
         let mut prepared = vec![];
+        let mut recoverable = false;
         for spend in spends {
             let contract = dbtx
                 .get_value(&db::ContractKey(spend.outpoint))
                 .await
                 .ok_or_else(|| anyhow::anyhow!("unknown contract"))?;
+            recoverable |= self.store.has_recovery_descriptor(&contract.output)?;
             ensure!(
                 contract.spent_by.is_none(),
                 "contract has already been spent"
@@ -481,47 +483,9 @@ impl SimplicityClientModule {
                 signature_witness: spend.signature_witness,
             });
         }
-        let mut tracked = !points.is_empty();
-        for output in &outputs {
-            if let Some(descriptor) = self.store.keys.decrypt(&output.recovery)? {
-                let (version, program) = self
-                    .store
-                    .keys
-                    .program(&descriptor, self.store.templates.as_ref())?;
-                tracked |= version == output.version && program.cmr() == output.cmr;
-            }
-        }
-        let receipt = if requested_receipt.is_some() || !tracked {
-            let action_indices = outputs
-                .iter()
-                .enumerate()
-                .filter(|(_, output)| output.actions().is_some())
-                .map(|(i, _)| i)
-                .collect::<Vec<_>>();
-            ensure!(action_indices.len() <= 1, "multiple action outputs");
-            let output_index = if let Some(index) = action_indices.first() {
-                *index
-            } else {
-                outputs.push(ContractOutput::action_output(Default::default()));
-                outputs.len() - 1
-            };
-            ensure!(
-                outputs[output_index].recovery.is_empty(),
-                "action output already contains recovery metadata"
-            );
-            let plan = crate::receipt::ReceiptPlan {
-                keys: self.store.keys.clone(),
-                federation: self.store.federation,
-                module: self.store.module,
-                output_index,
-                receipt: requested_receipt
-                    .unwrap_or(crate::receipt::SenderReceipt { context: None }),
-            };
-            outputs[output_index].recovery = plan.placeholder()?;
-            Some(plan)
-        } else {
-            None
-        };
+        let receipt = self
+            .store
+            .prepare_receipt(recoverable, &mut outputs, requested_receipt)?;
         let authorization = Arc::new(Authorization {
             federation: self.store.federation,
             module: self.store.module,

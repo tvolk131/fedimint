@@ -55,6 +55,74 @@ fn transaction(plan: &ReceiptPlan) -> Transaction {
     }
 }
 
+#[tokio::test]
+async fn automatic_receipts_require_authenticated_recovery_descriptors() {
+    let store = crate::wallet::WalletStore::open(
+        fedimint_core::db::Database::new(
+            fedimint_core::db::mem_impl::MemDatabase::new(),
+            Default::default(),
+        ),
+        &DerivableSecret::new_root(&[1; 32], b"receipt-test"),
+        federation(),
+        4,
+        Arc::new(crate::descriptor::BuiltinTemplates),
+    )
+    .await
+    .unwrap();
+    let descriptor = ContractDescriptor::owner([7; 32]);
+    let (version, program) = store
+        .keys
+        .program(&descriptor, store.templates.as_ref())
+        .unwrap();
+    let owned = program
+        .asset_output(
+            Amount::ZERO,
+            [0; 32],
+            store.keys.encrypt(&descriptor).unwrap(),
+            Default::default(),
+        )
+        .unwrap();
+    assert_eq!(owned.version, version);
+    assert!(store.has_recovery_descriptor(&owned).unwrap());
+    let mut outputs = vec![owned.clone()];
+    assert!(
+        store
+            .prepare_receipt(false, &mut outputs, None)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(outputs.len(), 1);
+    assert!(
+        store
+            .prepare_receipt(true, &mut vec![], None)
+            .unwrap()
+            .is_none()
+    );
+
+    let mut watched = owned.clone();
+    watched.recovery.clear();
+    assert!(!store.has_recovery_descriptor(&watched).unwrap());
+    let mut copied = owned;
+    copied.cmr[0] ^= 1;
+    assert!(!store.has_recovery_descriptor(&copied).unwrap());
+    for output in [watched, copied] {
+        let mut outputs = vec![output];
+        let receipt = store
+            .prepare_receipt(false, &mut outputs, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.output_index, 1);
+        assert_eq!(outputs[1].recovery, receipt.placeholder().unwrap());
+    }
+    let mut outputs = vec![ContractOutput::action_output(Default::default())];
+    let receipt = store
+        .prepare_receipt(true, &mut outputs, Some(SenderReceipt { context: None }))
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.output_index, 0);
+    assert_eq!(outputs.len(), 1);
+}
+
 #[test]
 fn receipts_bind_payers_outputs_nonce_and_scope_and_keep_reserved_size() {
     let plan = plan(4, 0);

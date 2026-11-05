@@ -74,7 +74,7 @@ pub(super) async fn notes(client: &ClientHandle) -> Vec<SpendableNote> {
         .await
 }
 
-async fn genesis(fed: &Federation) -> (market::BinaryMarket, OutPoint, Keypair) {
+pub(super) async fn genesis(fed: &Federation) -> (market::BinaryMarket, OutPoint, Keypair) {
     let creator = key();
     let oracle = key();
     let (creation, ids) = assets::creation(fed.id, fed.simplicity, &creator, vec![0, 0]).unwrap();

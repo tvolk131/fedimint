@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::assets::AssetExtension;
 use crate::common::{ContractInput, ContractOutput, MAX_RECOVERY_BYTES};
 use crate::descriptor::WalletKeys;
+use crate::wallet::WalletStore;
 
 const ENVELOPE: &[u8; 4] = b"FMR1";
 const VERSION: u16 = 1;
@@ -34,6 +35,56 @@ impl std::fmt::Debug for ReceiptContext {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Encodable, Decodable)]
 pub struct SenderReceipt {
     pub context: Option<ReceiptContext>,
+}
+
+impl WalletStore {
+    pub(crate) fn has_recovery_descriptor(&self, output: &ContractOutput) -> anyhow::Result<bool> {
+        let Some(descriptor) = self.keys.decrypt(&output.recovery)? else {
+            return Ok(false);
+        };
+        let (version, program) = self.keys.program(&descriptor, self.templates.as_ref())?;
+        Ok(version == output.version && program.cmr() == output.cmr)
+    }
+
+    pub(crate) fn prepare_receipt(
+        &self,
+        mut recoverable: bool,
+        outputs: &mut Vec<ContractOutput>,
+        requested: Option<SenderReceipt>,
+    ) -> anyhow::Result<Option<ReceiptPlan>> {
+        for output in outputs.iter() {
+            recoverable |= self.has_recovery_descriptor(output)?;
+        }
+        if requested.is_none() && recoverable {
+            return Ok(None);
+        }
+        let action_indices = outputs
+            .iter()
+            .enumerate()
+            .filter(|(_, output)| output.actions().is_some())
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        ensure!(action_indices.len() <= 1, "multiple action outputs");
+        let output_index = if let Some(index) = action_indices.first() {
+            *index
+        } else {
+            outputs.push(ContractOutput::action_output(Default::default()));
+            outputs.len() - 1
+        };
+        ensure!(
+            outputs[output_index].recovery.is_empty(),
+            "action output already contains recovery metadata"
+        );
+        let plan = ReceiptPlan {
+            keys: self.keys.clone(),
+            federation: self.federation,
+            module: self.module,
+            output_index,
+            receipt: requested.unwrap_or(SenderReceipt { context: None }),
+        };
+        outputs[output_index].recovery = plan.placeholder()?;
+        Ok(Some(plan))
+    }
 }
 
 /// This is a wallet recovery commitment, not a contract signature hash.

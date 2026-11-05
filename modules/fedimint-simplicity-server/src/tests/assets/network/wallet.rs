@@ -498,3 +498,4 @@ async fn direct_sender_receipts_restore_history_without_owning_recipient_contrac
 
 mod intents;
 mod pruning;
+mod receipts;

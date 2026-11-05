@@ -25,8 +25,8 @@ impl SimplicityClientModule {
     }
 
     /// Calculate explicit amounts/fees and enforce consensus resource bounds.
-    /// Requires at least one tracked input, so submission adds no automatic
-    /// sender receipt. The caller supplies the complete output list.
+    /// Includes an automatic sender receipt when input/output annotations do
+    /// not establish mnemonic recoverability, just like submission.
     pub fn plan_fee_request(
         &self,
         plan: &IntentPlan,
@@ -41,12 +41,14 @@ impl SimplicityClientModule {
         let mut input_fee = 0u64;
         let mut inputs = vec![];
         let mut prepared = vec![];
+        let mut recoverable = false;
         for spend in &plan.spends {
             let contract = context
                 .contracts
                 .get(&spend.outpoint)
                 .context("unknown quote input")?;
             ensure!(contract.spent_by.is_none(), "quote input is spent");
+            recoverable |= self.store.has_recovery_descriptor(&contract.output)?;
             let (version, program) = self
                 .store
                 .keys
@@ -87,7 +89,11 @@ impl SimplicityClientModule {
         }
         let mut output_amount = 0u64;
         let mut output_fee = 0u64;
-        for output in &plan.outputs {
+        let mut outputs = plan.outputs.clone();
+        let receipt = self
+            .store
+            .prepare_receipt(recoverable, &mut outputs, None)?;
+        for output in &outputs {
             output_amount = output_amount
                 .checked_add(output.amount.msats)
                 .context("quote amount overflow")?;
@@ -97,10 +103,8 @@ impl SimplicityClientModule {
         }
         let mut draft = Transaction {
             inputs,
-            outputs: plan
-                .outputs
-                .iter()
-                .cloned()
+            outputs: outputs
+                .into_iter()
                 .map(|output| DynOutput::from_typed(self.store.module, output))
                 .collect(),
             nonce: [0; 8],
@@ -111,7 +115,7 @@ impl SimplicityClientModule {
             module: self.store.module,
             spends: prepared,
             creations: vec![],
-            receipt: None,
+            receipt,
             max_fee: None,
             snapshot: snapshot.clone(),
         };
