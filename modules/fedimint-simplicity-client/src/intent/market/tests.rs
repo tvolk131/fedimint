@@ -1,8 +1,9 @@
+use std::collections::BTreeMap;
+
 use bitcoin::hashes::{Hash, sha256};
 use fedimint_core::TransactionId;
 use fedimint_core::config::FederationId;
 use fedimint_core::secp256k1::{Keypair, SECP256K1};
-use std::collections::BTreeMap;
 
 use super::*;
 use crate::common::assets::AssetId;
