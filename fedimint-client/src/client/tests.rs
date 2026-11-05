@@ -14,7 +14,7 @@ use fedimint_client_module::error::{
 use fedimint_client_module::meta::LegacyMetaSource;
 use fedimint_client_module::module::recovery::RecoveryProgress;
 use fedimint_client_module::module::{ClientModuleRegistry, FinalClientIface};
-use fedimint_client_module::transaction::TransactionBuilder;
+use fedimint_client_module::transaction::{TransactionBuilder, TransactionFinalizer};
 use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::Amount;
 use fedimint_core::config::{
@@ -913,6 +913,57 @@ async fn quoting_a_fee_without_a_primary_module_is_typed() {
         ),
         "{err:?}"
     );
+}
+
+#[derive(Debug)]
+struct RejectFinalization {
+    reject_fees: bool,
+}
+
+impl TransactionFinalizer for RejectFinalization {
+    fn verify_fees(&self, _: &Amounts) -> Result<(), ClientModuleError> {
+        if self.reject_fees {
+            return Err(ClientModuleError::other("fee budget exceeded"));
+        }
+        Ok(())
+    }
+
+    fn verify_finalized(
+        &self,
+        _: &fedimint_core::transaction::Transaction,
+    ) -> Result<(), ClientModuleError> {
+        Err(ClientModuleError::other("authorization rejected"))
+    }
+}
+
+#[tokio::test]
+async fn finalization_errors_remain_distinct_from_funding_failures() {
+    let client = client_for_lookup_test().await;
+
+    for reject_fees in [true, false] {
+        let builder = TransactionBuilder::new()
+            .with_finalizer(0, Arc::new(RejectFinalization { reject_fees }));
+        let mut dbtx = client.db.begin_transaction().await;
+        let result = client
+            .finalize_transaction(&mut dbtx.to_ref_nc(), OperationId::new_random(), builder)
+            .await;
+        let Err(error) = result else {
+            panic!("Rejected authorization must not produce a finalized transaction");
+        };
+
+        assert!(!error.is_insufficient_funds());
+        let TransactionSubmitError::Finalization(source) = error else {
+            panic!("Authorization must retain its typed finalization error");
+        };
+        assert_eq!(
+            source.to_string(),
+            if reject_fees {
+                "fee budget exceeded"
+            } else {
+                "authorization rejected"
+            }
+        );
+    }
 }
 
 #[tokio::test]
