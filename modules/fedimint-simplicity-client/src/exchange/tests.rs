@@ -11,6 +11,24 @@ use super::*;
 use crate::common::assets::AssetActions;
 use crate::common::runtime::{self, Environment, EnvironmentInput, EnvironmentOutput};
 
+#[test]
+fn pool_actions_preserve_contract_opcodes() {
+    for (opcode, action) in [
+        PoolAction::BuyYes,
+        PoolAction::BuyNo,
+        PoolAction::SellYes,
+        PoolAction::SellNo,
+        PoolAction::ScaleLiquidity,
+        PoolAction::Close,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(action as usize, opcode);
+        assert_eq!(action.is_buy(), opcode < 2);
+    }
+}
+
 fn key(byte: u8) -> Keypair {
     Keypair::from_secret_key(SECP256K1, &SecretKey::from_slice(&[byte; 32]).unwrap())
 }
@@ -210,7 +228,7 @@ fn trade_environment(
         &[],
     )
     .balances;
-    let actions = if quote.action < 2 {
+    let actions = if quote.action.is_buy() {
         AssetActions {
             issuance: quantities,
             ..Default::default()

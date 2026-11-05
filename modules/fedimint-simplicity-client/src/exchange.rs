@@ -158,13 +158,29 @@ impl ConstantProductPool {
         )
     }
 
-    /// Actions 0/1 buy YES/NO; 2/3 sell YES/NO; 4 scales liquidity; 5 closes.
-    pub fn witnesses(action: u8, scale: u64) -> WitnessValues {
+    pub fn witnesses(action: PoolAction, scale: u64) -> WitnessValues {
         witnesses([
-            ("ACTION", Value::u8(action)),
+            ("ACTION", Value::u8(action as u8)),
             ("SCALE", Value::u64(scale)),
             ("SIGNATURE", placeholder_signature()),
         ])
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PoolAction {
+    BuyYes = 0,
+    BuyNo = 1,
+    SellYes = 2,
+    SellNo = 3,
+    ScaleLiquidity = 4,
+    Close = 5,
+}
+
+impl PoolAction {
+    pub fn is_buy(self) -> bool {
+        matches!(self, Self::BuyYes | Self::BuyNo)
     }
 }
 
@@ -177,7 +193,7 @@ pub struct PoolReserves {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct PoolQuote {
-    pub action: u8,
+    pub action: PoolAction,
     /// Complete pairs issued or merged, each backed by one satoshi.
     pub collateral_sats: u64,
     pub positions: u64,
@@ -199,7 +215,7 @@ impl PoolReserves {
 
     fn quote(
         self,
-        action: u8,
+        action: PoolAction,
         collateral: u64,
         positions: u64,
         mut after: Self,
@@ -219,7 +235,7 @@ impl PoolReserves {
             positions,
             trader_amount: Amount::from_msats(
                 collateral
-                    .checked_mul(if action < 2 { 1003 } else { 997 })
+                    .checked_mul(if action.is_buy() { 1003 } else { 997 })
                     .context("trade amount overflow")?,
             ),
             fee: Amount::from_msats(fee),
@@ -252,7 +268,11 @@ impl PoolReserves {
             (other_after, selected_after)
         };
         self.quote(
-            if yes { 0 } else { 1 },
+            if yes {
+                PoolAction::BuyYes
+            } else {
+                PoolAction::BuyNo
+            },
             collateral_sats,
             positions,
             Self {
@@ -291,7 +311,11 @@ impl PoolReserves {
             (other - low, total - low)
         };
         self.quote(
-            if yes { 2 } else { 3 },
+            if yes {
+                PoolAction::SellYes
+            } else {
+                PoolAction::SellNo
+            },
             low,
             positions,
             Self {
