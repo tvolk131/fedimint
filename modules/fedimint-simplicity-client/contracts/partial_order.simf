@@ -1,0 +1,58 @@
+// Each fill assigns one successor to its module-local input index. Inventory
+// and proceeds stay together; only the maker can withdraw or cancel.
+fn not(value: bool) -> bool { match value { true => false, false => true, } }
+fn add(a: u64, b: u64) -> u64 {
+    let (carry, result): (bool, u64) = jet::add_64(a, b);
+    assert!(not(carry));
+    result
+}
+fn sub(a: u64, b: u64) -> u64 {
+    let (borrow, result): (bool, u64) = jet::subtract_64(a, b);
+    assert!(not(borrow));
+    result
+}
+fn mul(a: u64, b: u64) -> u64 {
+    let (high, low): (u64, u64) = <u128>::into(jet::multiply_64(a, b));
+    assert!(jet::eq_64(high, 0));
+    low
+}
+fn count(quantity: u64) -> u32 {
+    match jet::eq_64(quantity, 0) { true => 0, false => 1, }
+}
+fn main() {
+    match witness::MAKER_ACTION {
+        true => jet::bip_0340_verify((param::MAKER, jet::fm_sig_hash_all()), witness::SIGNATURE),
+        false => {
+            assert!(jet::lt_64(jet::fm_block_count(), param::CLOSE));
+            let i: u32 = jet::fm_current_index();
+            assert!(jet::eq_32(jet::fm_input_version(i), 1));
+            assert!(jet::eq_32(jet::fm_output_version(i), 1));
+            assert!(jet::eq_256(jet::fm_current_state(), 0));
+            assert!(jet::eq_256(jet::fm_output_state(i), 0));
+            assert!(jet::eq_256(jet::fm_output_cmr(i), jet::fm_current_cmr()));
+            assert!(jet::eq_32(jet::fm_input_authority_count(i), 0));
+            assert!(jet::eq_32(jet::fm_output_authority_count(i), 0));
+            let old: u64 = jet::fm_input_asset_quantity((i, param::ASSET));
+            let new: u64 = jet::fm_output_asset_quantity((i, param::ASSET));
+            assert!(jet::eq_32(jet::fm_input_asset_count(i), count(old)));
+            assert!(jet::eq_32(jet::fm_output_asset_count(i), count(new)));
+            let fill: u64 = witness::FILL;
+            let remaining: u64 = witness::REMAINING;
+            assert!(jet::lt_64(0, fill));
+            let rest: u64 = sub(remaining, fill);
+            let payment: u64 = mul(fill, param::PRICE);
+            match param::BUY {
+                true => {
+                    assert!(jet::eq_64(jet::fm_current_amount(), mul(remaining, param::PRICE)));
+                    assert!(jet::eq_64(jet::fm_output_amount(i), mul(rest, param::PRICE)));
+                    assert!(jet::eq_64(new, add(old, fill)));
+                },
+                false => {
+                    assert!(jet::eq_64(old, remaining));
+                    assert!(jet::eq_64(new, rest));
+                    assert!(jet::eq_64(jet::fm_output_amount(i), add(jet::fm_current_amount(), payment)));
+                },
+            }
+        },
+    }
+}
