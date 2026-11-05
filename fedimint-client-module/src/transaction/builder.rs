@@ -20,7 +20,7 @@ use secp256k1::Secp256k1;
 use tracing::warn;
 
 use super::finalizer::{RegisteredFinalizer, TransactionFinalizer, finalize};
-use crate::error::TransactionSubmitError;
+use crate::error::{ClientModuleError, TransactionSubmitError};
 use crate::module::{IdxRange, OutPointRange, StateGenerator};
 use crate::sm::{self, DynState};
 use crate::{
@@ -707,7 +707,7 @@ impl TransactionBuilder {
         self
     }
 
-    pub fn verify_fees(&self, fees: &Amounts) -> Result<(), anyhow::Error> {
+    pub fn verify_fees(&self, fees: &Amounts) -> Result<(), ClientModuleError> {
         for registration in &self.finalizers {
             registration.finalizer.verify_fees(fees)?;
         }
@@ -718,7 +718,7 @@ impl TransactionBuilder {
         self,
         secp_ctx: &Secp256k1<C>,
         mut rng: R,
-    ) -> Result<(Transaction, Vec<DynState>), anyhow::Error>
+    ) -> Result<(Transaction, Vec<DynState>), ClientModuleError>
     where
         C: secp256k1::Signing + secp256k1::Verification,
     {

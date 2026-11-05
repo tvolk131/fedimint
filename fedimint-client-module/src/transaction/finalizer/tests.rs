@@ -9,6 +9,7 @@ use fedimint_core::secp256k1::{Keypair, Message, SECP256K1};
 use fedimint_core::transaction::{Transaction, TransactionSignature};
 
 use super::TransactionFinalizer;
+use crate::error::ClientModuleError;
 use crate::transaction::{
     ClientInput, ClientInputBundle, ClientInputSM, ClientOutput, ClientOutputBundle,
     NeverClientStateMachine, TransactionBuilder,
@@ -68,11 +69,17 @@ fn output_bundle(module: u16, value: u64) -> ClientOutputBundle {
 struct SignFinalItems;
 
 impl TransactionFinalizer for SignFinalItems {
-    fn finalize_outputs(&self, _: &Transaction) -> Result<Vec<(usize, DynOutput)>, anyhow::Error> {
+    fn finalize_outputs(
+        &self,
+        _: &Transaction,
+    ) -> Result<Vec<(usize, DynOutput)>, ClientModuleError> {
         Ok(vec![(0, TestOutput(7).into_dyn(1))])
     }
 
-    fn finalize_inputs(&self, tx: &Transaction) -> Result<Vec<(usize, DynInput)>, anyhow::Error> {
+    fn finalize_inputs(
+        &self,
+        tx: &Transaction,
+    ) -> Result<Vec<(usize, DynInput)>, ClientModuleError> {
         assert_eq!(
             tx.outputs[0]
                 .as_any()
@@ -147,7 +154,10 @@ struct WrongOutput {
 }
 
 impl TransactionFinalizer for WrongOutput {
-    fn finalize_outputs(&self, _: &Transaction) -> Result<Vec<(usize, DynOutput)>, anyhow::Error> {
+    fn finalize_outputs(
+        &self,
+        _: &Transaction,
+    ) -> Result<Vec<(usize, DynOutput)>, ClientModuleError> {
         Ok(vec![(self.index, TestOutput(1).into_dyn(self.module))])
     }
 }
@@ -181,10 +191,16 @@ struct MetadataStages {
     reject: bool,
 }
 impl TransactionFinalizer for MetadataStages {
-    fn prepare_outputs(&self, _: &Transaction) -> Result<Vec<(usize, DynOutput)>, anyhow::Error> {
+    fn prepare_outputs(
+        &self,
+        _: &Transaction,
+    ) -> Result<Vec<(usize, DynOutput)>, ClientModuleError> {
         Ok(vec![(self.index, TestOutput(10).into_dyn(self.module))])
     }
-    fn finalize_outputs(&self, tx: &Transaction) -> Result<Vec<(usize, DynOutput)>, anyhow::Error> {
+    fn finalize_outputs(
+        &self,
+        tx: &Transaction,
+    ) -> Result<Vec<(usize, DynOutput)>, ClientModuleError> {
         assert!(
             tx.outputs
                 .iter()
@@ -192,14 +208,14 @@ impl TransactionFinalizer for MetadataStages {
         );
         Ok(vec![(self.index, TestOutput(20).into_dyn(self.module))])
     }
-    fn verify_finalized(&self, tx: &Transaction) -> Result<(), anyhow::Error> {
+    fn verify_finalized(&self, tx: &Transaction) -> Result<(), ClientModuleError> {
         assert!(
             tx.outputs
                 .iter()
                 .all(|o| o.as_any().downcast_ref::<TestOutput>().unwrap().0 == 20)
         );
         if self.reject {
-            return Err(anyhow::Error::msg("final invariant failed"));
+            return Err(ClientModuleError::other("final invariant failed"));
         }
         Ok(())
     }

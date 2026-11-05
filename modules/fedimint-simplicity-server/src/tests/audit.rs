@@ -332,3 +332,94 @@ async fn migration_seeds_total_from_existing_contracts() {
         Amount::from_msats(1)
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an immutable guardian checkpoint and its Simplicity module instance ID"]
+async fn retained_checkpoint_migrates_without_changing_contracts() {
+    let source = std::path::PathBuf::from(
+        std::env::var_os("FM_SIMPLICITY_CHECKPOINT")
+            .expect("FM_SIMPLICITY_CHECKPOINT must name an immutable RocksDB checkpoint"),
+    );
+    let instance_id: fedimint_core::core::ModuleInstanceId =
+        std::env::var("FM_SIMPLICITY_INSTANCE_ID")
+            .expect("FM_SIMPLICITY_INSTANCE_ID must match the retained consensus config")
+            .parse()
+            .expect("the module instance ID must be a u16");
+    assert!(source.join("CURRENT").is_file());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    std::fs::create_dir(&path).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        assert!(entry.file_type().unwrap().is_file());
+        std::fs::copy(entry.path(), path.join(entry.file_name())).unwrap();
+    }
+    let open = || async {
+        Database::new(
+            fedimint_rocksdb::RocksDb::build(&path)
+                .open()
+                .await
+                .unwrap(),
+            ModuleDecoderRegistry::default(),
+        )
+    };
+    let db = open().await;
+    let contracts: BTreeMap<_, _> = db
+        .with_prefix_module_id(instance_id)
+        .0
+        .begin_transaction_nc()
+        .await
+        .find_by_prefix(&ContractPrefix)
+        .await
+        .map(|(key, contract)| (key.0, contract))
+        .collect()
+        .await;
+    assert!(
+        !contracts.is_empty(),
+        "the retained fixture must hold contracts"
+    );
+    let expected = contracts
+        .values()
+        .try_fold(Amount::ZERO, |total, contract| {
+            total.checked_add(contract.output.amount)
+        })
+        .expect("retained contract amounts must fit in u64 msats");
+    assert!(expected > Amount::ZERO);
+    drop(db);
+
+    for _ in 0..2 {
+        let db = open().await;
+        let mut dbtx = db.begin_transaction().await;
+        apply_migrations_dbtx(
+            &mut dbtx.to_ref_nc(),
+            Arc::new(ServerDbMigrationContext) as Arc<_>,
+            fedimint_simplicity_common::KIND.to_string(),
+            IServerModuleInit::get_database_migrations(&SimplicityInit),
+            Some(instance_id),
+            None,
+        )
+        .await
+        .unwrap();
+        dbtx.commit_tx().await;
+
+        let module_db = db.with_prefix_module_id(instance_id).0;
+        let mut dbtx = module_db.begin_transaction_nc().await;
+        let restored: BTreeMap<_, _> = dbtx
+            .find_by_prefix(&ContractPrefix)
+            .await
+            .map(|(key, contract)| (key.0, contract))
+            .collect()
+            .await;
+        assert_eq!(restored, contracts);
+        assert_eq!(live_contract_total(&mut dbtx).await, expected);
+        let mut balance = Audit::default();
+        Simplicity::new_for_testing(vec![PeerId::from(0)])
+            .unwrap()
+            .audit(&mut dbtx, &mut balance, instance_id)
+            .await;
+        assert_eq!(
+            balance.net_assets().unwrap().milli_sat,
+            -i64::try_from(expected.msats).unwrap()
+        );
+    }
+}

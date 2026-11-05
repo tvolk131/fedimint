@@ -70,6 +70,6 @@ impl SessionHistory {
             elapsed_us = started.elapsed().unwrap_or_default().as_micros() as u64,
             success = result.is_ok(),
             "authenticated session request finished");
-        result
+        result.map_err(anyhow::Error::from)
     }
 }

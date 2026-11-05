@@ -5,8 +5,7 @@ use anyhow::ensure;
 use fedimint_core::OutPoint;
 use fedimint_core::db::IDatabaseTransactionOpsCoreTyped;
 use fedimint_core::encoding::Encodable as _;
-use fedimint_core::epoch::ConsensusItem;
-use fedimint_core::session_outcome::SessionStatus;
+use fedimint_core::session_outcome::{ConsensusItem, SessionStatus};
 use futures::StreamExt as _;
 
 use crate::common::{ContractInput, ContractOutput};

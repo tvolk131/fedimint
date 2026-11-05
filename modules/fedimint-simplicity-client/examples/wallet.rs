@@ -64,7 +64,7 @@ enum Command {
 }
 
 async fn builder() -> anyhow::Result<ClientBuilder> {
-    let mut builder = Client::builder().await?;
+    let mut builder = Client::builder().await;
     builder.with_module(MintClientInit);
     builder.with_module(SimplicityClientInit::default());
     Ok(builder)
@@ -93,9 +93,7 @@ async fn main() -> anyhow::Result<()> {
             .await?,
         Default::default(),
     );
-    let connectors = ConnectorRegistry::build_from_client_defaults()
-        .bind()
-        .await?;
+    let connectors = ConnectorRegistry::build_from_client_defaults().bind().await;
     let mut client = match &options.command {
         Command::Join { invite } => {
             builder()
@@ -141,7 +139,7 @@ async fn wait_for_recovery(client: &ClientHandle) -> anyhow::Result<()> {
     loop {
         tokio::select! {
             // Progress alone cannot report terminal recovery failures.
-            result = &mut outcome => return result,
+            result = &mut outcome => return result.map_err(anyhow::Error::from),
             Some((module, value)) = progress.next() => {
                 let percent = if value.total == 0 {
                     None

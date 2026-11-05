@@ -14,7 +14,7 @@ use fedimint_api_client::api::{DynGlobalApi, FederationApiExt};
 use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::envs::BitcoinRpcConfig;
 use fedimint_core::module::ApiRequestErased;
-use fedimint_core::net::peers::IP2PConnections;
+use fedimint_core::net::IP2PConnections;
 use fedimint_core::task::TaskGroup;
 use fedimint_core::util::SafeUrl;
 use fedimint_core::{ChainId, Feerate};
@@ -123,15 +123,9 @@ impl Federation {
             .unwrap()
             .0
             .to_owned();
-        let decoders = registry
-            .available_decoders(first.consensus.iter_module_instances())
-            .unwrap();
+        let decoders = registry.available_decoders(first.consensus.iter_module_instances());
         let api = DynGlobalApi::new(
-            ConnectorRegistry::build_from_testing_env()
-                .unwrap()
-                .bind()
-                .await
-                .unwrap(),
+            ConnectorRegistry::build_from_testing_env().bind().await,
             first
                 .consensus
                 .api_endpoints()
@@ -139,8 +133,7 @@ impl Federation {
                 .map(|(id, endpoint)| (id, endpoint.url))
                 .collect(),
             None,
-        )
-        .unwrap();
+        );
         let mut fed = Self {
             id: first.calculate_federation_id(),
             configs,
@@ -371,19 +364,13 @@ async fn run_guardian(config_path: std::path::PathBuf) {
     let path = config_path.parent().unwrap().to_path_buf();
     let height = path.parent().unwrap().join(BLOCK_COUNT_FILE);
     let registry = registry();
-    let decoders = registry
-        .available_decoders(cfg.consensus.iter_module_instances())
-        .unwrap();
+    let decoders = registry.available_decoders(cfg.consensus.iter_module_instances());
     let db = Database::new(
         RocksDb::build(path.join("db")).open().await.unwrap(),
         decoders,
     );
     consensus::run(
-        ConnectorRegistry::build_from_testing_env()
-            .unwrap()
-            .bind()
-            .await
-            .unwrap(),
+        ConnectorRegistry::build_from_testing_env().bind().await,
         None,
         None,
         connections,

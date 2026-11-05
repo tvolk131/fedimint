@@ -42,7 +42,7 @@ fn finalization_checks_the_combined_resource_budget_before_submission() {
             nonce: [0; 8],
             signatures: TransactionSignature::NaiveMultisig(vec![]),
         };
-        let result = authorization.verify_finalized(&tx);
+        let result: Result<(), ClientModuleError> = authorization.verify_finalized(&tx);
         if count == 32 {
             result.unwrap();
         } else {
@@ -65,14 +65,10 @@ fn final_funding_fee_cannot_exceed_the_attempts_remaining_budget() {
     // A point-in-time quote is not authority to spend more after note inventory
     // changes. The finalizer checks the real funded transaction, including dust.
     for fee in [0, 316, 317, 318, 10_000] {
-        assert_eq!(
-            authorization
-                .verify_fees(&fedimint_core::module::Amounts::new_bitcoin(
-                    fedimint_core::Amount::from_msats(fee)
-                ))
-                .is_ok(),
-            fee <= 317
+        let result: Result<(), ClientModuleError> = authorization.verify_fees(
+            &fedimint_core::module::Amounts::new_bitcoin(fedimint_core::Amount::from_msats(fee)),
         );
+        assert_eq!(result.is_ok(), fee <= 317);
     }
 }
 
@@ -191,9 +187,9 @@ fn a_funding_dependent_branch_cannot_silently_change_pruning_fees() {
         7,
         common::ContractOutput::action_output(Default::default()),
     ));
+    let result: Result<_, ClientModuleError> = authorization.finalize_inputs(&tx);
     assert!(
-        authorization
-            .finalize_inputs(&tx)
+        result
             .unwrap_err()
             .to_string()
             .contains("funding changed pruning fees")

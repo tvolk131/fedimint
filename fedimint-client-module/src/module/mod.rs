@@ -86,13 +86,13 @@ pub trait ClientContextIface: MaybeSend + MaybeSync {
         dbtx: &mut DatabaseTransaction<'_>,
         operation_id: OperationId,
         txid: TransactionId,
-    ) -> Result<bool, anyhow::Error>;
+    ) -> Result<bool, ClientModuleError>;
 
     async fn await_funding_release_progress(
         &self,
         operation_id: OperationId,
         txid: TransactionId,
-    ) -> Result<(), anyhow::Error>;
+    ) -> Result<(), ClientModuleError>;
 
     // TODO: unify
     async fn finalize_and_submit_transaction_inner(
@@ -464,7 +464,7 @@ where
         dbtx: &mut DatabaseTransaction<'_>,
         operation_id: OperationId,
         txid: TransactionId,
-    ) -> Result<bool, anyhow::Error> {
+    ) -> Result<bool, ClientModuleError> {
         self.client
             .get()
             .release_funding_after_conflict(
@@ -483,7 +483,7 @@ where
         &self,
         operation_id: OperationId,
         txid: TransactionId,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), ClientModuleError> {
         self.client
             .get()
             .await_funding_release_progress(operation_id, txid)
@@ -1216,12 +1216,12 @@ pub trait ClientModule: Debug + MaybeSend + MaybeSync + 'static {
             ClientInputBundle<<Self::Common as ModuleCommon>::Input, Self::States>,
             ClientOutputBundle<<Self::Common as ModuleCommon>::Output, Self::States>,
         ),
-        anyhow::Error,
+        ClientModuleError,
     > {
-        Err(anyhow::anyhow!(
-            "{} does not support funding reservations",
-            <Self as ClientModule>::kind()
-        ))
+        Err(ClientModuleError::Unsupported {
+            kind: <Self as ClientModule>::kind(),
+            operation: "create_reserved_inputs_and_outputs",
+        })
     }
 
     /// Called only after the originating wallet authenticates a permanent
@@ -1233,7 +1233,7 @@ pub trait ClientModule: Debug + MaybeSend + MaybeSync + 'static {
         _dbtx: &mut DatabaseTransaction<'_>,
         _operation_id: OperationId,
         _txid: TransactionId,
-    ) -> Result<bool, anyhow::Error> {
+    ) -> Result<bool, ClientModuleError> {
         Ok(true)
     }
 
@@ -1245,7 +1245,7 @@ pub trait ClientModule: Debug + MaybeSend + MaybeSync + 'static {
         &self,
         _operation_id: OperationId,
         _txid: TransactionId,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), ClientModuleError> {
         Ok(())
     }
 
@@ -1410,7 +1410,7 @@ pub trait IClientModule: Debug {
         unit: AmountUnit,
         input_amount: Amount,
         output_amount: Amount,
-    ) -> Result<(ClientInputBundle, ClientOutputBundle), anyhow::Error>;
+    ) -> Result<(ClientInputBundle, ClientOutputBundle), ClientModuleError>;
 
     async fn release_funding_after_conflict(
         &self,
@@ -1418,13 +1418,13 @@ pub trait IClientModule: Debug {
         dbtx: &mut DatabaseTransaction<'_>,
         operation_id: OperationId,
         txid: TransactionId,
-    ) -> Result<bool, anyhow::Error>;
+    ) -> Result<bool, ClientModuleError>;
 
     async fn await_funding_release_progress(
         &self,
         operation_id: OperationId,
         txid: TransactionId,
-    ) -> Result<(), anyhow::Error>;
+    ) -> Result<(), ClientModuleError>;
 
     async fn await_primary_module_output(
         &self,
@@ -1552,7 +1552,7 @@ where
         unit: AmountUnit,
         input_amount: Amount,
         output_amount: Amount,
-    ) -> Result<(ClientInputBundle, ClientOutputBundle), anyhow::Error> {
+    ) -> Result<(ClientInputBundle, ClientOutputBundle), ClientModuleError> {
         let (inputs, outputs) = <T as ClientModule>::create_reserved_inputs_and_outputs(
             self,
             &mut dbtx.to_ref_with_prefix_module_id(module_instance).0,
@@ -1574,7 +1574,7 @@ where
         dbtx: &mut DatabaseTransaction<'_>,
         operation_id: OperationId,
         txid: TransactionId,
-    ) -> Result<bool, anyhow::Error> {
+    ) -> Result<bool, ClientModuleError> {
         <T as ClientModule>::release_funding_after_conflict(
             self,
             &mut dbtx.to_ref_with_prefix_module_id(module_instance).0,
@@ -1588,7 +1588,7 @@ where
         &self,
         operation_id: OperationId,
         txid: TransactionId,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), ClientModuleError> {
         <T as ClientModule>::await_funding_release_progress(self, operation_id, txid).await
     }
 

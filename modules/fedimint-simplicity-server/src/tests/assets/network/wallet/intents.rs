@@ -163,11 +163,7 @@ async fn prepare(
     let client = builder(true)
         .await
         .open(
-            ConnectorRegistry::build_from_testing_env()
-                .unwrap()
-                .bind()
-                .await
-                .unwrap(),
+            ConnectorRegistry::build_from_testing_env().bind().await,
             database.clone(),
             root(seed),
         )
@@ -212,11 +208,7 @@ async fn run() {
     let offline = builder(true)
         .await
         .open(
-            ConnectorRegistry::build_from_testing_env()
-                .unwrap()
-                .bind()
-                .await
-                .unwrap(),
+            ConnectorRegistry::build_from_testing_env().bind().await,
             alice_db.clone(),
             root(41),
         )
@@ -298,11 +290,7 @@ async fn run() {
     let bob = builder(true)
         .await
         .open(
-            ConnectorRegistry::build_from_testing_env()
-                .unwrap()
-                .bind()
-                .await
-                .unwrap(),
+            ConnectorRegistry::build_from_testing_env().bind().await,
             bob_db.clone(),
             root(42),
         )
@@ -341,7 +329,7 @@ async fn run() {
     b.retry_intent(bob_id).await.unwrap();
     let record = await_record(&b, bob_id).await;
     let txid = completed(&record, 3);
-    bob.wait_for_all_active_state_machines().await.unwrap();
+    bob.wait_for_all_active_state_machines().await;
     let fees = bob
         .db()
         .begin_transaction_nc()
@@ -475,11 +463,7 @@ async fn run() {
     let frank = builder(true)
         .await
         .open(
-            ConnectorRegistry::build_from_testing_env()
-                .unwrap()
-                .bind()
-                .await
-                .unwrap(),
+            ConnectorRegistry::build_from_testing_env().bind().await,
             frank_db.clone(),
             root(46),
         )

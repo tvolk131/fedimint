@@ -2,12 +2,12 @@
 
 This is an unaudited, opt-in module. Use a new federation on a Bitcoin test
 network. These instructions prepare a native SDK deployment. Consult the
-[candidate evidence](RELEASE-v0.12.2.md) for completed checks and their limits;
+[port notes](RELEASE-v0.13.0.md) for the current baseline and qualification limits;
 a sustained pilot remains separate. The [execution baseline](../fedimint-simplicity-common/README.md#beta-execution-baseline)
 defines the versions and rules all guardians must preserve.
 
 Track remaining release work and the scope of completed rehearsals in the
-[beta checklist](BETA-CHECKLIST.md). The [v0.12.2 port notes](RELEASE-v0.12.2.md)
+[beta checklist](BETA-CHECKLIST.md). The [v0.13.0 port notes](RELEASE-v0.13.0.md)
 identify this branch's official baseline and compatibility boundaries.
 
 ## Build and identify the artifact

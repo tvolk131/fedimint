@@ -533,7 +533,7 @@ impl ClientModule for MintClientModule {
             ClientInputBundle<MintInput, MintClientStateMachines>,
             ClientOutputBundle<MintOutput, MintClientStateMachines>,
         ),
-        anyhow::Error,
+        ClientModuleError,
     > {
         self.create_funding(
             dbtx,
@@ -551,7 +551,7 @@ impl ClientModule for MintClientModule {
         dbtx: &mut DatabaseTransaction<'_>,
         operation_id: OperationId,
         txid: fedimint_core::TransactionId,
-    ) -> Result<bool, anyhow::Error> {
+    ) -> Result<bool, ClientModuleError> {
         reservation::request_release(dbtx, operation_id, txid).await
     }
 
@@ -559,7 +559,7 @@ impl ClientModule for MintClientModule {
         &self,
         operation_id: OperationId,
         txid: fedimint_core::TransactionId,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), ClientModuleError> {
         reservation::await_release_progress(self.client_ctx.module_db(), operation_id, txid).await
     }
 
@@ -722,7 +722,9 @@ impl MintClientModule {
                 .await
                 .is_some()
         {
-            return Err(ClientModuleError::other("funding reservation already exists"));
+            return Err(ClientModuleError::other(
+                "funding reservation already exists",
+            ));
         }
         if unit != self.cfg.amount_unit {
             return Err(ClientModuleError::other(

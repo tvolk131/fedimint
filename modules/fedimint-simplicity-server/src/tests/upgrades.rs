@@ -285,7 +285,7 @@ impl IRawFederationApi for SupportApi {
         assert_ne!(peer, PeerId::from(0));
         match &self.replies[usize::from(u16::from(peer))] {
             Reply::Version(v) => Ok(serde_json::to_value(v).unwrap()),
-            Reply::Offline => Err(ServerError::Connection(anyhow::anyhow!("offline"))),
+            Reply::Offline => Err(ServerError::Connection(anyhow::anyhow!("offline").into())),
             Reply::Malformed => Ok(serde_json::json!("invalid")),
             Reply::Silent => futures::future::pending().await,
         }

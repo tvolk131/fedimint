@@ -4,8 +4,9 @@ use std::io::Write;
 use std::path::Path;
 
 use fedimint_core::db::IDatabaseTransactionOpsCore;
-use fedimint_core::epoch::ConsensusItem;
-use fedimint_core::session_outcome::{AcceptedItem, SessionOutcome, SignedSessionOutcome};
+use fedimint_core::session_outcome::{
+    AcceptedItem, ConsensusItem, SessionOutcome, SignedSessionOutcome,
+};
 use fedimint_server::consensus::db::{AcceptedTransactionKey, SignedSessionOutcomeKey};
 use futures::StreamExt;
 

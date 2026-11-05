@@ -1,5 +1,6 @@
 use std::fmt;
 
+use fedimint_client_module::error::ClientModuleError;
 use fedimint_client_module::transaction::TransactionFinalizer;
 use fedimint_core::OutPoint;
 use fedimint_core::config::FederationId;
@@ -41,43 +42,49 @@ impl fmt::Debug for Authorization {
 }
 
 impl TransactionFinalizer for Authorization {
-    fn verify_fees(&self, fees: &fedimint_core::module::Amounts) -> Result<(), anyhow::Error> {
+    fn verify_fees(&self, fees: &fedimint_core::module::Amounts) -> Result<(), ClientModuleError> {
         if let Some(limit) = self.max_fee {
             for (unit, amount) in fees.clone() {
                 if unit != fedimint_core::module::AmountUnit::BITCOIN || amount > limit {
-                    return Err(anyhow::Error::msg("intent fee budget exceeded"));
+                    return Err(ClientModuleError::other("intent fee budget exceeded"));
                 }
             }
         }
         Ok(())
     }
 
-    fn prepare_outputs(&self, tx: &Transaction) -> Result<Vec<(usize, DynOutput)>, anyhow::Error> {
+    fn prepare_outputs(
+        &self,
+        tx: &Transaction,
+    ) -> Result<Vec<(usize, DynOutput)>, ClientModuleError> {
         self.receipt
             .as_ref()
             .map(|plan| {
                 plan.prepare(tx)
                     .map(|output| vec![(plan.output_index, output)])
-                    .map_err(anyhow::Error::msg)
+                    .map_err(ClientModuleError::other)
             })
             .unwrap_or_else(|| Ok(vec![]))
     }
 
-    fn verify_finalized(&self, tx: &Transaction) -> Result<(), anyhow::Error> {
+    fn verify_finalized(&self, tx: &Transaction) -> Result<(), ClientModuleError> {
         // Fail while construction/funding is still rollbackable, rather than
         // submitting an over-budget attempt with reserved notes.
-        common::resources::check_transaction(tx).map_err(anyhow::Error::msg)?;
+        common::resources::check_transaction(tx).map_err(ClientModuleError::other)?;
         if let Some(plan) = &self.receipt {
-            plan.verify(tx).map_err(anyhow::Error::msg)?;
+            plan.verify(tx).map_err(ClientModuleError::other)?;
         }
         Ok(())
     }
 
-    fn finalize_outputs(&self, tx: &Transaction) -> Result<Vec<(usize, DynOutput)>, anyhow::Error> {
+    fn finalize_outputs(
+        &self,
+        tx: &Transaction,
+    ) -> Result<Vec<(usize, DynOutput)>, ClientModuleError> {
         let mut signed = tx.clone();
         for key in &self.creations {
             assets::sign_creation(&mut signed, self.federation, self.module, key)
-                .map_err(anyhow::Error::msg)?;
+                .map_err(ClientModuleError::other)?;
         }
         Ok(signed
             .outputs
@@ -87,8 +94,11 @@ impl TransactionFinalizer for Authorization {
             .collect())
     }
 
-    fn finalize_inputs(&self, tx: &Transaction) -> Result<Vec<(usize, DynInput)>, anyhow::Error> {
-        let inputs = self.pruned_inputs(tx)?;
+    fn finalize_inputs(
+        &self,
+        tx: &Transaction,
+    ) -> Result<Vec<(usize, DynInput)>, ClientModuleError> {
+        let inputs = self.pruned_inputs(tx).map_err(ClientModuleError::other)?;
         for (index, input) in &inputs {
             let fee = |input: &DynInput| -> anyhow::Result<_> {
                 let input = input
@@ -97,10 +107,13 @@ impl TransactionFinalizer for Authorization {
                     .ok_or_else(|| anyhow::anyhow!("invalid Simplicity input"))?;
                 Ok(common::runtime::input_fee(input)?)
             };
-            anyhow::ensure!(
-                fee(input)? == fee(&tx.inputs[*index])?,
-                "funding changed pruning fees; construct this contract with a complete transaction environment"
-            );
+            if fee(input).map_err(ClientModuleError::other)?
+                != fee(&tx.inputs[*index]).map_err(ClientModuleError::other)?
+            {
+                return Err(ClientModuleError::other(
+                    "funding changed pruning fees; construct this contract with a complete transaction environment",
+                ));
+            }
         }
         Ok(inputs)
     }

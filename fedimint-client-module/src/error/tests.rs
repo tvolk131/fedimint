@@ -69,6 +69,21 @@ fn any_other_module_failure_fails_the_transaction_as_primary_module() {
     );
 }
 
+#[test]
+fn authorization_failures_are_not_classified_as_insufficient_funds() {
+    let error =
+        TransactionSubmitError::Finalization(ClientModuleError::from(InsufficientBalanceError {
+            requested_amount: Amount::from_sats(2),
+            total_amount: Amount::from_sats(1),
+        }));
+
+    assert!(!error.is_insufficient_funds());
+    assert_matches!(
+        error,
+        TransactionSubmitError::Finalization(ClientModuleError::InsufficientBalance(_))
+    );
+}
+
 /// A failure with a cause, so that the wrapped error has a chain of two.
 #[derive(Debug, thiserror::Error)]
 #[error("outer")]

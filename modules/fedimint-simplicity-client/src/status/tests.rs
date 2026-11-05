@@ -65,15 +65,15 @@ impl IRawFederationApi for Transport {
             _ => panic!("unexpected endpoint/scope"),
         }
         if self.state.unavailable.load(Ordering::Relaxed) {
-            return Err(ServerError::InvalidRpcId(anyhow::anyhow!("unavailable")));
+            return Err(ServerError::InvalidRpcId("unavailable".to_owned()));
         }
         if peer == PeerId::from(3) {
             return futures::future::pending().await;
         }
         if peer == PeerId::from(2) && method == SUPPORTED_CONSENSUS_VERSION_ENDPOINT {
-            return Err(ServerError::InvalidRpcId(anyhow::anyhow!(
-                "secret endpoint credential"
-            )));
+            return Err(ServerError::InvalidRpcId(
+                "secret endpoint credential".to_owned(),
+            ));
         }
         Ok(match method {
             ACTIVE_CONSENSUS_VERSION_ENDPOINT | SUPPORTED_CONSENSUS_VERSION_ENDPOINT => {

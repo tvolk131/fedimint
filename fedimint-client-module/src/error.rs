@@ -147,6 +147,9 @@ pub enum TransactionSubmitError {
     /// Calculating the transaction balance or fees overflowed.
     #[error("Transaction amounts or fees overflowed")]
     AmountOverflow,
+
+    #[error("Transaction authorization failed")]
+    Finalization(#[source] ClientModuleError),
 }
 
 impl TransactionSubmitError {

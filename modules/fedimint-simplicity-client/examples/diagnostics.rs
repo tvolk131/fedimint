@@ -160,8 +160,7 @@ async fn operator_status(
         ConnectorRegistry::build_from_client_defaults().bind(),
     )
     .await
-    .map_err(|_| anyhow!("network initialization timed out"))?
-    .map_err(|_| anyhow!("network initialization failed"))?;
+    .map_err(|_| anyhow!("network initialization timed out"))?;
     let (config, api) = timeout(limit, download_from_invite_code(&connectors, &invite))
         .await
         .map_err(|_| anyhow!("configuration query timed out"))?

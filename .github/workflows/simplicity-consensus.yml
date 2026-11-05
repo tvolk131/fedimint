@@ -2,9 +2,9 @@ name: Simplicity release checks
 
 on:
   push:
-    branches: [simplicity-v0.12.2]
+    branches: [simplicity-v0.12.2, simplicity-v0.13.0]
   pull_request:
-    branches: [simplicity-v0.12.2]
+    branches: [simplicity-v0.12.2, simplicity-v0.13.0]
   workflow_dispatch:
 
 defaults:
@@ -133,7 +133,7 @@ jobs:
   release:
     name: Module, shared regressions and guardian
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       CC: clang-18
       CXX: clang++-18

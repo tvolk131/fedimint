@@ -1,5 +1,6 @@
 //! Outcome index for opt-in funding reservations. Notes and the final txid live
 //! in the durable input state machine; no raw-note import API is exposed.
+use fedimint_client_module::error::ClientModuleError;
 use fedimint_core::TransactionId;
 use fedimint_core::core::OperationId;
 use fedimint_core::db::{Database, DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
@@ -23,7 +24,7 @@ pub(crate) async fn await_release_progress(
     db: &Database,
     operation: OperationId,
     txid: TransactionId,
-) -> Result<(), anyhow::Error> {
+) -> Result<(), ClientModuleError> {
     db.wait_key_check(&FundingReservationKey(operation), |record| match record {
         None => Some(Ok(())),
         Some(FundingReservation::AwaitingOutcome) => None,
@@ -33,7 +34,7 @@ pub(crate) async fn await_release_progress(
         {
             Some(Ok(()))
         }
-        Some(_) => Some(Err(anyhow::Error::msg(
+        Some(_) => Some(Err(ClientModuleError::other(
             "funding reservation was accepted or belongs to another transaction",
         ))),
     })
@@ -47,7 +48,7 @@ pub(crate) async fn request_release(
     dbtx: &mut DatabaseTransaction<'_>,
     operation: OperationId,
     txid: TransactionId,
-) -> Result<bool, anyhow::Error> {
+) -> Result<bool, ClientModuleError> {
     let key = FundingReservationKey(operation);
     match dbtx.get_value(&key).await {
         None => Ok(true),
@@ -59,7 +60,7 @@ pub(crate) async fn request_release(
         }
         Some(FundingReservation::ReleaseRequested(bound)) if bound == txid => Ok(false),
         Some(FundingReservation::Released(bound)) if bound == txid => Ok(true),
-        Some(_) => Err(anyhow::Error::msg(
+        Some(_) => Err(ClientModuleError::other(
             "funding reservation was accepted or belongs to another transaction",
         )),
     }

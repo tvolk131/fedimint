@@ -21,7 +21,7 @@ fn db() -> Database {
     Database::new(MemDatabase::new(), Default::default())
 }
 async fn builder(stopped: bool) -> ClientBuilder {
-    let mut builder = Client::builder().await.unwrap();
+    let mut builder = Client::builder().await;
     builder.with_module(DummyClientInit);
     builder.with_module(SimplicityClientInit {
         templates: Arc::new(pruning::Templates),
@@ -43,19 +43,14 @@ async fn join(
     let preview = make_builder(stopped)
         .await
         .preview_with_existing_config(
-            ConnectorRegistry::build_from_testing_env()
-                .unwrap()
-                .bind()
-                .await
-                .unwrap(),
+            ConnectorRegistry::build_from_testing_env().bind().await,
             fed.configs[&PeerId::from(0)]
                 .consensus
                 .to_client_config(&registry())
                 .unwrap(),
             None,
         )
-        .await
-        .unwrap();
+        .await;
     if recover {
         let client = preview
             .recover(database.clone(), root(seed), None)
@@ -71,11 +66,7 @@ async fn join(
 async fn open(builder: ClientBuilder, database: Database, seed: u8) -> ClientHandle {
     builder
         .open(
-            ConnectorRegistry::build_from_testing_env()
-                .unwrap()
-                .bind()
-                .await
-                .unwrap(),
+            ConnectorRegistry::build_from_testing_env().bind().await,
             database,
             root(seed),
         )
@@ -87,8 +78,7 @@ async fn funds(client: &ClientHandle) {
         .get_first_module::<DummyClientModule>()
         .unwrap()
         .mock_receive(Amount::from_sats(10_000), AmountUnit::BITCOIN)
-        .await
-        .unwrap();
+        .await;
 }
 async fn submit(
     wallet: &SimplicityClientModule,

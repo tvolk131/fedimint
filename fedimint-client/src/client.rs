@@ -892,10 +892,14 @@ impl Client {
                 .expect("Inputs >= outputs for own transactions")
         };
 
-        partial_transaction.verify_fees(&fees)?;
+        partial_transaction
+            .verify_fees(&fees)
+            .map_err(TransactionSubmitError::Finalization)?;
         let original_inputs = partial_transaction.inputs().cloned().collect::<Vec<_>>();
         let original_outputs = partial_transaction.outputs().cloned().collect::<Vec<_>>();
-        let (transaction, states) = partial_transaction.build(&self.secp_ctx, thread_rng())?;
+        let (transaction, states) = partial_transaction
+            .build(&self.secp_ctx, thread_rng())
+            .map_err(TransactionSubmitError::Finalization)?;
 
         // Authorization may replace witnesses/signatures, but it cannot change
         // the fees used to select funding. Fail before committing any operation
@@ -905,7 +909,9 @@ impl Client {
             if module.input_fee(&original.amounts, finalized)
                 != module.input_fee(&original.amounts, &original.input)
             {
-                return Err(anyhow::anyhow!("finalizer changed input fees"));
+                return Err(TransactionSubmitError::Finalization(
+                    ClientModuleError::other("finalizer changed input fees"),
+                ));
             }
         }
         for (original, finalized) in original_outputs.iter().zip(&transaction.outputs) {
@@ -913,7 +919,9 @@ impl Client {
             if module.output_fee(&original.amounts, finalized)
                 != module.output_fee(&original.amounts, &original.output)
             {
-                return Err(anyhow::anyhow!("finalizer changed output fees"));
+                return Err(TransactionSubmitError::Finalization(
+                    ClientModuleError::other("finalizer changed output fees"),
+                ));
             }
         }
 
@@ -3041,7 +3049,7 @@ impl ClientContextIface for Client {
         dbtx: &mut DatabaseTransaction<'_>,
         operation_id: OperationId,
         txid: fedimint_core::TransactionId,
-    ) -> Result<bool, anyhow::Error> {
+    ) -> Result<bool, ClientModuleError> {
         let mut released = true;
         // Visit all instances, including a previous primary module. Each module
         // owns its reservation records and ignores operations it did not fund.
@@ -3057,7 +3065,7 @@ impl ClientContextIface for Client {
         &self,
         operation_id: OperationId,
         txid: fedimint_core::TransactionId,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), ClientModuleError> {
         futures::future::try_join_all(
             self.modules
                 .iter_modules()

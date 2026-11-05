@@ -6,6 +6,8 @@ use fedimint_core::core::{DynInput, DynOutput, ModuleInstanceId};
 use fedimint_core::task::{MaybeSend, MaybeSync};
 use fedimint_core::transaction::Transaction;
 
+use crate::error::ClientModuleError;
+
 /// Complete module authorization after funding, change, and the nonce are
 /// fixed, but before the outer signatures and state-machine txids are created.
 /// Replacements use outer indices and may only replace this module's existing
@@ -17,7 +19,7 @@ use fedimint_core::transaction::Transaction;
 /// database transaction retry.
 pub trait TransactionFinalizer: Debug + MaybeSend + MaybeSync {
     /// Enforce a wallet's fee budget after funding and denomination change.
-    fn verify_fees(&self, _fees: &fedimint_core::module::Amounts) -> Result<(), anyhow::Error> {
+    fn verify_fees(&self, _fees: &fedimint_core::module::Amounts) -> Result<(), ClientModuleError> {
         Ok(())
     }
 
@@ -25,26 +27,26 @@ pub trait TransactionFinalizer: Debug + MaybeSend + MaybeSync {
     fn prepare_outputs(
         &self,
         _transaction: &Transaction,
-    ) -> Result<Vec<(usize, DynOutput)>, anyhow::Error> {
+    ) -> Result<Vec<(usize, DynOutput)>, ClientModuleError> {
         Ok(vec![])
     }
 
     fn finalize_outputs(
         &self,
         _transaction: &Transaction,
-    ) -> Result<Vec<(usize, DynOutput)>, anyhow::Error> {
+    ) -> Result<Vec<(usize, DynOutput)>, ClientModuleError> {
         Ok(vec![])
     }
 
     fn finalize_inputs(
         &self,
         _transaction: &Transaction,
-    ) -> Result<Vec<(usize, DynInput)>, anyhow::Error> {
+    ) -> Result<Vec<(usize, DynInput)>, ClientModuleError> {
         Ok(vec![])
     }
 
     /// Verify invariants against the completed inner transaction. No mutations.
-    fn verify_finalized(&self, _transaction: &Transaction) -> Result<(), anyhow::Error> {
+    fn verify_finalized(&self, _transaction: &Transaction) -> Result<(), ClientModuleError> {
         Ok(())
     }
 }
@@ -58,7 +60,7 @@ pub(super) struct RegisteredFinalizer {
 pub(super) fn finalize(
     transaction: &mut Transaction,
     finalizers: &[RegisteredFinalizer],
-) -> Result<(), anyhow::Error> {
+) -> Result<(), ClientModuleError> {
     for prepare in [true, false] {
         let mut replaced = BTreeSet::new();
         for registration in finalizers {
@@ -69,13 +71,17 @@ pub(super) fn finalize(
             };
             for (index, output) in outputs {
                 let Some(original) = transaction.outputs.get_mut(index) else {
-                    return Err(anyhow::Error::msg("finalizer output index out of bounds"));
+                    return Err(ClientModuleError::other(
+                        "finalizer output index out of bounds",
+                    ));
                 };
                 if original.module_instance_id() != registration.module
                     || output.module_instance_id() != registration.module
                     || !replaced.insert(index)
                 {
-                    return Err(anyhow::Error::msg("invalid finalizer output replacement"));
+                    return Err(ClientModuleError::other(
+                        "invalid finalizer output replacement",
+                    ));
                 }
                 *original = output;
             }
@@ -85,13 +91,17 @@ pub(super) fn finalize(
     for registration in finalizers {
         for (index, input) in registration.finalizer.finalize_inputs(transaction)? {
             let Some(original) = transaction.inputs.get_mut(index) else {
-                return Err(anyhow::Error::msg("finalizer input index out of bounds"));
+                return Err(ClientModuleError::other(
+                    "finalizer input index out of bounds",
+                ));
             };
             if original.module_instance_id() != registration.module
                 || input.module_instance_id() != registration.module
                 || !replaced.insert(index)
             {
-                return Err(anyhow::Error::msg("invalid finalizer input replacement"));
+                return Err(ClientModuleError::other(
+                    "invalid finalizer input replacement",
+                ));
             }
             *original = input;
         }

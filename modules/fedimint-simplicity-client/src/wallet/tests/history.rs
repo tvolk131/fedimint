@@ -159,7 +159,7 @@ impl IRawFederationApi for Transport {
                     }
                     Fault::Malformed => return Ok(serde_json::json!("invalid base64")),
                     Fault::Unavailable => {
-                        return Err(ServerError::InvalidRpcId(anyhow::anyhow!("{method}")));
+                        return Err(ServerError::InvalidRpcId(method.to_owned()));
                     }
                 }
                 Ok(serde_json::to_value(SerdeModuleEncodingBase64::from(

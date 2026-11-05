@@ -1,9 +1,9 @@
 # Simplicity: remaining beta work
 
 Checkpoint: beta.2 preparation, 2026-11-04. Beta.1 qualification does not
-qualify the current HEAD. The [v0.12.2 port](RELEASE-v0.12.2.md) records the
-release baseline and focused checks; earlier evidence remains tied to its
-original development revision. These workstreams separate bounded
+qualify the current HEAD. The [v0.13.0 port](RELEASE-v0.13.0.md) records the
+current release baseline; [v0.12.2 checks](RELEASE-v0.12.2.md) and earlier evidence
+remain tied to their original revisions. These workstreams separate bounded
 code/artifact qualification from the deployment and pilot work still outstanding. The native market
 application exercises the SDK, but does not replace module release checks. Use test
 funds throughout. The [runbook](RUNBOOK.md) covers deployment and recovery;

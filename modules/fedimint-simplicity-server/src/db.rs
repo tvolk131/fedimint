@@ -1,4 +1,4 @@
-use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
+use fedimint_core::db::{DatabaseTransaction, DbMigrationError, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::ModuleConsensusVersion;
 use fedimint_core::{Amount, OutPoint, PeerId, impl_db_lookup, impl_db_record};
@@ -106,7 +106,7 @@ pub async fn remove_contract(
 /// version and skip this.
 pub(crate) async fn migrate_to_v1(
     mut ctx: ServerModuleDbMigrationFnContext<'_, Simplicity>,
-) -> anyhow::Result<()> {
+) -> Result<(), DbMigrationError> {
     let mut dbtx = ctx.dbtx();
     let total = dbtx
         .find_by_prefix(&ContractPrefix)
@@ -115,7 +115,7 @@ pub(crate) async fn migrate_to_v1(
             total?.checked_add(contract.output.amount)
         })
         .await
-        .ok_or_else(|| anyhow::anyhow!("live contract total overflows u64 msats"))?;
+        .ok_or_else(|| DbMigrationError::other("live contract total overflows u64 msats"))?;
     dbtx.insert_entry(&LiveContractTotalKey, &total).await;
     Ok(())
 }

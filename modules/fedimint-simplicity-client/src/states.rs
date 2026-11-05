@@ -5,7 +5,7 @@ use fedimint_client_module::sm::{Context, DynState, State, StateTransition};
 use fedimint_core::core::{IntoDynInstance, ModuleInstanceId, ModuleKind, OperationId};
 use fedimint_core::db::IDatabaseTransactionOpsCoreTyped;
 use fedimint_core::encoding::{Decodable, Encodable};
-use fedimint_core::util::FmtCompactAnyhow as _;
+use fedimint_core::util::FmtCompact as _;
 use fedimint_core::{OutPoint, TransactionId};
 
 use crate::LOG_CLIENT_SIMPLICITY;
@@ -88,7 +88,7 @@ impl State for SimplicityState {
                                 Ok(()) if module.store.has_transaction(txid).await => break,
                                 Ok(()) => {}
                                 Err(error) => {
-                                    tracing::warn!(target: LOG_CLIENT_SIMPLICITY, %txid, error = %error.fmt_compact_anyhow(), "Retrying accepted transaction history synchronization")
+                                    tracing::warn!(target: LOG_CLIENT_SIMPLICITY, %txid, error = %error.fmt_compact(), "Retrying accepted transaction history synchronization")
                                 }
                             }
                             fedimint_core::runtime::sleep(Duration::from_secs(1)).await;

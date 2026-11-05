@@ -2,6 +2,7 @@
 use std::sync::Arc;
 
 use anyhow::ensure;
+use fedimint_client_module::error::ClientModuleError;
 use fedimint_client_module::module::init::{
     ClientModuleInit, ClientModuleInitArgs, ClientModuleRecoverArgs, RecoveryMode,
 };
@@ -89,7 +90,10 @@ impl ClientModuleInit for SimplicityClientInit {
         RecoveryMode::Unusable
     }
 
-    async fn init(&self, args: &ClientModuleInitArgs<Self>) -> Result<Self::Module, anyhow::Error> {
+    async fn init(
+        &self,
+        args: &ClientModuleInitArgs<Self>,
+    ) -> Result<Self::Module, ClientModuleError> {
         let store = WalletStore::open(
             args.db.clone(),
             &args.module_root_secret,
@@ -98,7 +102,7 @@ impl ClientModuleInit for SimplicityClientInit {
             self.templates.clone(),
         )
         .await
-        .map_err(anyhow::Error::msg)?;
+        .map_err(ClientModuleError::other)?;
         Ok(SimplicityClientModule {
             store,
             core_api_version: args.core_api_version,
@@ -113,7 +117,7 @@ impl ClientModuleInit for SimplicityClientInit {
         &self,
         args: &ClientModuleRecoverArgs<Self>,
         _snapshot: Option<&NoModuleBackup>,
-    ) -> Result<Option<Amount>, anyhow::Error> {
+    ) -> Result<Option<Amount>, ClientModuleError> {
         let store = WalletStore::open(
             args.db.clone(),
             &args.module_root_secret,
@@ -122,7 +126,7 @@ impl ClientModuleInit for SimplicityClientInit {
             self.templates.clone(),
         )
         .await
-        .map_err(anyhow::Error::msg)?;
+        .map_err(ClientModuleError::other)?;
         let history = SessionHistory::new(
             args.api.clone(),
             args.context.decoders(),
@@ -138,7 +142,7 @@ impl ClientModuleInit for SimplicityClientInit {
                 });
             })
             .await
-            .map_err(anyhow::Error::msg)?;
+            .map_err(ClientModuleError::other)?;
         Ok(None)
     }
 }
