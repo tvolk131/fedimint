@@ -1,6 +1,7 @@
-> These results predate the worker pools, submission admission limit and
-> decoded-program cache added in commits after 2026-10-04. Rerun these
-> benchmarks before beta.2 qualification; these numbers do not qualify beta.2.
+> The historical results below predate the worker pools, submission admission
+> limit and decoded-program cache. The [November 5 local rerun](RESULTS-2026-11-05.md)
+> measures that newer core path on a Mac; neither record qualifies Pi 5 or
+> beta.2 deployment artifacts.
 
 # Simplicity resource results — 2026-10-02–04
 

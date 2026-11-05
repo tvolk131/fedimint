@@ -157,6 +157,8 @@ evidence rather than committing every run.
 - [ ] **Resource benchmarks rerun on beta.2 artifacts.** Repeat the
   [resource benchmarks](../fedimint-simplicity-server/benches/resources/README.md)
   after the worker-pool, admission and cache changes, and record the results.
+  The [November 5 local follow-up](LOCAL-VALIDATION-2026-11-05.md) records a
+  current Mac core-path rerun, not Pi 5 or full admission/consensus qualification.
 - [ ] **Beta.2 qualification.** Repeat exact-candidate checks and packaging on
   beta.2 artifacts. Use the fresh matching-deployment baseline above, including
   spending pre-restart contracts after persisted-state replay and mnemonic

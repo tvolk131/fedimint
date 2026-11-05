@@ -63,6 +63,11 @@ not identify the extension.
 
 ## Validation
 
+The [November 5 local follow-up](LOCAL-VALIDATION-2026-11-05.md) records the
+receipt fix, replay regression, API/traversal cleanup, expanded checks and
+remaining qualification gates. It does not promote earlier release evidence
+or local builds into Linux/Pi deployment qualification.
+
 Run the reproducible focused checks in the development environment:
 
 ```sh
