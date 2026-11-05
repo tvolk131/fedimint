@@ -42,12 +42,17 @@ not just Simplicity-specific checks.
 
 ## Upgrade boundaries
 
-The [runbook](RUNBOOK.md#upgrading-from-beta1) still applies. The existing
-version 0-to-1 module database migration initializes the running live-contract
-total; beta.1 cannot reopen that migrated database. Back up before starting
-the new binary. Market and AMM template changes already present on the source
-branch mean beta.1 descriptors are not universally recoverable with current
-templates. A successful database migration does not change that limitation.
+There is no deployed state to preserve for this candidate. The supported initial
+rollout is a [fresh matching deployment](RUNBOOK.md#current-candidate-fresh-deployment),
+not a v0.12.2-to-v0.13.0 migration. Qualify restart, retained-history catch-up,
+mnemonic recovery and spending contracts created before restart. Retain that
+deployment as the compatibility baseline for future releases.
+
+The [historical beta.1 procedure](RUNBOOK.md#historical-beta1-prototype-transition)
+records the existing version 0-to-1 live-contract-total migration and one-way
+database boundary. Market/AMM template changes on the source branch intentionally
+abandoned disposable prototype state. A successful checkpoint migration does
+not restore those descriptors or establish a supported cross-core upgrade.
 
 This port does not qualify a live, mixed-version federation or a rolling core
 upgrade. Use matching guardian and client revisions and test funds. Rehearse
@@ -63,6 +68,7 @@ Run the reproducible focused checks in the development environment:
 ```sh
 just format
 bash scripts/tests/simplicity-release-checks.sh tests
+bash scripts/tests/simplicity-release-checks.sh docs
 bash scripts/tests/simplicity-release-checks.sh network
 bash scripts/tests/simplicity-release-checks.sh guardian
 bash scripts/tests/simplicity-release-checks.sh clippy

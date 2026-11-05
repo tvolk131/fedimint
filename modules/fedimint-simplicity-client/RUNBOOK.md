@@ -221,17 +221,30 @@ wallet interactions or fully spent owned-contract history.
 
 ## Upgrading a federation
 
-The first upgrade-aware deployment uses configuration baseline `0.1`. Create a
-fresh federation; earlier prototypes, including those also labeled `0.1`, have
+### Current candidate: fresh deployment
+
+The v0.13.0 candidate has no deployed state to migrate. Create a fresh federation
+with matching guardian and client revisions. Qualify restart, checkpoint
+restoration, quorum catch-up, mnemonic-only recovery and spending contracts
+created before the restart. Retain this candidate's configuration, history,
+checkpoints, wallet descriptors and exact binaries as the first deployment
+baseline for future upgrade tests. This is not a promise to import prototype
+wallets or perform a cross-core upgrade from v0.12.2.
+
+The first upgrade-aware deployment uses configuration baseline `0.1`.
+Earlier prototypes, including those also labeled `0.1`, have
 a different consensus-item wire format. The pre-release number was reused; use
 the qualified source revision and artifact hashes to identify this baseline.
 Do not open old prototype databases with these binaries.
-Guardian databases from before the stored live contract total, including the
-beta.1 candidate's, are migrated when the new binary starts: the module sums
-its existing contracts into the total before it processes consensus.
-Retain this deployment's configuration, history and checkpoints as fixtures.
 
-### Upgrading from beta.1
+<a id="upgrading-from-beta1"></a>
+
+### Historical beta.1 prototype transition
+
+The following records the earlier prototype's coordinated migration procedure,
+not a required migration source or qualified upgrade path for the fresh v0.13.0
+candidate. Retained-checkpoint migration tests remain useful regression fixtures;
+they do not establish cross-core interoperability or client compatibility.
 
 Beta.1 markets are throwaway test state. The `binary-market/v1` template
 changed in place: issue and recombine close at `RESOLUTION_START`. Its CMR and

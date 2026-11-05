@@ -1,6 +1,6 @@
 # Simplicity: remaining beta work
 
-Checkpoint: beta.2 preparation, 2026-11-04. Beta.1 qualification does not
+Checkpoint: beta.2 preparation, 2026-11-05. Beta.1 qualification does not
 qualify the current HEAD. The [v0.13.0 port](RELEASE-v0.13.0.md) records the
 current release baseline; [v0.12.2 checks](RELEASE-v0.12.2.md) and earlier evidence
 remain tied to their original revisions. These workstreams separate bounded
@@ -9,6 +9,14 @@ application exercises the SDK, but does not replace module release checks. Use t
 funds throughout. The [runbook](RUNBOOK.md) covers deployment and recovery;
 the [module documentation](../fedimint-simplicity-common/README.md) describes
 the current protocol and limits.
+
+The v0.13.0 candidate is not deployed. Its initial rollout uses a fresh matching
+federation, not a migration of disposable beta.1 prototypes. The historical
+completed items below remain revision-bound evidence. Current qualification
+must exercise candidate-state restart, checkpoint catch-up, mnemonic recovery
+and a valid spend created before restart; preserve those fixtures as the first
+deployment baseline. Future deployed releases must preserve that baseline's
+historical templates and recovery support.
 
 The Mac/Pi regtest rehearsals have exercised real Bitcoin Core funding, market
 operations, mnemonic recovery, guardian outages and catch-up, and restoration
@@ -100,10 +108,13 @@ they retain the outstanding platform, operational, or candidate-specific work.
    prototype fixtures, including those also labeled `0.1`, are not an upgrade
    source for this envelope. The baseline's guardian checkpoint remains one:
    a version 0-to-1 module database migration seeds the stored live contract
-   total from its existing contracts. The next candidate's qualification must
-   open that checkpoint with the new binaries and spend a contract created
-   before the upgrade. Beta.1 market/AMM client fixtures are incompatible with the changed template
-   CMRs; see the runbook upgrade procedure.
+   total from its existing contracts. The earlier successor plan required a
+   live old-contract upgrade rehearsal. For the undeployed v0.13.0 candidate,
+   the fresh-deployment qualification above supersedes that migration-source
+   requirement; the retained-checkpoint test remains additional regression
+   coverage, not a supported cross-core upgrade. Beta.1 market/AMM client
+   fixtures are incompatible with the changed template CMRs; see the
+   [historical runbook procedure](RUNBOOK.md#historical-beta1-prototype-transition).
 
 6. [x] **Beta.1 release-candidate checks and packaging.** Release
    `v0.12.2-simplicity-beta.1` tags code candidate `ac5b7094c77` on official
@@ -147,7 +158,7 @@ evidence rather than committing every run.
   [resource benchmarks](../fedimint-simplicity-server/benches/resources/README.md)
   after the worker-pool, admission and cache changes, and record the results.
 - [ ] **Beta.2 qualification.** Repeat exact-candidate checks and packaging on
-  beta.2 artifacts. Open the retained beta.1 guardian checkpoint with the new
-  binaries and spend a contract created before the upgrade, as required in
-  item 5. Record the market/AMM incompatibility separately; beta.1 evidence
-  does not qualify beta.2.
+  beta.2 artifacts. Use the fresh matching-deployment baseline above, including
+  spending pre-restart contracts after persisted-state replay and mnemonic
+  recovery. Record old prototype exclusions separately; beta.1 evidence does
+  not qualify beta.2.

@@ -18,4 +18,12 @@ rust-simplicity upgrade that changes any entry is a breaking change for
 recovery. Change an existing entry only when no released wallet can hold
 outputs under it.
 
+The predeployment beta.1 market/AMM reset documented in the
+[runbook](../../RUNBOOK.md#historical-beta1-prototype-transition) is a scoped
+exception: those prototypes are disposable test state, not the compatibility
+baseline for the fresh v0.13.0 deployment. That exception does not authorize
+replacing a deployed template or silently abandoning its recovery support.
+Freeze these vectors with the first deployed candidate; subsequent compatible
+releases must retain its template versions.
+
 Tests must not regenerate this file from the implementation under test.
