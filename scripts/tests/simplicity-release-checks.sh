@@ -49,7 +49,7 @@ case "${1:-tests}" in
         for regression in sends_ecash_out_of_band \
             transaction_with_invalid_signature_is_rejected \
             reissuing_the_same_notes_twice_reports_already_reissued; do
-            python3 -B scripts/tests/simplicity_test_selection.py \
+            bash scripts/tests/simplicity-test-selection.sh \
                 --name "mint-${regression//_/-}" --require "$regression" -- \
                 rustup run "$simplicity_toolchain" cargo test --release --locked \
                 -p fedimint-mint-tests --test fedimint_mint_tests "$regression" -- \
@@ -68,7 +68,7 @@ case "${1:-tests}" in
         for scenario in "${simplicity_network_tests[@]}"; do
             required_network_tests+=(--require "tests::assets::network::$scenario")
         done
-        python3 -B scripts/tests/simplicity_test_selection.py \
+        bash scripts/tests/simplicity-test-selection.sh \
             --name network "${required_network_tests[@]}" -- \
             rustup run "$simplicity_toolchain" cargo test --release --locked \
             "${simplicity_test_packages[@]}" --lib --tests tests::assets::network:: -- \

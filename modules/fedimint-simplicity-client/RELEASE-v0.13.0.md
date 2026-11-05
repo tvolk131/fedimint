@@ -73,7 +73,7 @@ Run the reproducible focused checks in the development environment:
 
 ```sh
 just format
-python3 -B -m unittest discover -s scripts/tests -p test_simplicity_test_selection.py
+bash scripts/tests/test-simplicity-test-selection.sh
 bash scripts/tests/simplicity-release-checks.sh tests
 bash scripts/tests/simplicity-release-checks.sh docs
 bash scripts/tests/simplicity-release-checks.sh network
@@ -85,8 +85,11 @@ The release driver checks the required legacy-mint and network test names with
 the same Cargo package/feature selections used for execution. Missing, ambiguous
 or ignored required tests fail; successful execution must account for every
 selected runnable test. Unrelated zero-test harnesses are permitted. Selection
-inventories, ignored names, execution totals and failures are recorded in
-`evidence/test-selections/*.json`, alongside the existing manifests and logs.
+inventories, ignored names, execution totals and failures are recorded as plain
+text in `evidence/test-selections/<selection>/`, alongside the existing manifests
+and logs. Each selection's `result.txt` records its status and exit code; a new
+attempt invalidates an older success before discovery. The guard and its
+regression tests use Bash and standard Unix tools, with no new dependencies.
 These guards cover those filtered selections only, not every broad suite or
 doctest. Mint v2 snapshot-generation tests matching `db::snapshot_` remain
 intentionally filtered out; retained migration-snapshot validation still runs.

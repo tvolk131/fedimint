@@ -120,9 +120,6 @@ manifest = {
         "wasm": "Not qualified by this workflow",
         "raspberry_pi_5": "Not tested; aarch64 CI is not Pi5 qualification",
         "external_services": "Mint and mintv2 regression fixtures use fake Bitcoin; no live Bitcoin or Lightning qualification",
-        "test_selection_evidence": "test-selections/*.json records required runnable names and aggregate execution totals for the legacy-mint and network selections only",
-        "mintv2_snapshot_generation": "db::snapshot_ tests are filtered out; retained migration-snapshot validation still runs",
-        "other_tests": "Broad tests, examples and doctests retain their logs and ignored/filtered counts; they do not have required-name selection guards",
     },
 }
 

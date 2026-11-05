@@ -210,7 +210,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Test release-check selection guards
-        run: python3 -B -m unittest discover -s scripts/tests -p test_simplicity_test_selection.py
+        run: bash scripts/tests/test-simplicity-test-selection.sh
       - uses: dpc/nix-installer-action@c6e05d595d5ed6d6b7c46e42409ca2a126efe13d # dpc/jj-vqymqvyntouw
       - name: Run the release's standard lint checks
         run: nix develop .#lint --command env NO_STASH=true bash misc/git-hooks/pre-commit
