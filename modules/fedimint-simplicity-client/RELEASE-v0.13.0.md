@@ -8,7 +8,8 @@ release tag, not a merge of either development history. Of the original 38
 patches, 36 are replayed. The guardian status watch-borrow fix and database
 subscription-registration fix are already included upstream and are not replayed.
 
-This is a compatibility port, not a new beta qualification. Earlier checks in
+This compatibility port does not itself qualify the first beta on the v0.13.0
+core release line; there is no earlier beta on this line. Earlier checks in
 [the v0.12.2 release notes](RELEASE-v0.12.2.md) remain evidence for their named
 revisions only. Record a clean candidate revision, lockfile hash, and fresh test
 results before distributing a v0.13.0 artifact.
@@ -72,12 +73,28 @@ Run the reproducible focused checks in the development environment:
 
 ```sh
 just format
+bash scripts/tests/test-simplicity-test-selection.sh
 bash scripts/tests/simplicity-release-checks.sh tests
 bash scripts/tests/simplicity-release-checks.sh docs
 bash scripts/tests/simplicity-release-checks.sh network
 bash scripts/tests/simplicity-release-checks.sh guardian
 bash scripts/tests/simplicity-release-checks.sh clippy
 ```
+
+The release driver checks the required legacy-mint and network test names with
+the same Cargo package/feature selections used for execution. Missing, ambiguous
+or ignored required tests fail; successful execution must account for every
+selected runnable test. Unrelated zero-test harnesses are permitted. Selection
+inventories, ignored names, execution totals and failures are recorded as plain
+text in `evidence/test-selections/<selection>/`, alongside the existing manifests
+and logs. Each selection's `result.txt` records its status and exit code; a new
+attempt invalidates an older success before discovery. The guard and its
+regression tests use Bash and standard Unix tools, with no new dependencies.
+These guards cover those filtered selections only, not every broad suite or
+doctest. Mint v2 snapshot-generation tests matching `db::snapshot_` remain
+intentionally filtered out; retained migration-snapshot validation still runs.
+Retain evidence with the exact source manifest and workflow step outcomes;
+neither test discovery nor a manifest by itself establishes passing execution.
 
 The native consensus workflow also compares the implementation's observations
 on Linux x86-64 and ARM64, runs seeded mutations, and exercises the instrumented

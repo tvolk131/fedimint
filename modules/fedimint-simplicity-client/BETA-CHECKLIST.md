@@ -1,10 +1,11 @@
-# Simplicity: remaining beta work
+# Simplicity: first v0.13.0 beta checklist
 
-Checkpoint: beta.2 preparation, 2026-11-05. Beta.1 qualification does not
-qualify the current HEAD. The [v0.13.0 port](RELEASE-v0.13.0.md) records the
-current release baseline; [v0.12.2 checks](RELEASE-v0.12.2.md) and earlier evidence
-remain tied to their original revisions. These workstreams separate bounded
-code/artifact qualification from the deployment and pilot work still outstanding. The native market
+Checkpoint: first-beta preparation on v0.13.0, 2026-11-05. There is no previous
+beta on this core release line. The [v0.13.0 port](RELEASE-v0.13.0.md) records
+the current release baseline; [v0.12.2 checks](RELEASE-v0.12.2.md) and earlier
+evidence remain tied to their original revisions, not qualification of the
+current candidate. These workstreams separate bounded code/artifact
+qualification from the deployment and pilot work still outstanding. The native market
 application exercises the SDK, but does not replace module release checks. Use test
 funds throughout. The [runbook](RUNBOOK.md) covers deployment and recovery;
 the [module documentation](../fedimint-simplicity-common/README.md) describes
@@ -18,7 +19,59 @@ and a valid spend created before restart; preserve those fixtures as the first
 deployment baseline. Future deployed releases must preserve that baseline's
 historical templates and recovery support.
 
-The Mac/Pi regtest rehearsals have exercised real Bitcoin Core funding, market
+## Current candidate gates
+
+All boxes in this section start open. Check one only against the chosen
+v0.13.0 candidate, recording its owner, exact revision, environment and date,
+result, evidence references, exclusions and remaining failures. Reference the
+existing source/lockfile/compiler manifest, guardian feature manifests and
+binary checksums rather than maintaining a second set of artifact identities.
+Retain release evidence outside expiring CI artifacts and build caches; keep
+secrets, wallet state and guardian database material private.
+
+- [ ] **Freeze and identify the candidate.** Record a clean source revision,
+  the intended guardian and client packages, platforms and feature sets, and
+  the resulting artifact manifests and hashes. Qualify the actual intended
+  binaries, including a functional Simplicity-module smoke test; a core version
+  string alone does not establish module inclusion.
+- [ ] **Run exact-candidate automated checks.** Record CI links and evidence
+  for native x86-64/ARM64 consensus comparison, sanitizer/leak controls, lint,
+  focused behavior/network checks, docs and guardian builds. Required filtered
+  regressions must exist and execute. Record ignored/filtered coverage and do
+  not claim full-workspace, live-backend, Pi or WASM qualification from the
+  focused workflow.
+- [ ] **Qualify target resources and storage.** Repeat the
+  [resource benchmarks](../fedimint-simplicity-server/benches/resources/README.md)
+  on the intended guardian hardware, including cold-cache and mixed admission/
+  consensus traffic, ordinary-payment latency, memory and sustained disk growth.
+  Record storage, cooling, competing workloads and the observation window. The
+  [November 5 local follow-up](LOCAL-VALIDATION-2026-11-05.md) is Mac core-path
+  evidence, not Pi 5 or full admission/consensus qualification.
+- [ ] **Establish the fresh deployment baseline.** With matching candidate
+  guardians and clients, rehearse restart, checkpoint catch-up, interrupted
+  mnemonic recovery and spending contracts created before restart. Verify
+  expected signed transaction outcomes and contract records after replay, not
+  only session counters. Preserve configuration, checkpoints, descriptors,
+  pending operations and historical templates for future compatibility tests.
+  Disposable prototype migration and rolling mixed-version upgrades are not
+  release gates for this fresh deployment.
+- [ ] **Rehearse operator backup, restore and halt.** Assign operators and
+  validate the [backup/restore and halt procedures](RUNBOOK.md#backup-restoration-and-coordinated-halt)
+  on candidate artifacts. Record off-host backup verification, guardian identity
+  handling, authenticated-history retention, quorum/failure domains, restoration
+  results and who authorizes reopening. Do not mark this complete from written
+  instructions alone.
+- [ ] **Complete a small private signet pilot before broader beta.** Use
+  actual testnet deposits/withdrawals, test funds, monitored candidate guardians
+  and clients, and retained recovery history. Before starting, record operators,
+  backends, storage, host layout, observation window and stop criteria. Retain
+  timestamped monitoring and recovery/restoration evidence. Two guardians per
+  host do not provide four independent failure domains. A monitored regtest
+  rehearsal or a green CI run does not complete the pilot.
+
+## Historical observations, not current qualification
+
+The earlier Mac/Pi regtest rehearsals exercised real Bitcoin Core funding, market
 operations, mnemonic recovery, guardian outages and catch-up, and restoration
 from an older guardian checkpoint. These are useful bounded observations, not
 completion of the longer campaigns below. Both machines are ARM64, and two
@@ -133,13 +186,6 @@ they retain the outstanding platform, operational, or candidate-specific work.
    private evidence are retained outside build caches. Linux Nix and other
    deployment targets remain unqualified; desktop-app packaging is separate.
 
-7. [ ] **Small private signet pilot.** Before broader beta, operate the chosen
-   candidate with actual testnet deposits/withdrawals, monitoring, retained
-   recovery history, restoration, and coordinated upgrade procedures. This
-   needs operators, test coins, Bitcoin backends, deployment/storage choices,
-   and a pilot observation window. The two-host layout is useful for a private
-   rehearsal; independent guardian failure-domain claims need additional hosts.
-
 Separate upstream follow-up: the v0.12.2 rehearsal observed caught API-handler
 panics when concurrent guardian-metadata updates encountered database write
 conflicts. The unchanged upstream handler lacks an optimistic-transaction retry;
@@ -153,14 +199,3 @@ For each item, record the tested revision, environment, result, limitations, and
 remaining failures before marking it complete. Keep reproducible checks and
 necessary fixtures in the repository; retain bulky raw logs with the release
 evidence rather than committing every run.
-
-- [ ] **Resource benchmarks rerun on beta.2 artifacts.** Repeat the
-  [resource benchmarks](../fedimint-simplicity-server/benches/resources/README.md)
-  after the worker-pool, admission and cache changes, and record the results.
-  The [November 5 local follow-up](LOCAL-VALIDATION-2026-11-05.md) records a
-  current Mac core-path rerun, not Pi 5 or full admission/consensus qualification.
-- [ ] **Beta.2 qualification.** Repeat exact-candidate checks and packaging on
-  beta.2 artifacts. Use the fresh matching-deployment baseline above, including
-  spending pre-restart contracts after persisted-state replay and mnemonic
-  recovery. Record old prototype exclusions separately; beta.1 evidence does
-  not qualify beta.2.
