@@ -284,6 +284,7 @@ impl JetEnvironment for Environment {
                         .outputs
                         .get(read_index(src))
                         .and_then(|o| o.contract.as_ref())
+                        .filter(|output| output.actions().is_none())
                     else {
                         return false;
                     };
@@ -294,6 +295,7 @@ impl JetEnvironment for Environment {
                         .outputs
                         .get(read_index(src))
                         .and_then(|o| o.contract.as_ref())
+                        .filter(|output| output.actions().is_none())
                     else {
                         return false;
                     };
@@ -304,6 +306,7 @@ impl JetEnvironment for Environment {
                         .outputs
                         .get(read_index(src))
                         .and_then(|o| o.contract.as_ref())
+                        .filter(|output| output.actions().is_none())
                     else {
                         return false;
                     };

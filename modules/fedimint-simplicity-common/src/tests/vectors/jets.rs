@@ -248,15 +248,13 @@ fn indexed_jets_reject_missing_foreign_and_action_outputs_and_respect_version_ga
                 None,
                 "foreign {jet:?}"
             );
-            if jet as u8 >= 16 {
-                let mut action = index(3);
-                action.extend_from_slice(&source[32..]);
-                assert_eq!(
-                    run(jet, &action, expected.len(), &env),
-                    None,
-                    "action {jet:?}"
-                );
-            }
+            let mut action = index(3);
+            action.extend_from_slice(&source[32..]);
+            assert_eq!(
+                run(jet, &action, expected.len(), &env),
+                None,
+                "action {jet:?}"
+            );
         }
     }
     let env = environment();
@@ -268,6 +266,46 @@ fn indexed_jets_reject_missing_foreign_and_action_outputs_and_respect_version_ga
         run(OutputModule, &index(1), 16, &env),
         Some(bits(&0x1234u16.to_be_bytes()))
     );
+    assert_eq!(
+        run(OutputHash, &index(3), 256, &env),
+        Some(bits(&env.outputs[3].hash))
+    );
+    assert_eq!(
+        run(OutputModule, &index(3), 16, &env),
+        Some(bits(&env.outputs[3].module_id.to_be_bytes()))
+    );
+}
+
+#[test]
+fn contract_field_jets_preserve_zero_values_and_reject_actions_in_both_versions() {
+    use std::sync::Arc;
+
+    use ContextJet::*;
+    for version in [0, 1] {
+        let mut env = environment();
+        env.current.version = version;
+        let output = Arc::make_mut(&mut env.outputs)[0]
+            .contract
+            .as_mut()
+            .unwrap();
+        output.amount = Amount::ZERO;
+        output.state = [0; 32];
+        assert_eq!(
+            run(OutputAmount, &index(0), 64, &env),
+            Some(vec![false; 64])
+        );
+        assert_eq!(
+            run(OutputState, &index(0), 256, &env),
+            Some(vec![false; 256])
+        );
+        assert_eq!(
+            run(OutputCmr, &index(0), 256, &env),
+            Some(bits(&[0x11; 32]))
+        );
+        for (jet, width) in [(OutputAmount, 64), (OutputCmr, 256), (OutputState, 256)] {
+            assert_eq!(run(jet, &index(3), width, &env), None, "v{version} {jet:?}");
+        }
+    }
 }
 
 #[test]

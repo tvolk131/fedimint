@@ -189,7 +189,7 @@ transport parsing, and core history downloads are outside these module API bound
 | `fm_current_amount()`, `fm_current_cmr()`, `fm_current_state()` | Consumed contract data |
 | `fm_current_index()`, `fm_input_count()` | Index/count among this module instance's inputs |
 | `fm_output_count()` | Count of all outer transaction outputs |
-| `fm_output_amount(i)`, `fm_output_cmr(i)`, `fm_output_state(i)` | Contract fields at outer output index `i`; fail for foreign outputs |
+| `fm_output_amount(i)`, `fm_output_cmr(i)`, `fm_output_state(i)` | Contract fields at outer output index `i`; fail for foreign or action outputs |
 | `fm_output_module(i)`, `fm_output_hash(i)` | Module instance and canonical encoded hash for any outer output |
 
 The inner digest commits to the federation, module instance, execution version,
@@ -512,8 +512,10 @@ V1 adds these jets (input indices remain module-local, output indices outer):
 | `fm_input_authority_id((i, entry))`, `fm_output_authority_id((i, entry))` | Authority ID at sorted entry index |
 | `fm_issued_quantity(id)`, `fm_burned_quantity(id)` | Aggregate transaction quantity, zero if absent |
 
-Invalid contract/entry indices and foreign output inspection fail; asset output
-jets also reject action outputs. Foreign outputs remain opaque to programs.
+Invalid contract/entry indices and foreign output inspection fail. All contract-field
+output jets reject action outputs, which create no spendable contract. Genuine
+contract outputs may have zero bitcoin or state. Output counts, hashes, and module
+IDs still include action outputs. Foreign outputs remain opaque to programs.
 There are at most 32 distinct asset IDs per transition, 32 entries of either kind
 per bundle, and 32 created assets per transaction. V1 output fees add one msat per
 encoded extension byte and 100 msat per newly registered asset to contribute toward permanent

@@ -1,4 +1,6 @@
 //! Fixed values from tests/vectors/reference.py; no runtime regeneration.
+#[cfg(feature = "compiler")]
+mod contract_outputs;
 mod execution;
 mod jets;
 mod mutation;
