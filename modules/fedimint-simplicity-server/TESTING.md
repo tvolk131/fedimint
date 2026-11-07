@@ -151,23 +151,3 @@ resources or operational deployment. Keep the
 [beta checklist](../fedimint-simplicity-client/BETA-CHECKLIST.md) open until its
 separate gates are met; [historical passes](../fedimint-simplicity-client/EVIDENCE.md)
 are scoped to their recorded revisions, not this checkout.
-
-### Optional retained-checkpoint regression
-
-This additional regression copies a private immutable guardian checkpoint into
-a temporary database before opening it. Use the module ID from that checkpoint's
-consensus configuration, replacing the example `2` rather than guessing:
-
-```sh
-FM_SIMPLICITY_CHECKPOINT=/path/to/immutable/db_checkpoints/SESSION \
-FM_SIMPLICITY_INSTANCE_ID=2 \
-cargo +1.93.0 test --release --locked -p fedimint-simplicity-server --lib \
-  tests::audit::retained_checkpoint_migrates_without_changing_contracts -- \
-  --ignored --exact
-```
-
-It checks nonempty contract preservation, migrated liability total, module audit,
-restart and migration idempotence without opening or writing the original
-checkpoint. It is not full guardian startup, consensus replay, live-peer
-interoperability or mnemonic/template-recovery qualification, and does not create
-a supported prototype-to-current deployment path. Keep checkpoint contents private.

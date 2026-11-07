@@ -1,10 +1,21 @@
 use fedimint_core::PeerId;
 use fedimint_core::config::TypedServerModuleConfig;
+use fedimint_core::db::{DatabaseVersion, get_current_database_version};
 use fedimint_core::module::ModuleConsensusVersion;
 use fedimint_server_core::ServerModuleInit;
 use fedimint_simplicity_common::MODULE_CONSENSUS_VERSION;
 
 use crate::{SimplicityInit, config, load_config};
+
+#[test]
+fn fresh_database_baseline_has_no_prototype_migrations() {
+    let migrations = SimplicityInit.get_database_migrations();
+    assert!(migrations.is_empty());
+    assert_eq!(
+        get_current_database_version(&migrations),
+        DatabaseVersion(0)
+    );
+}
 
 #[test]
 fn supported_configuration_loads_and_exports_client_config() {

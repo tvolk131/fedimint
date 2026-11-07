@@ -240,10 +240,11 @@ the qualified source revision and artifact hashes to identify this baseline.
 Do not open old prototype databases with these binaries.
 
 Earlier prototype transitions are [historical evidence](EVIDENCE.md#beta-and-release-history),
-not deployment procedures. Retained-checkpoint migration tests are bounded
-regressions, not a cross-core upgrade or template-recovery guarantee. After the
-first deployment, compatible releases must retain historical template definitions
-and recovery support; predeployment resets do not authorize discarding them.
+not deployment procedures. Fresh guardian module databases use schema version `0`
+with no prototype migrations; recreate disposable pre-release databases instead
+of reusing them. After the first deployment, compatible releases must retain
+historical template definitions and recovery support; predeployment resets do
+not authorize discarding them.
 
 ### Module upgrade votes
 

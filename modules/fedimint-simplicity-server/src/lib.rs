@@ -18,7 +18,7 @@ use fedimint_core::config::{
     TypedServerModuleConsensusConfig,
 };
 use fedimint_core::core::ModuleInstanceId;
-use fedimint_core::db::{DatabaseTransaction, DatabaseVersion, IDatabaseTransactionOpsCoreTyped};
+use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::{
     Amounts, ApiEndpoint, ApiVersion, CoreConsensusVersion, InputMeta, ModuleConsensusVersion,
@@ -27,7 +27,6 @@ use fedimint_core::module::{
 use fedimint_core::{InPoint, NumPeersExt, OutPoint, PeerId};
 use fedimint_server_core::bitcoin_rpc::ServerBitcoinRpcMonitor;
 use fedimint_server_core::config::PeerHandleOps;
-use fedimint_server_core::migration::ServerModuleDbMigrationFn;
 use fedimint_server_core::{
     ConfigGenModuleArgs, ModuleTransactionContext, ModuleTransactionValidation, ServerModule,
     ServerModuleInit, ServerModuleInitArgs,
@@ -139,17 +138,6 @@ impl ServerModuleInit for SimplicityInit {
             "guardian missing from configured peers"
         );
         Ok(())
-    }
-    fn get_database_migrations(
-        &self,
-    ) -> BTreeMap<DatabaseVersion, ServerModuleDbMigrationFn<Simplicity>> {
-        let mut migrations: BTreeMap<DatabaseVersion, ServerModuleDbMigrationFn<Simplicity>> =
-            BTreeMap::new();
-        migrations.insert(
-            DatabaseVersion(0),
-            Box::new(|ctx| Box::pin(db::migrate_to_v1(ctx))),
-        );
-        migrations
     }
 }
 
