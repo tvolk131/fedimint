@@ -109,3 +109,45 @@ cargo test --release --locked -p fedimint-simplicity-server --lib -- \
 This note describes the harness as it stands. Where scenario code or the owning
 crate moves, update the "Where it lives now" column, the scenario table and the
 release script together.
+
+## Release qualification
+
+Use the development environment and the exact clean candidate source. Run all
+focused phases, not only the module unit tests:
+
+```sh
+just format
+bash scripts/tests/test-simplicity-test-selection.sh
+bash scripts/tests/simplicity-release-checks.sh tests
+bash scripts/tests/simplicity-release-checks.sh docs
+bash scripts/tests/simplicity-release-checks.sh network
+bash scripts/tests/simplicity-release-checks.sh guardian
+bash scripts/tests/simplicity-release-checks.sh clippy
+nix develop .#lint --command env NO_STASH=true bash misc/git-hooks/pre-commit
+```
+
+The driver checks required legacy-mint and network test names with the same
+package/feature selections used for execution. Missing, ambiguous or ignored
+required tests fail; successful execution must account for every selected runnable
+test. Unrelated zero-test harnesses are permitted. Selection inventories, ignored
+names, execution totals and failures live in `evidence/test-selections/<selection>/`;
+`result.txt` records status and exit code, and a new attempt invalidates an older
+success before discovery. These guards cover the filtered selections, not every
+broad suite or doctest. Mint v2 snapshot-generation tests matching `db::snapshot_`
+are intentionally filtered out; retained migration-snapshot validation still runs.
+
+Preserve manifests, logs and workflow step outcomes together. Neither discovery
+nor a manifest establishes passing execution. Guardian builds require clean
+source and preserve ordinary and enabled artifacts separately with their source,
+lockfile, compiler, feature and checksum identities. A version probe alone does
+not establish a functional module deployment.
+
+`.github/workflows/simplicity-consensus.yml` also compares native Linux x86-64
+and ARM64 implementation observations, runs seeded mutations, and exercises
+instrumented Rust/C sanitizer and leak checks with positive controls. Local Mac
+results do not replace these candidate-specific jobs. The focused checks do not
+qualify the complete workspace, WASM, live Bitcoin/Lightning backends, target Pi
+resources or operational deployment. Keep the
+[beta checklist](../fedimint-simplicity-client/BETA-CHECKLIST.md) open until its
+separate gates are met; [historical passes](../fedimint-simplicity-client/EVIDENCE.md)
+are scoped to their recorded revisions, not this checkout.

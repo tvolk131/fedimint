@@ -4,12 +4,12 @@ use std::sync::{Arc, Mutex};
 
 use fedimint_api_client::api::global_api::with_cache::GlobalFederationApiWithCache;
 use fedimint_api_client::api::{DynModuleApi, IModuleFederationApi};
+use fedimint_connectors::ServerResult;
 use fedimint_connectors::error::ServerError;
-use fedimint_connectors::{DynGuaridianConnection, PeerStatus, ServerResult};
-use futures::stream::BoxStream;
 use serde_json::{Value, json};
 
 use super::*;
+use crate::test_support::impl_mock_federation_api;
 
 #[derive(Debug)]
 struct State {
@@ -25,13 +25,11 @@ struct Transport {
 }
 impl IModuleFederationApi for Transport {}
 
-#[async_trait::async_trait]
-impl IRawFederationApi for Transport {
+impl_mock_federation_api! {
+    Transport;
+
     fn all_peers(&self) -> &BTreeSet<PeerId> {
         &self.state.peers
-    }
-    fn self_peer(&self) -> Option<PeerId> {
-        None
     }
     fn with_module(&self, module: u16) -> DynModuleApi {
         Self {
@@ -89,13 +87,6 @@ impl IRawFederationApi for Transport {
             STATUS_ENDPOINT => json!({ "server": "consensus_running", "federation": null }),
             _ => unreachable!(),
         })
-    }
-    fn connection_status_stream(&self) -> BoxStream<'static, BTreeMap<PeerId, PeerStatus>> {
-        Box::pin(stream::empty())
-    }
-    async fn wait_for_initialized_connections(&self) {}
-    async fn get_peer_connection(&self, _: PeerId) -> ServerResult<DynGuaridianConnection> {
-        panic!("unexpected connection")
     }
 }
 

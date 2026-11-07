@@ -1,14 +1,15 @@
 # Simplicity testnet beta: guardian and native SDK walkthrough
 
-This is an unaudited, opt-in module. Use a new federation on a Bitcoin test
-network. These instructions prepare a native SDK deployment. Consult the
-[port notes](RELEASE-v0.13.0.md) for the current baseline and qualification limits;
-a sustained pilot remains separate. The [execution baseline](../fedimint-simplicity-common/README.md#beta-execution-baseline)
+This is an unaudited, opt-in module on Fedimint v0.13.0. Use a new federation
+on a Bitcoin test network. These instructions prepare a native SDK deployment,
+not a migration from disposable prototypes. The execution-version-1 candidate
+has not been publicly released for real-money use. The
+[execution baseline](../fedimint-simplicity-common/README.md#beta-execution-baseline)
 defines the versions and rules all guardians must preserve.
 
-Track remaining release work and the scope of completed rehearsals in the
-[beta checklist](BETA-CHECKLIST.md). The [v0.13.0 port notes](RELEASE-v0.13.0.md)
-identify this branch's official baseline and compatibility boundaries.
+Track current qualification gates in the [beta checklist](BETA-CHECKLIST.md).
+The [evidence index](EVIDENCE.md) preserves port provenance and earlier rehearsals
+at their exact documented revisions; none qualifies the current candidate.
 
 The default core wallet registers only the single-key owner template and no
 application intent handlers. Market/exchange/top-up implementations are separate
@@ -38,12 +39,13 @@ nix develop -c cargo build --locked --release -p fedimintd --features experiment
 ```
 
 For Raspberry Pi OS on a Pi 5, check `getconf PAGESIZE` before building. The
-qualification machine uses 16 KiB OS pages. The Linux ARM64 Cargo build below
+historical qualification machine used 16 KiB OS pages. The Linux ARM64 Cargo build below
 uses jemalloc's logarithmic page-size setting `16` (64 KiB), which supports
-that machine; it does **not** mean 16 KiB. Build in an ARM64 Linux environment
+that page size; it does **not** mean 16 KiB. Build in an ARM64 Linux environment
 with Rust 1.93.0, Clang/libclang, CMake, pkg-config, protoc, and SQLite development
-libraries. The tested environment was Debian 12 in an ARM64 container, with
-native execution on Raspberry Pi OS. This was not a Linux Nix-package test.
+libraries. The [historical packaged rehearsal](EVIDENCE.md#beta-and-release-history)
+used Debian 12 in an ARM64 container, with native execution on Raspberry Pi OS.
+That was not a Linux Nix-package test or qualification of this candidate.
 
 ```sh
 CARGO_BUILD_JOBS=1 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_DEBUG=0 \
@@ -54,10 +56,9 @@ cargo build --locked --release -p fedimintd -p fedimint-cli \
     --bins --example wallet
 ```
 
-The October 8 Pi qualification uses the release-profile overrides above to fit
-the build host's memory: cross-crate LTO and debug information are disabled for
-that Cargo build. Record these settings with the artifact; the Mac Nix package
-uses its normal profile.
+The recipe disables cross-crate LTO and debug information to reduce build-memory
+requirements. Record these settings with the artifact and qualify it on the
+destination; the Nix package uses its normal profile.
 
 Avoid `target-cpu=native` when the build host differs from the destination.
 Preserve the exact source revision when building from an archive; Fedimint's
@@ -68,17 +69,10 @@ with `ldd`, and run `--help` and the daemon's `version-hash` on the destination
 before creating the federation. These Cargo executables depend on their target
 system libraries; they are not a portable Nix closure.
 
-Before distributing a candidate, run the focused checks for this patch set and
-repository lint; keep logs tied to the exact revision and platform. The hosted
-workflow runs these alongside native architecture comparison and sanitizers:
-
-```sh
-scripts/tests/simplicity-release-checks.sh tests
-scripts/tests/simplicity-release-checks.sh network
-scripts/tests/simplicity-release-checks.sh clippy
-scripts/tests/simplicity-release-checks.sh guardian
-nix develop .#lint --command env NO_STASH=true bash misc/git-hooks/pre-commit
-```
+Before distributing a candidate, run the [focused release checks and repository
+lint](../fedimint-simplicity-server/TESTING.md#release-qualification), keeping logs
+tied to the exact revision and platform. Native architecture comparison and
+sanitizers remain separate candidate-specific workflow gates.
 
 The guardian network tests bind local ports. These tests include simulated
 Bitcoin funding; a real Bitcoin RPC deployment exercise remains a separate
@@ -115,8 +109,8 @@ history. Asset origins and namespace-use records are also permanent.
 [examples/wallet.rs](examples/wallet.rs) uses the real native client, RocksDB,
 normal invite/config acquisition, Mint v2, and the persistent Simplicity API.
 It supports join, recovery, status/history, receiving ecash, owner-contract
-funding, and release back to ecash. Application-specific market policies remain
-in the SDK; this example is not a trading application.
+funding, and release back to ecash. Application-specific market policies live
+with their separate reference consumers; this example is not a trading application.
 
 Build from the same source in the development shell:
 
@@ -171,7 +165,7 @@ simplicity_wallet status
 Replacement Mint v2 notes are processed by the ordinary client state machines;
 reopening the same database resumes them. If a command is interrupted, use
 `simplicity_wallet wait OPERATION_ID` with the recorded operation ID, or inspect
-status after reopening. Do not repeat a purchase merely because a response was
+status after reopening. Do not repeat an operation merely because a response was
 lost. Inspect a recorded operation without waiting for a federation-history sync:
 
 ```bash
@@ -245,37 +239,12 @@ a different consensus-item wire format. The pre-release number was reused; use
 the qualified source revision and artifact hashes to identify this baseline.
 Do not open old prototype databases with these binaries.
 
-<a id="upgrading-from-beta1"></a>
-
-### Historical beta.1 prototype transition
-
-The following records the earlier prototype's coordinated migration procedure,
-not a required migration source or qualified upgrade path for the fresh v0.13.0
-candidate. Retained-checkpoint migration tests remain useful regression fixtures;
-they do not establish cross-core interoperability or client compatibility.
-
-Beta.1 markets are throwaway test state. The `binary-market/v1` template
-changed in place: issue and recombine close at `RESOLUTION_START`. Its CMR and
-the constant-product template CMR changed, because the latter embeds the market
-CMR. Tell users before upgrading: the new wallet does not recognize beta.1
-market vaults or AMM pools, and recovery silently skips descriptors whose CMR
-does not match. Resolve or redeem those positions using beta.1 software before
-the upgrade, or treat them as abandoned test state. Mnemonic recovery with the
-new client does not restore compatibility.
-
-1. Stop all guardians. Back up each guardian's complete data directory while
-   stopped, before the first start of the new binary. Retain configuration,
-   secrets and history securely with the exact old binary identity.
-2. Replace the binaries on all guardians with the same reviewed revision, then
-   start them. The module database migration from version 0 to 1 automatically
-   recomputes the live contract total from existing contracts. It is one-way;
-   it does not wait for a module upgrade vote.
-3. Verify consensus progress and expected contract records. Retain the backups.
-   To roll back to beta.1, stop the guardians, restore each pre-upgrade backup,
-   and run the old binary. The old binary refuses the migrated database with
-   `On disk database version ... was higher than the code database version ...`.
-   Coordinate restoration across the federation; restoring a checkpoint loses
-   subsequent state and must not be presented as preserving later transactions.
+Earlier prototype transitions are [historical evidence](EVIDENCE.md#beta-and-release-history),
+not deployment procedures. Fresh guardian module databases use schema version `0`
+with no prototype migrations; recreate disposable pre-release databases instead
+of reusing them. After the first deployment, compatible releases must retain
+historical template definitions and recovery support; predeployment resets do
+not authorize discarding them.
 
 ### Module upgrade votes
 

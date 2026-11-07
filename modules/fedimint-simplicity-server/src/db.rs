@@ -1,14 +1,10 @@
-use fedimint_core::db::{DatabaseTransaction, DbMigrationError, IDatabaseTransactionOpsCoreTyped};
+use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::ModuleConsensusVersion;
 use fedimint_core::{Amount, OutPoint, PeerId, impl_db_lookup, impl_db_record};
-use fedimint_server_core::migration::ServerModuleDbMigrationFnContext;
 use fedimint_simplicity_common::ContractError;
 pub use fedimint_simplicity_common::StoredContract;
-use futures::StreamExt;
 use serde::Serialize;
-
-use crate::Simplicity;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Encodable, Decodable)]
 pub struct ContractKey(pub OutPoint);
@@ -99,23 +95,4 @@ pub async fn remove_contract(
         .expect("the live contract total includes every live contract");
     dbtx.insert_entry(&LiveContractTotalKey, &total).await;
     Some(contract)
-}
-
-/// Seed [`LiveContractTotalKey`] from contracts stored before it existed,
-/// such as those of a beta.1 guardian. Fresh databases start at the current
-/// version and skip this.
-pub(crate) async fn migrate_to_v1(
-    mut ctx: ServerModuleDbMigrationFnContext<'_, Simplicity>,
-) -> Result<(), DbMigrationError> {
-    let mut dbtx = ctx.dbtx();
-    let total = dbtx
-        .find_by_prefix(&ContractPrefix)
-        .await
-        .fold(Some(Amount::ZERO), |total, (_, contract)| async move {
-            total?.checked_add(contract.output.amount)
-        })
-        .await
-        .ok_or_else(|| DbMigrationError::other("live contract total overflows u64 msats"))?;
-    dbtx.insert_entry(&LiveContractTotalKey, &total).await;
-    Ok(())
 }

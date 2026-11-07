@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use tokio::sync::Semaphore;
 
 use super::*;
+use crate::test_support::impl_mock_federation_api;
 
 #[derive(Debug)]
 struct RangeApi {
@@ -51,13 +52,11 @@ impl RangeApi {
 #[derive(Debug)]
 struct RangeTransport(Arc<RangeApi>);
 
-#[async_trait::async_trait]
-impl IRawFederationApi for RangeTransport {
+impl_mock_federation_api! {
+    RangeTransport;
+
     fn all_peers(&self) -> &BTreeSet<PeerId> {
         &self.0.peers
-    }
-    fn self_peer(&self) -> Option<PeerId> {
-        None
     }
     fn with_module(&self, _: u16) -> DynModuleApi {
         panic!("unexpected module query")
@@ -99,13 +98,6 @@ impl IRawFederationApi for RangeTransport {
             )))
             .unwrap(),
         )
-    }
-    fn connection_status_stream(&self) -> BoxStream<'static, BTreeMap<PeerId, PeerStatus>> {
-        Box::pin(futures::stream::empty())
-    }
-    async fn wait_for_initialized_connections(&self) {}
-    async fn get_peer_connection(&self, _: PeerId) -> ServerResult<DynGuaridianConnection> {
-        panic!("unexpected connection")
     }
 }
 
