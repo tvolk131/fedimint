@@ -106,17 +106,12 @@ impl SimplicityClientModule {
                 _ = self.store.db.wait_key_check(&key, |value| {
                     (value.as_ref() != Some(&record)).then_some(())
                 }) => {},
-                result = self.wait_for_intent(wait) => {
-                    if let Err(error) = result {
-                        tracing::warn!(target: LOG_CLIENT_SIMPLICITY, ?id, error = %error.fmt_compact(), "Retrying funding release wait");
-                        fedimint_core::runtime::sleep(Duration::from_secs(1)).await;
-                    }
-                }
+                _ = self.wait_for_intent(id, wait) => {},
             }
         }
     }
 
-    async fn wait_for_intent(&self, wait: IntentWait) -> anyhow::Result<()> {
+    async fn wait_for_intent(&self, id: OperationId, wait: IntentWait) {
         match wait {
             IntentWait::Changed => {}
             IntentWait::Outcome(operation) => {
@@ -128,9 +123,14 @@ impl SimplicityClientModule {
                     .await;
             }
             IntentWait::Funding(operation, txid) => {
-                self.context
+                if let Err(error) = self
+                    .context
                     .await_funding_release_progress(operation, txid)
-                    .await?;
+                    .await
+                {
+                    tracing::warn!(target: LOG_CLIENT_SIMPLICITY, ?id, error = %error.fmt_compact(), "Retrying funding release wait");
+                    fedimint_core::runtime::sleep(Duration::from_secs(1)).await;
+                }
             }
             IntentWait::Backoff(until_ms) => {
                 fedimint_core::runtime::sleep(Duration::from_millis(
@@ -140,7 +140,6 @@ impl SimplicityClientModule {
             }
             IntentWait::Retry => fedimint_core::runtime::sleep(Duration::from_secs(1)).await,
         }
-        Ok(())
     }
 }
 

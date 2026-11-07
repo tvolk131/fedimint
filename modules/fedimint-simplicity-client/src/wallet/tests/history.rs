@@ -6,10 +6,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use fedimint_api_client::api::global_api::with_cache::GlobalFederationApiWithCache;
 use fedimint_api_client::api::{
-    DynGlobalApi, DynModuleApi, IRawFederationApi, VERSION_THAT_INTRODUCED_GET_SESSION_STATUS_V2,
+    DynGlobalApi, DynModuleApi, VERSION_THAT_INTRODUCED_GET_SESSION_STATUS_V2,
 };
+use fedimint_connectors::ServerResult;
 use fedimint_connectors::error::ServerError;
-use fedimint_connectors::{DynGuaridianConnection, PeerStatus, ServerResult};
 use fedimint_core::core::DynUnknown;
 use fedimint_core::endpoint_constants::SESSION_STATUS_V2_ENDPOINT;
 use fedimint_core::module::{
@@ -17,9 +17,9 @@ use fedimint_core::module::{
 };
 use fedimint_core::secp256k1::{Keypair, Message, PublicKey, SECP256K1, SecretKey};
 use fedimint_core::session_outcome::{SessionStatusV2, SignedSessionOutcome};
-use futures::stream::BoxStream;
 
 use super::*;
+use crate::test_support::impl_mock_federation_api;
 
 mod range;
 mod upgrades;
@@ -98,13 +98,11 @@ impl Api {
 }
 #[derive(Debug)]
 struct Transport(Arc<Api>);
-#[async_trait::async_trait]
-impl IRawFederationApi for Transport {
+impl_mock_federation_api! {
+    Transport;
+
     fn all_peers(&self) -> &BTreeSet<PeerId> {
         &self.0.peers
-    }
-    fn self_peer(&self) -> Option<PeerId> {
-        None
     }
     fn with_module(&self, _: u16) -> DynModuleApi {
         panic!("unexpected module query")
@@ -169,13 +167,6 @@ impl IRawFederationApi for Transport {
             }
             _ => panic!("unexpected endpoint {method}"),
         }
-    }
-    fn connection_status_stream(&self) -> BoxStream<'static, BTreeMap<PeerId, PeerStatus>> {
-        Box::pin(futures::stream::empty())
-    }
-    async fn wait_for_initialized_connections(&self) {}
-    async fn get_peer_connection(&self, _: PeerId) -> ServerResult<DynGuaridianConnection> {
-        panic!("unexpected connection")
     }
 }
 async fn fixture(fault: Fault) -> (WalletStore, Arc<Api>, Vec<Transaction>) {

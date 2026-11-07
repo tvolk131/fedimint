@@ -9,6 +9,11 @@ The agreed wallet recovery contract is recorded in
 [REQ-simplicity-recovery](../../specs/REQ-simplicity-recovery.md). The persistent
 Rust client implements it for versioned wallet templates.
 
+For deployment and recovery, use the [native SDK runbook](../fedimint-simplicity-client/RUNBOOK.md).
+The [beta checklist](../fedimint-simplicity-client/BETA-CHECKLIST.md) tracks current
+qualification gates; the [evidence index](../fedimint-simplicity-client/EVIDENCE.md)
+separates revision-bound historical results from current operating guidance.
+
 ## Run the prototype
 
 From the repository root, inside `nix develop`:

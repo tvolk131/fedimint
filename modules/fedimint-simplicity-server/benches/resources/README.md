@@ -10,6 +10,10 @@ RAM, storage, cooling, clock settings and thermal throttling alongside each Pi
 run. Results from faster machines establish comparisons, not Pi latency or safe
 production limits.
 
+See the [evidence index](../../../fedimint-simplicity-client/EVIDENCE.md#resource-measurements)
+for revision-pinned results and raw archives. Historical timings, counts and
+fee comparisons do not qualify this checkout's execution path or corpus.
+
 ## Running
 
 From the repository root, in the normal development environment:
@@ -181,7 +185,8 @@ Timings also include wallet opening, but exclude generator setup, guardian API
 setup, oracle comparisons and post-recovery spend checks. Checkpoint bytes are
 flushed snapshots, not compacted steady-state or lifetime storage bounds. Use the
 normal allocator and run cells sequentially without competing builds. Keep raw
-JSON outside the branch; preserve compact comparisons in `RESULTS.md`.
+JSON outside the branch; add a revision-bound record to the
+[evidence index](../../../fedimint-simplicity-client/EVIDENCE.md#resource-measurements).
 
 ## What each stage measures
 
@@ -336,10 +341,10 @@ recovery coverage above uses separate workloads and a controlled transport.
 Those remain relevant before production calibration, alongside measurements on
 guardian-class Linux hardware and concurrent invalid-submission load.
 
-[Results and optimization history](RESULTS.md) consolidate the measured baseline,
-context sharing, aggregate caps, adversarial exploration and validation ordering.
 Keep the harness, fixtures and methodology as regression tools. Retain key
-comparisons and archive their evidence; routine raw runs need not all be committed.
+comparisons with exact source and workload identities in the
+[evidence index](../../../fedimint-simplicity-client/EVIDENCE.md#resource-measurements);
+routine raw runs need not all be committed.
 The scale probe walks recovered records in pages of 256 before exercising the
 full-list helpers. It compares counts and ordered encoding digests between both
 paths, then checks the independent oracle. Pagination and full enumeration RSS
@@ -348,13 +353,5 @@ are successive process high-water marks, not isolated allocation measurements.
 Fee coefficients or limit changes should be reviewed separately after examining
 the measurements.
 
-The original raw data and reports are preserved by the published tag
-`codex/simplicity-benchmarks-2026-10-03` at
-`39102ef2040d3c4dd6b0027132a5ddb4ba46c553`.
-[Browse the archived data](https://github.com/tvolk131/fedimint/tree/39102ef2040d3c4dd6b0027132a5ddb4ba46c553/modules/fedimint-simplicity-server/benches/resources/2026-10-02-m4-pro).
-Keep this tag when squashing or rebasing the feature branch. To retrieve it:
-
-```sh
-git fetch origin tag codex/simplicity-benchmarks-2026-10-03
-git show codex/simplicity-benchmarks-2026-10-03:modules/fedimint-simplicity-server/benches/resources/2026-10-02-m4-pro/metadata.json
-```
+Archive identities and retrieval commands live in the evidence index rather
+than alongside the current harness commands.
