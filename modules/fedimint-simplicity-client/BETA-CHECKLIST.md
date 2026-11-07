@@ -5,8 +5,9 @@ beta on this core release line. The [v0.13.0 port](RELEASE-v0.13.0.md) records
 the current release baseline; [v0.12.2 checks](RELEASE-v0.12.2.md) and earlier
 evidence remain tied to their original revisions, not qualification of the
 current candidate. These workstreams separate bounded code/artifact
-qualification from the deployment and pilot work still outstanding. The native market
-application exercises the SDK, but does not replace module release checks. Use test
+qualification from the deployment and pilot work still outstanding. The separate
+`tvolk131/fedimint-simplicity` reference consumer exercises the public SDK; it is not
+an officially supported application kit or a substitute for module release checks. Use test
 funds throughout. The [runbook](RUNBOOK.md) covers deployment and recovery;
 the [module documentation](../fedimint-simplicity-common/README.md) describes
 the current protocol and limits.
@@ -18,6 +19,16 @@ must exercise candidate-state restart, checkpoint catch-up, mnemonic recovery
 and a valid spend created before restart; preserve those fixtures as the first
 deployment baseline. Future deployed releases must preserve that baseline's
 historical templates and recovery support.
+
+### External consumer qualification
+
+- [ ] Record an exact clean core/application revision pair and locked dependencies.
+- [ ] Run public-API create, spend, conflict, database-loss recovery, and post-recovery
+  spend scenarios for explicitly registered application templates and handlers.
+- [ ] Preserve historical application descriptor meaning and template vectors.
+
+Local path-overridden builds are development checks, not evidence for a published
+revision pair. Core release checks do not promise official application support.
 
 ## Current candidate gates
 

@@ -27,13 +27,13 @@ simplicity_doc_packages=(
     -p fedimint-server -p fedimint-server-core
 )
 simplicity_network_tests=(
-    four_guardians_submit_settle_and_recover_a_market_from_disk
+    four_guardians_submit_settle_and_recover_assets_from_disk
     sessions::creation_sessions_and_expired_policy_replay_match_authenticated_history
     status::operator_status_observes_four_guardians_and_a_missing_peer
     wallet::direct_sender_receipts_restore_history_without_owning_recipient_contracts
-    wallet::intents::shared_market_intents_survive_races_restarts_limits_and_resolution
     wallet::mnemonic_only_client_recovery_preserves_assets_history_and_spendability
-    wallet::receipts::watched_market_submission_survives_mnemonic_only_recovery
+    wallet::pruning::funding_sensitive_pruning_and_stale_plans_roll_back_real_ecash
+    wallet::receipts::watched_shared_contract_submission_survives_mnemonic_only_recovery
 )
 
 case "${1:-tests}" in

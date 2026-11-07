@@ -129,7 +129,7 @@ async fn run() {
 
     // Native covenant top-up needs external primary-module funding, and release
     // pays into primary-module change. Both signatures must cover final change.
-    let descriptor = ContractDescriptor::top_up([5; 32], 0, 0);
+    let descriptor = pruning::top_up_descriptor([5; 32], 0, 0);
     let top_up = wallet
         .output(
             &descriptor,
@@ -496,6 +496,6 @@ async fn direct_sender_receipts_restore_history_without_owning_recipient_contrac
     .unwrap();
 }
 
-mod intents;
+mod ecash;
 mod pruning;
 mod receipts;

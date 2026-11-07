@@ -1,7 +1,8 @@
 //! A real four-guardian federation: TLS P2P, WebSocket API, Aleph consensus,
 //! module initialization and RocksDB. Bitcoin RPC and funding are simulated;
 //! exact ecash funding is covered by the separate transaction tests. Keep this
-//! separate from fast contract-policy tests.
+//! separate from fast contract-policy tests. Application workflows are tested
+//! live in the application repository, against this module's public API.
 mod sessions;
 mod status;
 
@@ -28,7 +29,7 @@ use fedimint_server::net::p2p::{ReconnectP2PConnections, p2p_status_channels};
 use fedimint_server::net::p2p_connector::{IP2PConnector, TlsTcpConnector};
 use fedimint_server::{ConnectionLimits, consensus};
 use fedimint_server_core::bitcoin_rpc::IServerBitcoinRpc;
-use fedimint_simplicity_common::assets::AssetRecord;
+use fedimint_simplicity_common::assets::{AssetRecord, asset_id};
 use fedimint_testing_core::config::local_config_gen_params;
 use tempfile::TempDir;
 
@@ -40,6 +41,12 @@ mod wallet;
 /// Bitcoin height every guardian reports until a test advances it.
 const INITIAL_BLOCK_COUNT: u64 = 5;
 const BLOCK_COUNT_FILE: &str = "block_count";
+
+/// Each guardian is this test executable re-run on [`guardian_process_entry`],
+/// so the name is shared by every scenario and checked by
+/// `guardian_entry_is_a_registered_ignored_test`.
+const GUARDIAN_ENTRY: &str = "tests::assets::network::guardian_process_entry";
+const GUARDIAN_CONFIG_ENV: &str = "FM_SIMPLICITY_TEST_GUARDIAN_CONFIG";
 
 /// Guardians run as separate processes, so a test advances their simulated
 /// Bitcoin height through a file in the federation directory.
@@ -169,12 +176,8 @@ impl Federation {
             .open(path.join("guardian.log"))
             .unwrap();
         let child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tests::assets::network::four_guardians_submit_settle_and_recover_a_market_from_disk",
-                "--nocapture",
-            ])
-            .env("FM_SIMPLICITY_TEST_GUARDIAN_CONFIG", config_path)
+            .args(["--ignored", "--exact", GUARDIAN_ENTRY, "--nocapture"])
+            .env(GUARDIAN_CONFIG_ENV, config_path)
             .env("FM_SIMPLICITY_TEST_BASE_PORT", self.port.to_string())
             .env("FM_IN_DEVIMINT", "1")
             .stdout(Stdio::from(log.try_clone().unwrap()))
@@ -269,19 +272,23 @@ impl Federation {
             .await
             .unwrap()
     }
-    async fn wait_contract(&self, point: OutPoint) -> StoredContract {
+    /// Wait until every running guardian has accepted the transaction.
+    async fn wait_accepted(&self, txid: fedimint_core::TransactionId) {
         for peer in self.guardians.keys() {
             let accepted: fedimint_core::TransactionId = self
                 .api
                 .request_single_peer(
                     fedimint_core::endpoint_constants::AWAIT_TRANSACTION_ENDPOINT.to_owned(),
-                    ApiRequestErased::new(point.txid),
+                    ApiRequestErased::new(txid),
                     *peer,
                 )
                 .await
                 .unwrap();
-            assert_eq!(accepted, point.txid);
+            assert_eq!(accepted, txid);
         }
+    }
+    async fn wait_contract(&self, point: OutPoint) -> StoredContract {
+        self.wait_accepted(point.txid).await;
         let expected = self.contract_on(PeerId::from(0), point).await.unwrap();
         for peer in self.guardians.keys() {
             assert_eq!(
@@ -290,6 +297,20 @@ impl Federation {
             );
         }
         expected
+    }
+    /// Submit a transaction the guardians must refuse, naming the reason.
+    async fn submit_rejected(&self, tx: &Transaction, expected: &str) {
+        let outcome = self
+            .api
+            .submit_transaction(tx.clone())
+            .await
+            .try_into_inner(&self.decoders)
+            .unwrap();
+        let error = outcome.0.unwrap_err().to_string();
+        assert!(
+            error.contains(expected),
+            "expected {expected:?}, got {error}"
+        );
     }
     fn output(&self, output: ContractOutput) -> DynOutput {
         DynOutput::from_typed(self.simplicity, output)
@@ -404,58 +425,77 @@ async fn run_guardian(config_path: std::path::PathBuf) {
     .unwrap();
 }
 
+/// Runs one guardian until its parent kills it. This is a subprocess entry, not
+/// a scenario: it is ignored so ordinary runs never execute it, and
+/// [`Federation::start`] selects it with `--ignored --exact`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn four_guardians_submit_settle_and_recover_a_market_from_disk() {
+#[ignore = "guardian subprocess entry; launched only by Federation::start"]
+async fn guardian_process_entry() {
     let _ = fedimint_logging::TracingSetup::default().init();
-    if let Some(config_path) = std::env::var_os("FM_SIMPLICITY_TEST_GUARDIAN_CONFIG") {
-        run_guardian(config_path.into()).await;
-        return;
-    }
+    let config_path = std::env::var_os(GUARDIAN_CONFIG_ENV)
+        .expect("guardian_process_entry is launched only by Federation::start");
+    run_guardian(config_path.into()).await;
+}
+
+/// A stale `GUARDIAN_ENTRY` would make every guardian match zero tests and
+/// exit successfully, so scenarios would fail only after their federation
+/// timeout. Fail immediately instead.
+#[test]
+fn guardian_entry_is_a_registered_ignored_test() {
+    let listing = Command::new(std::env::current_exe().unwrap())
+        .args(["--list", "--format=terse", "--ignored"])
+        .output()
+        .unwrap();
+    assert!(listing.status.success(), "ignored-test listing failed");
+    let entry = format!("{GUARDIAN_ENTRY}: test");
+    let matches = String::from_utf8(listing.stdout)
+        .unwrap()
+        .lines()
+        .filter(|line| *line == entry)
+        .count();
+    assert_eq!(matches, 1, "{GUARDIAN_ENTRY} is not a unique ignored test");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn four_guardians_submit_settle_and_recover_assets_from_disk() {
+    let _ = fedimint_logging::TracingSetup::default().init();
     // Bound startup, consensus, reconnect and catch-up failures rather than
     // leaving CI hanging inside retrying federation API methods.
-    tokio::time::timeout(Duration::from_secs(180), network_market())
+    tokio::time::timeout(Duration::from_secs(180), network_assets())
         .await
         .unwrap();
 }
 
-async fn network_market() {
+/// A full asset lifecycle under owner policies: namespace creation, issuance,
+/// transfer, a Bitcoin-height-gated release and a burn. One guardian is killed
+/// before the release and must rebuild identical state from its own disk.
+async fn network_assets() {
     let mut fed = Federation::new().await;
+    let simplicity = fed.simplicity;
     let creator = key();
-    let oracle = key();
-    let operator = key();
+    let issuer = key();
     let alice = key();
     let bob = key();
-    let (creation, ids) = assets::creation(fed.id, fed.simplicity, &creator, vec![0, 0]).unwrap();
-    let terms = market::BinaryMarket {
-        federation: fed.id,
-        module: fed.simplicity,
-        yes: ids[0],
-        no: ids[1],
-        event: [7; 32],
-        rules: [8; 32],
-        oracle: oracle.x_only_public_key().0,
-        resolution_start: INITIAL_BLOCK_COUNT + 1,
-        deadline: 10,
-    };
-    let program = terms.program().unwrap();
-    let alice_program = market::owner_program(alice.x_only_public_key().0).unwrap();
-    let bob_program = market::owner_program(bob.x_only_public_key().0).unwrap();
-    let vault_output = |amount, state| {
+    let holder = key();
+    let (creation, ids) = assets::creation(fed.id, simplicity, &creator, vec![0, 0]).unwrap();
+    let issuer_program = owner_program(issuer.x_only_public_key().0).unwrap();
+    let alice_program = owner_program(alice.x_only_public_key().0).unwrap();
+    let bob_program = owner_program(bob.x_only_public_key().0).unwrap();
+    // A native balance that opens only at a Bitcoin height, standing in for a
+    // settlement window.
+    let opens = INITIAL_BLOCK_COUNT + 1;
+    let timelock = contract_program(&holder, 0, opens);
+    let authority_output = |program: &ContractProgram| {
         fed.output(
             program
-                .asset_output(
-                    Amount::from_msats(amount),
-                    market::state(state).unwrap(),
-                    vec![],
-                    bundle(&[], &ids),
-                )
+                .asset_output(Amount::ZERO, [0; 32], vec![], bundle(&[], &ids))
                 .unwrap(),
         )
     };
     let (mut genesis, sponsor) = fed.sponsored(
         vec![],
         vec![
-            vault_output(0, 0),
+            authority_output(&issuer_program),
             fed.output(
                 assets::action_output(AssetActions {
                     creations: vec![creation],
@@ -463,41 +503,39 @@ async fn network_market() {
                 })
                 .unwrap(),
             ),
+            fed.output(
+                timelock
+                    .output(Amount::from_msats(2000), [0; 32], vec![])
+                    .unwrap(),
+            ),
         ],
     );
-    assets::sign_creation(&mut genesis, fed.id, fed.simplicity, &creator).unwrap();
+    assets::sign_creation(&mut genesis, fed.id, simplicity, &creator).unwrap();
     fed.sign(&mut genesis, &[sponsor]).await.unwrap();
     fed.submit(&genesis).await;
     let initial = fed.wait_contract(point(&genesis, 0)).await;
-    assert_eq!(initial.creation_block_count, 5);
-    let input = |point, action, state| {
-        let signature = Value::byte_array(
-            *SECP256K1
-                .sign_schnorr_no_aux_rand(
-                    &Message::from_digest(terms.attestation_message(1).unwrap()),
-                    &oracle,
-                )
-                .as_ref(),
-        );
+    assert_eq!(initial.creation_block_count, INITIAL_BLOCK_COUNT);
+    let owner_input = |program: &ContractProgram, point, owner: &Keypair, signature| {
         DynInput::from_typed(
-            terms.module,
+            simplicity,
             program
                 .input(
                     point,
-                    operator.public_key(),
-                    witnesses([
-                        ("ACTION", Value::u8(action)),
-                        ("OUTCOME", Value::u8(state)),
-                        ("ORACLE_SIGNATURE", signature),
-                    ]),
+                    owner.public_key(),
+                    witnesses([("SIGNATURE", signature)]),
                 )
                 .unwrap(),
         )
     };
-    let (mut issue, sponsor) = fed.sponsored(
-        vec![input(point(&genesis, 0), 0, 1)],
+    let (mut issue, issue_sponsor) = fed.sponsored(
+        vec![owner_input(
+            &issuer_program,
+            point(&genesis, 0),
+            &issuer,
+            placeholder_signature(),
+        )],
         vec![
-            vault_output(2000, 0),
+            authority_output(&issuer_program),
             fed.output(
                 alice_program
                     .asset_output(
@@ -517,22 +555,17 @@ async fn network_market() {
             ),
         ],
     );
-    let issue_sponsor = sponsor;
-    fed.sign(&mut issue, &[operator, sponsor]).await.unwrap();
+    issue.inputs[0] = owner_input(
+        &issuer_program,
+        point(&genesis, 0),
+        &issuer,
+        assets::signature_value(fed.id, simplicity, &issue, &issuer).unwrap(),
+    );
+    fed.sign(&mut issue, &[issuer, issue_sponsor])
+        .await
+        .unwrap();
     fed.submit(&issue).await;
     fed.wait_contract(point(&issue, 0)).await;
-    let owner_input = |program: &ContractProgram, point, owner: &Keypair, signature| {
-        DynInput::from_typed(
-            terms.module,
-            program
-                .input(
-                    point,
-                    owner.public_key(),
-                    witnesses([("SIGNATURE", signature)]),
-                )
-                .unwrap(),
-        )
-    };
     let (mut trade, sponsor) = fed.sponsored(
         vec![owner_input(
             &alice_program,
@@ -557,75 +590,85 @@ async fn network_market() {
         &alice_program,
         point(&issue, 1),
         &alice,
-        assets::signature_value(fed.id, fed.simplicity, &trade, &alice).unwrap(),
+        assets::signature_value(fed.id, simplicity, &trade, &alice).unwrap(),
     );
     fed.sign(&mut trade, &[alice, sponsor]).await.unwrap();
     fed.submit(&trade).await;
     fed.wait_contract(point(&trade, 0)).await;
-    // Resolution opens only after issuance and recombination close.
-    fed.set_block_count(terms.resolution_start).await;
-    let (mut resolution, sponsor) = fed.sponsored(
-        vec![input(point(&issue, 0), 2, 1)],
-        vec![vault_output(2000, 1)],
-    );
-    fed.sign(&mut resolution, &[operator, sponsor])
-        .await
-        .unwrap();
-    // The remaining three guardians must make progress while one is down.
-    fed.stop(PeerId::from(3));
-    fed.submit(&resolution).await;
-    let resolved = fed.wait_contract(point(&resolution, 0)).await;
-    assert!(resolved.creation_session >= initial.creation_session);
-    // Reopen the exact same RocksDB and catch up missed consensus history.
-    fed.start(PeerId::from(3));
-    fed.wait_all_clock().await;
-    assert_eq!(fed.wait_contract(point(&resolution, 0)).await, resolved);
-    for peer in fed.guardians.keys() {
-        assert!(fed.contract_on(*peer, point(&issue, 0)).await.is_none());
-        let mut records = vec![];
-        for id in &ids {
-            records.push(
-                fed.api
-                    .with_module(fed.simplicity)
-                    .request_single_peer::<Option<AssetRecord>>(
-                        "asset".to_owned(),
-                        ApiRequestErased::new(*id),
-                        *peer,
-                    )
-                    .await
-                    .unwrap()
-                    .unwrap(),
-            );
-        }
-        terms.validate_genesis(&records[0], &records[1]).unwrap();
-    }
-    let vault_output = fed.output(
-        program
-            .asset_output(
-                Amount::ZERO,
-                market::state(1).unwrap(),
-                vec![],
-                bundle(&[], &ids),
-            )
-            .unwrap(),
-    );
-    let (mut redeem, sponsor) = fed.sponsored(
+
+    // The release is rejected while the guardians' consensus clock is below its
+    // height. The same signed bytes are accepted once the clock reaches it.
+    let release_input = |signature| {
+        DynInput::from_typed(
+            simplicity,
+            spend_input(&timelock, point(&genesis, 2), &holder, true, signature),
+        )
+    };
+    let (mut release, release_sponsor) = fed.sponsored(
+        vec![release_input(placeholder_signature())],
         vec![
-            input(point(&resolution, 0), 3, 1),
-            owner_input(
-                &bob_program,
-                point(&trade, 0),
-                &bob,
-                placeholder_signature(),
-            ),
-        ],
-        vec![
-            vault_output,
             fed.output(
                 bob_program
                     .asset_output(Amount::from_msats(2000), [0; 32], vec![], bundle(&[], &[]))
                     .unwrap(),
             ),
+        ],
+    );
+    release.inputs[0] =
+        release_input(assets::signature_value(fed.id, simplicity, &release, &holder).unwrap());
+    fed.sign(&mut release, &[holder, release_sponsor])
+        .await
+        .unwrap();
+    fed.submit_rejected(&release, "program rejected").await;
+    assert!(
+        fed.contract_on(PeerId::from(0), point(&genesis, 2))
+            .await
+            .is_some()
+    );
+    fed.set_block_count(opens).await;
+    // The remaining three guardians must make progress while one is down.
+    fed.stop(PeerId::from(3));
+    fed.submit(&release).await;
+    let released = fed.wait_contract(point(&release, 0)).await;
+    assert!(released.creation_session >= initial.creation_session);
+    // Reopen the exact same RocksDB and catch up missed consensus history.
+    fed.start(PeerId::from(3));
+    fed.wait_all_clock().await;
+    assert_eq!(fed.wait_contract(point(&release, 0)).await, released);
+    for peer in fed.guardians.keys() {
+        assert!(fed.contract_on(*peer, point(&genesis, 2)).await.is_none());
+        for id in &ids {
+            let record = fed
+                .api
+                .with_module(simplicity)
+                .request_single_peer::<Option<AssetRecord>>(
+                    "asset".to_owned(),
+                    ApiRequestErased::new(*id),
+                    *peer,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            // Immutable origins, as every guardian recovered them.
+            assert_eq!(record.authority_outpoint, point(&genesis, 0));
+            assert_eq!(record.authority_cmr, issuer_program.cmr());
+            assert_eq!(record.authority_state, [0; 32]);
+            assert_eq!(
+                asset_id(fed.id, simplicity, record.creation_key, record.ordinal),
+                *id
+            );
+        }
+    }
+
+    // Bob burns the position he holds; the burn reaches every guardian.
+    let (mut burn, burn_sponsor) = fed.sponsored(
+        vec![owner_input(
+            &bob_program,
+            point(&trade, 0),
+            &bob,
+            placeholder_signature(),
+        )],
+        vec![
             fed.output(
                 assets::action_output(AssetActions {
                     burns: values(&[(ids[0], 2)]),
@@ -635,37 +678,31 @@ async fn network_market() {
             ),
         ],
     );
-    redeem.inputs[1] = owner_input(
+    burn.inputs[0] = owner_input(
         &bob_program,
         point(&trade, 0),
         &bob,
-        assets::signature_value(fed.id, fed.simplicity, &redeem, &bob).unwrap(),
+        assets::signature_value(fed.id, simplicity, &burn, &bob).unwrap(),
     );
-    fed.sign(&mut redeem, &[operator, bob, sponsor])
-        .await
-        .unwrap();
-    fed.submit(&redeem).await;
-    assert_eq!(
-        fed.wait_contract(point(&redeem, 0)).await.output.amount,
-        Amount::ZERO
-    );
-    assert_eq!(
-        fed.wait_contract(point(&redeem, 1)).await.output.amount,
-        Amount::from_msats(2000)
-    );
-    // A different transaction cannot resurrect the spent vault after restart.
+    fed.sign(&mut burn, &[bob, burn_sponsor]).await.unwrap();
+    fed.submit(&burn).await;
+    fed.wait_accepted(burn.tx_hash()).await;
+    for peer in fed.guardians.keys() {
+        assert!(fed.contract_on(*peer, point(&trade, 0)).await.is_none());
+    }
+    // A different transaction cannot resurrect the spent authority after restart.
     let mut stale = issue.clone();
     stale.nonce = rand::random();
-    fed.sign(&mut stale, &[operator, issue_sponsor])
+    stale.inputs[0] = owner_input(
+        &issuer_program,
+        point(&genesis, 0),
+        &issuer,
+        assets::signature_value(fed.id, simplicity, &stale, &issuer).unwrap(),
+    );
+    fed.sign(&mut stale, &[issuer, issue_sponsor])
         .await
         .unwrap();
-    let rejected = fed
-        .api
-        .submit_transaction(stale)
-        .await
-        .try_into_inner(&fed.decoders)
-        .unwrap();
-    assert!(format!("{}", rejected.0.unwrap_err()).contains("already spent"));
+    fed.submit_rejected(&stale, "already spent").await;
     for peer in (0..4).map(PeerId::from) {
         fed.stop(peer);
     }

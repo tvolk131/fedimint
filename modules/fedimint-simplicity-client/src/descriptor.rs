@@ -10,10 +10,7 @@ use fedimint_core::secp256k1::{Keypair, SECP256K1, XOnlyPublicKey};
 use fedimint_derive_secret::DerivableSecret;
 use serde::{Deserialize, Serialize};
 
-use crate::compiler::{Value, ValueConstructible, arguments};
-use crate::{ContractProgram, TOP_UP_OR_RELEASE, common, market};
-
-pub(crate) const TOP_UP_TEMPLATE: &str = "top-up-or-release";
+use crate::{ContractProgram, common};
 
 const ENVELOPE: &[u8; 4] = b"FMS1";
 const DESCRIPTOR_VERSION: u16 = 1;
@@ -51,22 +48,6 @@ impl ContractDescriptor {
             application_data: vec![],
         }
     }
-
-    pub fn top_up(key_nonce: [u8; 32], min_session: u64, min_block_count: u64) -> Self {
-        Self {
-            template: TOP_UP_TEMPLATE.to_owned(),
-            parameters: (min_session, min_block_count).consensus_encode_to_vec(),
-            ..Self::owner(key_nonce)
-        }
-    }
-
-    pub fn binary_market(key_nonce: [u8; 32], market: &market::BinaryMarket) -> Self {
-        Self {
-            template: "binary-market".to_owned(),
-            parameters: market.consensus_encode_to_vec(),
-            ..Self::owner(key_nonce)
-        }
-    }
 }
 
 /// Matches the execution environment: input indices count only this module
@@ -80,6 +61,15 @@ pub struct SuccessorPosition {
 /// Wallet applications can provide additional templates without teaching
 /// guardians their policy or storing contract source outside the federation.
 pub trait ContractTemplates: fmt::Debug + Send + Sync {
+    /// Apply template-specific wallet policy, not guardian consensus rules.
+    fn validate_output(
+        &self,
+        _descriptor: &ContractDescriptor,
+        _output: &common::ContractOutput,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// Whether native collateral is a wallet balance. Watching a shared vault
     /// does not imply owning its collateral. Applications opt in per template.
     fn owns_balance(&self, _descriptor: &ContractDescriptor) -> bool {
@@ -111,20 +101,7 @@ pub struct BuiltinTemplates;
 
 impl ContractTemplates for BuiltinTemplates {
     fn owns_balance(&self, descriptor: &ContractDescriptor) -> bool {
-        descriptor.template_version == 1
-            && matches!(descriptor.template.as_str(), "owner" | TOP_UP_TEMPLATE)
-    }
-
-    fn is_successor(
-        &self,
-        descriptor: &ContractDescriptor,
-        before: &common::ContractOutput,
-        after: &common::ContractOutput,
-        _position: SuccessorPosition,
-    ) -> bool {
-        descriptor.template == "binary-market"
-            && descriptor.template_version == 1
-            && preserves_authorities(before, after)
+        descriptor.template_version == 1 && descriptor.template == "owner"
     }
 
     fn compile(
@@ -142,31 +119,10 @@ impl ContractTemplates for BuiltinTemplates {
                     descriptor.parameters.is_empty(),
                     "unexpected owner parameters"
                 );
-                Ok((common::EXECUTION_VERSION, market::owner_program(owner)?))
-            }
-            TOP_UP_TEMPLATE => {
-                let (min_session, min_block_count) = <(u64, u64)>::consensus_decode_whole(
-                    &descriptor.parameters,
-                    &Default::default(),
-                )?;
                 Ok((
                     common::EXECUTION_VERSION,
-                    ContractProgram::compile(
-                        TOP_UP_OR_RELEASE,
-                        arguments([
-                            ("OWNER", market::word(owner.serialize())),
-                            ("MIN_SESSION", Value::u64(min_session)),
-                            ("MIN_BLOCK_COUNT", Value::u64(min_block_count)),
-                        ]),
-                    )?,
+                    crate::owner::owner_program(owner)?,
                 ))
-            }
-            "binary-market" => {
-                let market = market::BinaryMarket::consensus_decode_whole(
-                    &descriptor.parameters,
-                    &Default::default(),
-                )?;
-                Ok((common::EXECUTION_VERSION, market.program()?))
             }
             _ => anyhow::bail!("unsupported contract template: {}", descriptor.template),
         }

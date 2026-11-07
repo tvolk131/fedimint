@@ -4,18 +4,30 @@ use std::collections::BTreeMap;
 
 use anyhow::ensure;
 use common::assets::{
-    AssetActions, AssetAmount, AssetBundle, AssetCreation, AssetExtension, AssetId, asset_id,
-    signature_hash, validate_amounts,
+    AssetActions, AssetAmount, AssetBundle, AssetCreation, AssetExtension, AssetId, AssetRecord,
+    asset_id, signature_hash, validate_amounts,
 };
+use fedimint_api_client::api::FederationApiExt as _;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::{DynOutput, ModuleInstanceId};
+use fedimint_core::module::ApiRequestErased;
 use fedimint_core::secp256k1::schnorr::Signature;
 use fedimint_core::secp256k1::{Keypair, Message, SECP256K1};
 use fedimint_core::transaction::Transaction;
 use fedimint_core::{Amount, OutPoint};
 
 pub use crate::signature_value;
-use crate::{ContractProgram, common};
+use crate::{ContractProgram, SimplicityClientModule, common};
+
+impl SimplicityClientModule {
+    pub async fn asset_record(&self, asset: AssetId) -> anyhow::Result<Option<AssetRecord>> {
+        Ok(self
+            .context
+            .module_api()
+            .request_current_consensus("asset".to_owned(), ApiRequestErased::new(asset))
+            .await?)
+    }
+}
 
 impl ContractProgram {
     pub fn asset_output(

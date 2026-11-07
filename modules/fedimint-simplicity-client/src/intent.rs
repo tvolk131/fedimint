@@ -12,14 +12,13 @@ use fedimint_core::{Amount, OutPoint, TransactionId};
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
 
-use crate::client::{SimplicityClientModule, SpendIntent, Submission};
+use crate::TransactionPlan;
+use crate::client::{SimplicityClientModule, SpendIntent};
 use crate::common::ContractOutput;
 use crate::wallet::{WalletContract, db};
 
 mod driver;
-mod market;
 use driver::IntentWait;
-pub use market::MintPairs;
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize, Encodable, Decodable)]
 pub struct Intent {
@@ -177,20 +176,16 @@ pub struct IntentPlan {
     pub shared_inputs: Vec<OutPoint>,
 }
 #[derive(Debug)]
-pub struct BuiltinIntents;
+pub struct NoIntentHandlers;
 #[fedimint_core::apply(fedimint_core::async_trait_maybe_send!)]
-impl IntentHandlers for BuiltinIntents {
+impl IntentHandlers for NoIntentHandlers {
     async fn build(
         &self,
-        wallet: &SimplicityClientModule,
-        intent: &Intent,
-        context: &IntentContext,
+        _wallet: &SimplicityClientModule,
+        _intent: &Intent,
+        _context: &IntentContext,
     ) -> anyhow::Result<IntentPlan> {
-        ensure!(
-            intent.template == "binary-market-mint-pairs" && intent.version == 1,
-            "unsupported intent template or version"
-        );
-        MintPairs::consensus_decode_whole(&intent.data, &Default::default())?.build(wallet, context)
+        anyhow::bail!("unsupported intent template or version")
     }
 }
 
@@ -598,21 +593,21 @@ impl SimplicityClientModule {
                         let submission = match snapshot {
                             Err(error) => Err(error),
                             Ok(snapshot) => {
-                                self.submit_dbtx(
+                                self.submit_plan_dbtx(
                                     &mut tx.to_ref_nc(),
-                                    Submission {
+                                    TransactionPlan {
                                         spends: plan.spends,
                                         outputs: plan.outputs,
                                         creations: vec![],
-                                        requested_receipt: None,
+                                        receipt: None,
                                         max_fee: Some(
                                             plan.max_fee.map_or(record.policy.max_fee, |limit| {
                                                 limit.min(record.policy.max_fee)
                                             }),
                                         ),
-                                        reserve_funding: true,
-                                        snapshot,
                                     },
+                                    true,
+                                    snapshot,
                                 )
                                 .await
                             }

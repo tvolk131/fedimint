@@ -389,6 +389,9 @@ pub fn analyze(
     report
 }
 
+/// Pure transition checks over the supplied bytes. Asset existence and
+/// permanent namespace-use markers need guardian ledger state, so they are
+/// never evaluated here; `analyze` reports them as not checked.
 fn check_assets(
     federation: FederationId,
     module: ModuleInstanceId,
@@ -403,37 +406,22 @@ fn check_assets(
         actions,
     )?;
     let mut created = BTreeSet::new();
-    for creation in &actions.creations {
-        let message =
-            Message::from_digest(assets::signature_hash(federation, module, transaction)?);
-        SECP256K1
-            .verify_schnorr(
-                &creation.signature,
-                &message,
-                &creation.key.x_only_public_key().0,
-            )
-            .map_err(|_| ContractError::CreationSignature)?;
-        for (ordinal, index) in creation.authority_outputs.iter().enumerate() {
-            let id = assets::asset_id(federation, module, creation.key, ordinal as u32);
-            let output = outputs
-                .get(*index as usize)
-                .and_then(|output| *output)
-                .ok_or(ContractError::Assets)?;
-            if !output
-                .bundle()
-                .is_some_and(|bundle| bundle.authorities.contains(&id))
-                || !created.insert(id)
-            {
-                return Err(ContractError::Assets);
+    if !actions.creations.is_empty() {
+        let intent = assets::signature_hash(federation, module, transaction)?;
+        for creation in &actions.creations {
+            let authorities =
+                accounting::check_creation(federation, module, creation, intent, |index| {
+                    outputs.get(index as usize).copied().flatten()
+                })?;
+            for authority in authorities {
+                if !created.insert(authority.id) {
+                    return Err(ContractError::Assets);
+                }
             }
         }
     }
     for (id, balance) in balances {
-        if created.contains(&id) {
-            balance.check_genesis()?;
-        } else {
-            balance.check_existing()?;
-        }
+        balance.check(created.contains(&id))?;
     }
     Ok(())
 }

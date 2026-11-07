@@ -22,10 +22,10 @@ blind signatures with an in-memory database. It issues real test notes, deposits
 one into a contract, adds a second note to increase the contract's balance,
 spends the contract back into notes for the entire balance minus the execution
 fee, and spends those notes to verify their signatures. A dummy module provides
-only the initial test funding and final accounting sink. A separate market test starts four guardians with TLS P2P, WebSocket APIs,
-Aleph consensus, and RocksDB; it needs permission to bind local ports. Bitcoin
-RPC and funding are simulated. It takes one guardian offline during
-settlement, reopens its database, and checks catch-up before redemption.
+only the initial test funding and final accounting sink. Separate core lifecycle tests start four guardians with TLS P2P, WebSocket APIs,
+Aleph consensus, and RocksDB; they need permission to bind local ports. Bitcoin
+RPC and funding are simulated. Restart tests reopen guardian databases and check
+catch-up. Application-policy lifecycles live in the separate reference repository.
 
 The tests also exercise consensus timelocks, authorization of foreign blinded
 outputs, covenant state preservation, funding failures, invalid outer signatures,
@@ -120,10 +120,9 @@ of both and combine them with other modules' ordinary inputs and outputs.
 
 The low-level builder flow is:
 
-1. `ContractProgram::compile(source, arguments(...))` compiles a policy. The
-   [example](../fedimint-simplicity-client/contracts/top_up_or_release.simf)
-   checks an owner signature and both clocks, then either preserves its CMR and
-   state in a successor of at least the current value or releases the balance.
+1. `ContractProgram::compile(source, arguments(...))` compiles a policy.
+   `owner_program(owner)` constructs the minimal built-in single-key policy.
+   Application covenants and their witness helpers are maintained separately.
 2. `program.output(amount, state, recovery)` creates a funded output request.
    A CMR alone is not a recoverable program. Use the persistent wallet below
    when mnemonic recovery is required.
@@ -340,8 +339,9 @@ module. The API is currently Rust-only:
 - `receive(amount, bundle)` makes a fresh owner policy with encrypted recovery
   metadata, ready to hand to a sender.
 - `output(descriptor, amount, state, bundle)` does the same for a versioned
-  application template. Built-ins cover owner outputs, top-up/release, and the
-  binary-market vault. Applications can supply a `ContractTemplates` registry.
+  application template. The default `BuiltinTemplates` registry contains only
+  owner outputs. Applications explicitly supply their `ContractTemplates` registry
+  and may enforce template-specific output rules through `validate_output`.
 - `submit(spends, outputs, creation_keys)` reserves selected contracts and returns
   an operation ID and transaction ID after durable submission is recorded.
   `SpendIntent::owner(outpoint)` installs an owner signature automatically;
@@ -382,13 +382,14 @@ recoverable; confirmed transactions and encrypted application context are.
 
 ## Prototype boundary
 
-Native bitcoin contracts, public asset issuance/transfers/destruction, and a
-binary-market example are implemented, together with persistent submission,
-input reservations, encrypted descriptors, and history-based recovery. Private
-transfers, general market discovery/indexing, CLI support, and a production
-trading UI remain later work. The durable intent API handles rebuilding for its
-supported market operation; other conflicting spends must be rebuilt by the
-application against the accepted successor.
+The core SDK supports native bitcoin contracts, public asset operations,
+persistent submission, input reservations, encrypted descriptors, receipts, and
+history-based recovery. It supplies generic template and intent-handler extension
+points, not an officially supported market or exchange kit. The default wallet
+registers only the owner template and `NoIntentHandlers`. Application policies,
+oracles, quoting rules, and semantic retry handlers belong to the application.
+Private transfers, general discovery/indexing, CLI support, and trading UIs are
+not supplied by the core module.
 
 The runtime, compiler revision, core jet allowlist, custom jet identifiers and
 CMRs, types, and costs are consensus-critical. Custom environment jets currently
@@ -434,8 +435,9 @@ static costs, context interpretation, signature normalization and fee rounding
 must all be reviewed as consensus changes when altered. A library patch release
 is not automatically safe to substitute.
 
-Wallet compatibility also includes the version-one `owner`, `top-up-or-release`
-and `binary-market` templates, their descriptors, and their compiler output.
+Wallet compatibility includes the version-one `owner` template and every
+application template bundled by that wallet, their descriptors, and compiler
+output. Separating application code does not remove historical recovery duties.
 Keep the ability to interpret historical descriptors and reproduce existing
 policies. Do not silently reinterpret a deployed version; a policy migration
 requires an authorized spend. No migration between earlier undeployed revisions
@@ -449,8 +451,8 @@ The fresh-federation beta supports execution version 1 only. Prototype execution
 version 0 is rejected, with no prototype migration path. Native-only and
 asset-bearing contracts share the same output format, jet set, and signing
 helper. `program.output` uses an empty asset bundle; `program.asset_output`
-supplies balances and authorities. The SDK top-up/release template remains
-bitcoin-only as SDK policy, not a consensus restriction on its raw covenant.
+supplies balances and authorities. Application-specific restrictions belong to
+the application template registry, not to string checks in the generic wallet.
 
 `program.asset_output(bitcoin, state, recovery, AssetBundle { balances,
 authorities })` creates a v1 UTXO. Balances have strictly sorted unique asset IDs
@@ -527,83 +529,29 @@ per bundle, and 32 created assets per transaction. V1 output fees add one msat p
 encoded extension byte and 100 msat per newly registered asset to contribute toward permanent
 records. These fees and context-jet costs still require production calibration.
 
-## Binary prediction-market example
+## External reference applications
 
-The client `market::BinaryMarket` compiles
-[binary_market.simf](../fedimint-simplicity-client/contracts/binary_market.simf).
-One vault owns both unique issuance authorities and the bitcoin collateral. It
-must be module input 0 and recreate itself at outer output 0. `ACTION` witnesses:
+`tvolk131/fedimint-simplicity` contains separately maintained binary-market,
+limit-order, partial-order, constant-product, and top-up/release implementations.
+These are reference consumers of the public Rust API, not officially supported
+Fedimint application kits. Applications explicitly install their template and
+intent-handler registries; the core crate does not depend on the reference repo.
 
-| Action | Rule |
-| --- | --- |
-| 0: issue | Before the resolution window, deposit q sats and issue q YES plus q NO |
-| 1: recombine | Before the resolution window, burn q of each and release q sats |
-| 2: resolve | During the resolution window, verify an oracle signature for YES=1, NO=2, or INVALID=3; at/after the deadline only INVALID timeout is allowed |
-| 3: redeem | Burn winners for 1000 msat/unit, or either side for 500 msat/unit when INVALID |
+The reference repository owns policy/oracle helpers, application examples,
+template vectors, and application-specific ledger/live lifecycle tests. Core
+tests retain native/asset accounting, authorization, receipts, recovery,
+resource limits, and guardian restart checks. See the
+[test-layering note](../fedimint-simplicity-server/TESTING.md).
 
-State 0 means unresolved. Resolution permanently commits state 1, 2, or 3 in the
-vault lineage. Authorities remain in the resolved vault but its program forbids
-further issuance. Even an empty vault retains its recorded outcome. Concurrent
-collateral operations contend for that output and must be rebuilt after a
-conflict. Ordinary position transfers do not touch it. Issue and recombine close
-when the resolution window opens, so during the window only resolution can
-spend the vault. Holders of the losing side therefore cannot keep it moving to
-make oracle resolutions conflict until the INVALID timeout. A complete pair
-still redeems for 1000 msat after any outcome.
+Consumer qualification must identify exact core and application revisions and
+exercise construction, spending, conflict handling, database loss, recovery,
+and a subsequent spend through public interfaces. A local path override is
+development evidence, not qualification of the published revision pair.
 
-Oracle messages commit the federation, module, both asset IDs, event identifier,
-resolution-rules hash, oracle key, window, and outcome. Guardians never contact the
-oracle. Clocks constrain transaction acceptance, not when the oracle published a
-signature. If the oracle equivocates before resolution, the first accepted
-resolution wins; the prototype assumes the configured oracle reports honestly.
-
-Call `BinaryMarket::validate_genesis` with authenticated asset records before
-accepting assets as positions. Checking only the current vault is insufficient:
-an issuer could mint elsewhere and later move authority into the market program.
-The helper verifies derived IDs, a shared original vault, the expected CMR, and
-unresolved initial state. Transfer recipients must additionally check their actual
-output quantities and ownership policy.
-
-The vault enforces collateral reduction and matching burns. Position-owner
-signatures authorize the payout destinations; an oracle signature authorizes only
-resolution, never an unrestricted release. The examples use external fee
-sponsorship. Owners can instead pay fees from an authorized redemption payout;
-the vault must still preserve all collateral backing the remaining positions. The generic ledger grants no bitcoin entitlement merely
-for burning a token. Multi-vault policies must prevent reusing the same burn to
-satisfy multiple obligations; this example uses one unique authority-bearing vault.
-
-[Asset integration tests](../fedimint-simplicity-server/src/tests/assets.rs) cover
-creation, collateral funding from real Mint v2 notes, split holdings, independent
-YES trading for ecash, recombination, all outcomes, timeout, redemption into ecash,
-and spending the resulting note. Negative cases cover forgery, inflation,
-namespace replay, authority copying/destruction, overflow, invalid signatures,
-provenance, native and asset output construction, and transaction rollback.
-
-[Market hardening tests](../fedimint-simplicity-server/src/tests/assets/market_hardening.rs)
-exercise oracle domain binding, exact resolution/timeout boundaries, altered
-successor policies, unequal pairs, forbidden state transitions, repeated issuance,
-independent transfers of both sides, and partial redemptions until every outcome's
-vault is empty. Distinct competing redemptions must rebuild against the accepted
-successor. Transactions admitted before a deadline must fail if consensus
-executes them after expiry. Most policy cases sponsor fees with the dummy module; a separate
-exact-funding lifecycle uses real Mint v2 notes and authorized change, checks a
-one-msat shortfall rolls back, and reconciles all Simplicity fees. That fixture
-configures zero mint fees; it is not a production fee-calibration test.
-
-The [network test](../fedimint-simplicity-server/src/tests/assets/network.rs)
-submits market transactions through the federation API, verifies all guardians'
-contract and origin records, and kills a guardian process while the remaining quorum settles the market.
-Restarting it from the same RocksDB exercises recovery of committed state and
-catch-up of missed consensus history. The separate
-[wallet network test](../fedimint-simplicity-server/src/tests/assets/network/wallet.rs)
-restarts a client with a persisted submission, exercises native top-up/release,
-creates and transfers assets, discards entire client databases, recovers from
-root secrets without backup snapshots, spends recovered contracts, and restores
-history after all contracts are spent. Unit tests cover interrupted open-session
-replay, changed/missing prefixes, unsupported owned descriptors, foreign/copied
-annotations, and public-vault successors. These tests do not inject crashes at
-every database-write boundary. No test
-claims exhaustive bytecode fuzzing or production security assurance.
+Wallet binaries must bundle all template definitions needed to interpret their
+historical descriptors. Recovery must not fetch policy source from a repository
+or require an additional backup. Preserve deployed descriptor meaning and CMRs
+when moving or updating application code.
 
 ## Durable shared-contract intents
 
@@ -633,27 +581,16 @@ notes before retry. Ordinary submissions and older pre-reservation attempts keep
 their original funding behavior, including possible reclaim fees. Imported ecash
 still requires reissuance; these APIs cannot restore arbitrary supplied notes.
 
-The first built-in handler is `intent::MintPairs`, for buying a fixed quantity of
-binary-market pairs with independent, fixed YES and NO recipient outputs:
+The default `NoIntentHandlers` registry rejects application intents. Supply an
+`IntentHandlers` implementation through `SimplicityClientInit` when the wallet
+supports semantic operations. The external reference library demonstrates a
+market-pair issuance handler and explicit registration. Generic `TransactionPlan`
+preparation supports both spends and output-only sends; quote preparation does
+not reserve funds or authorize a later submission.
 
-```rust,ignore
-let anchor = wallet.watch_market(&market).await?;
-let intent = MintPairs {
-    market,
-    anchor,
-    quantity,
-    yes_destination, // zero native amount, exactly quantity YES, no authorities
-    no_destination,  // zero native amount, exactly quantity NO, no authorities
-}.into_intent();
-let id = wallet.submit_intent(intent, IntentPolicy::default()).await?;
-let record = wallet.await_intent(id).await?;
-```
-
-`watch_market` verifies asset origins and imports the vault's authenticated history
-through the wallet's scanned prefix; ordinary sync then follows successors. The
-handler refuses issuance after resolution. Recombination, redemption and resolution
-retain low-level submission APIs; register additional semantic handlers through
-`SimplicityClientInit`'s `IntentHandlers` implementation.
+Applications validate immutable origins and use the generic public watch/history
+interfaces to follow authenticated successors. The core enforces reservation,
+funded-fee, conflict-proof, and submission safety independently of app policy.
 
 Database restarts resume pending intents. Mnemonic recovery restores confirmed
 activity, not unfinished intentions or watch-only subscriptions without confirmed

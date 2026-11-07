@@ -1,6 +1,6 @@
 mod history;
+mod lineage;
 mod pages;
-mod partial;
 
 use bitcoin::hashes::{Hash, sha256};
 use fedimint_core::core::{DynInput, DynOutput};
@@ -13,11 +13,14 @@ use fedimint_core::{Amount, PeerId};
 use super::*;
 use crate::common::assets::{AssetBundle, AssetId};
 use crate::descriptor::BuiltinTemplates;
+use crate::tests::support::{OriginalTemplates, original_descriptor};
 
 const MODULE: u16 = 7;
 
 /// Simulates a software release that changed its current owner template while
-/// retaining the previous definition for historical descriptors.
+/// retaining the previous definition for historical descriptors. The current
+/// definition is a different policy, so its CMR differs from the historical
+/// one.
 #[derive(Debug)]
 struct UpgradedTemplates;
 impl ContractTemplates for UpgradedTemplates {
@@ -27,10 +30,7 @@ impl ContractTemplates for UpgradedTemplates {
         owner: fedimint_core::secp256k1::XOnlyPublicKey,
     ) -> anyhow::Result<(u32, crate::ContractProgram)> {
         if descriptor.template == "owner" && descriptor.template_version == 2 {
-            BuiltinTemplates.compile(
-                &ContractDescriptor::top_up(descriptor.key_nonce, 0, 0),
-                owner,
-            )
+            OriginalTemplates.compile(&original_descriptor(descriptor.key_nonce, 0, 0), owner)
         } else {
             BuiltinTemplates.compile(descriptor, owner)
         }
@@ -344,48 +344,4 @@ async fn recovery_ignores_foreign_and_copied_records_but_fails_atomically_on_uns
         .await
         .is_err()
     );
-}
-
-#[tokio::test]
-async fn recovery_follows_public_market_successor_without_its_original_annotation() {
-    let store = wallet(database()).await;
-    let market = crate::market::BinaryMarket {
-        federation: federation(),
-        module: MODULE,
-        yes: AssetId([1; 32]),
-        no: AssetId([2; 32]),
-        event: [3; 32],
-        rules: [4; 32],
-        oracle: store
-            .keys
-            .signing_key(&ContractDescriptor::owner([1; 32]))
-            .x_only_public_key()
-            .0,
-        resolution_start: 5,
-        deadline: 10,
-    };
-    let descriptor = ContractDescriptor::binary_market([3; 32], &market);
-    let mut vault = output(&store, &descriptor);
-    vault.extension = Some(crate::common::assets::AssetExtension::Bundle(AssetBundle {
-        balances: vec![],
-        authorities: vec![market.yes, market.no],
-    }));
-    let creation = tx(0, &[], vec![vault.clone()]);
-    vault.recovery.clear();
-    vault.amount = Amount::from_sats(20);
-    let successor = tx(1, &[point(&creation)], vec![vault]);
-    store
-        .apply_session(0, &session(&[creation, successor.clone()]), true)
-        .await
-        .unwrap();
-    let holdings: Vec<_> = store
-        .contracts()
-        .await
-        .into_iter()
-        .filter(|(_, value)| value.spent_by.is_none())
-        .collect();
-    assert_eq!(holdings.len(), 1);
-    assert_eq!(holdings[0].0, point(&successor));
-    assert_eq!(holdings[0].1.descriptor, descriptor);
-    assert!(!BuiltinTemplates.owns_balance(&descriptor));
 }

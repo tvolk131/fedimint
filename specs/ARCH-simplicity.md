@@ -171,11 +171,27 @@ same intent and output format; native-only contracts carry an empty asset bundle
 
 The expanded execution environment exposes all resolved module inputs, successor
 asset balances and authorities, and issuance/destruction quantities. The client
-SDK constructs these transitions. Its binary-market example encodes collateral,
+SDK constructs these transitions. An external binary-market reference encodes collateral,
 oracle resolution, and redemption policy entirely in Simplicity, without guardian
 market-specific rules. A unique shared vault serializes collateral operations;
 independent position transfers do not consume it. Clients verify immutable asset
 origins as well as current holdings before trusting the market policy.
+
+## Client and application boundary
+
+The core client owns generic construction, fee preparation, authorization,
+funding/reservations, submission tracking, assets, descriptors, receipts, and
+authenticated recovery/history. Its default template registry contains only the
+single-key owner policy. `ContractTemplates` and `IntentHandlers` are explicit
+wallet extension points; application-specific output checks belong to templates.
+
+Market/oracle policies, order and AMM implementations, top-up/release, and their
+semantic handlers live in a separate reference repository, not in the core
+client dependency graph. They consume public APIs and register explicitly.
+This is not an official application-kit support promise. Wallet releases bundle
+historical template definitions; recovery never depends on retrieving source
+from that repository. Moving application code does not change descriptor meaning,
+policy commitments, or the recovery requirement.
 
 ## Wallet recovery design
 
@@ -268,9 +284,9 @@ module mode; applications reopen the client after recovery completes.
 
 A durable, versioned semantic intent is a client operation above individual core
 transaction submissions. Wallet software registers template handlers that retain
-historical intent meaning. The first handler mints a fixed number of market pairs
-to fixed, independent recipient outputs; other market actions continue using the
-low-level transaction API. Guardians enforce the same contracts either way.
+historical intent meaning. The default core registry has no application handlers.
+The external reference library supplies market-pair issuance; applications choose
+which semantic operations to install. Guardians enforce the same contracts either way.
 
 Each attempt's core submission, primary funding, Simplicity reservations, and
 association with its parent intent commit in one client database transaction. A

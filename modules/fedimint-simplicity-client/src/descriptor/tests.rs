@@ -2,7 +2,8 @@ use bitcoin::hashes::{Hash, sha256};
 use fedimint_core::config::FederationId;
 use fedimint_derive_secret::DerivableSecret;
 
-use super::{BuiltinTemplates, ContractDescriptor, WalletKeys};
+use super::{BuiltinTemplates, ContractDescriptor, ContractTemplates, WalletKeys};
+use crate::tests::support::{OriginalTemplates, original_descriptor};
 
 fn keys(seed: u8, federation: u8, module: u16) -> WalletKeys {
     WalletKeys::new(
@@ -38,21 +39,31 @@ fn recovery_annotations_are_randomized_authenticated_and_context_bound() {
 #[test]
 fn descriptors_reproduce_policies_and_preserve_application_context() {
     let alice = keys(1, 2, 3);
-    for mut descriptor in [
-        ContractDescriptor::owner([3; 32]),
-        ContractDescriptor::top_up([4; 32], 17, 21),
-    ] {
+    let cases: [(ContractDescriptor, &dyn ContractTemplates); 2] = [
+        (ContractDescriptor::owner([3; 32]), &BuiltinTemplates),
+        // A descriptor whose parameters select the policy's consensus clocks.
+        (original_descriptor([4; 32], 17, 21), &OriginalTemplates),
+    ];
+    for (mut descriptor, templates) in cases {
         descriptor.application_data = b"recoverable application context".to_vec();
-        let expected = alice.program(&descriptor, &BuiltinTemplates).unwrap();
+        let expected = alice.program(&descriptor, templates).unwrap();
         let recovered = keys(1, 2, 3)
             .decrypt(&alice.encrypt(&descriptor).unwrap())
             .unwrap()
             .unwrap();
         assert_eq!(recovered, descriptor);
-        let actual = alice.program(&recovered, &BuiltinTemplates).unwrap();
+        let actual = alice.program(&recovered, templates).unwrap();
         assert_eq!(actual.0, expected.0);
         assert_eq!(actual.1.cmr(), expected.1.cmr());
     }
+    // Parameters are part of the policy: another clock is another CMR.
+    let first = alice
+        .program(&original_descriptor([4; 32], 17, 21), &OriginalTemplates)
+        .unwrap();
+    let other = alice
+        .program(&original_descriptor([4; 32], 17, 22), &OriginalTemplates)
+        .unwrap();
+    assert_ne!(first.1.cmr(), other.1.cmr());
     let mut unsupported = ContractDescriptor::owner([1; 32]);
     unsupported.template_version = 2;
     let recovered = alice
@@ -60,6 +71,7 @@ fn descriptors_reproduce_policies_and_preserve_application_context() {
         .unwrap()
         .unwrap();
     assert!(alice.program(&recovered, &BuiltinTemplates).is_err());
+    assert!(alice.program(&recovered, &OriginalTemplates).is_err());
     unsupported.application_data = vec![0; 1024];
     assert!(alice.encrypt(&unsupported).is_err());
 }

@@ -15,7 +15,10 @@ production limits.
 From the repository root, in the normal development environment:
 
 ```sh
-# Check decoding, execution, preflight, module and core-processing outcomes.
+# Ordinary correctness: all registered fixtures and adversarial families.
+cargo test --locked -p fedimint-simplicity-server --test resource_workloads
+
+# Opt-in benchmark smoke check of the same expected outcomes.
 cargo bench --locked -p fedimint-simplicity-server --bench resources -- --test
 
 # Deterministic sizes, static bounds, fees, expected errors and transaction hashes.
@@ -54,8 +57,10 @@ measurements. The manifest pins fixture transactions, not only case labels.
 
 Fixture construction, SimplicityHL compilation, signing, database seeding,
 warm-up and manifest generation are outside timing. Ordinary Divan/manifest runs first
-checks all fixtures against the real decoder, executor, preflight, guardian hook
-and core submission processor, including exact rejection reasons. It also checks
+check all fixtures against the real decoder, executor, preflight, guardian hook
+and core submission processor, including exact rejection reasons. The full fixture
+corpus and every adversarial family also run as ordinary correctness tests in
+`tests/resource_workloads.rs`, not only the repeated-context cases. The harness also checks
 the fully signed transaction's
 encoded size against `Transaction::MAX_TX_SIZE` (49,968 bytes at this revision).
 The same fixed keys, nonce, votes and contract outpoints reproduce the same cases.
@@ -203,8 +208,7 @@ asset genesis.
 The guardian stage is **module validation**, not end-to-end acceptance. It omits
 foreign-module verification, outer cryptographic signature verification, native
 bitcoin funding checks, processing hooks, database commits, RocksDB I/O, network admission and consensus. Transactions have
-outer signatures but do not include fee/collateral sponsorship. In particular,
-`market_issue` needs foreign funding to pass core conservation. Benchmark success
+outer signatures but do not include fee sponsorship. Benchmark success
 must not be interpreted as full transaction acceptance.
 
 The core stage adds a dummy-module funding input and regenerates outer
@@ -232,6 +236,24 @@ keeps peak allocation associated with one operation.
 
 ## Cases
 
+Core fixtures use only generic client compilation, authorization and asset APIs.
+The application-specific `market_issue`, `market_resolve` and `bad_oracle` cases
+are retired from the core benchmark corpus rather than retaining the market SDK
+or its contract source as fixtures. Corresponding correctness checks belong to
+the application-owned market ledger/live and hardening suites: issuance and valid
+resolution are covered by
+`binary_market_trades_recombines_resolves_and_redeems_to_ecash`, and wrong-outcome
+oracle rejection by
+`oracle_attestations_are_bound_to_every_market_term_and_outcome`. No separate
+application benchmark processing harness is introduced here.
+
+Historical manifests and results included those three cases and remain unchanged.
+The current generic corpus differs and requires fresh qualification; archived
+whole-corpus timings and counts are not directly comparable. Consumers of case
+lists, name filters and manifests must account for the retired labels. All generic
+resource, signature, shape, context, creation, load, scale, storage and adversarial
+workloads remain in core.
+
 - `unit_v1`: minimal programs, exposing fixed overhead.
 - Adversarial `context_*` cases repeat a context jet 512 times with full
   32-entry balance, authority, issuance and burn lists. They cover first/last/
@@ -240,9 +262,6 @@ keeps peak allocation associated with one operation.
   within both caps, with asserted outcomes and dropped-write checks in submission
   and consensus modes. The same cases run in `tests/resource_workloads.rs`.
 - `owner`: one valid transaction-bound BIP340 signature.
-- `market_issue` / `market_resolve`: the actual binary-market template, including
-  asset accounting or an external oracle's signature. `bad_oracle` signs the
-  wrong outcome and is rejected by the program.
 - `inputs_8` / `inputs_32`: increasing input counts with no successors;
   `context_32` adds 32 successors; `recovery_32` adds 1 KiB to every consumed
   contract and successor; `assets_32` holds all 32 assets in every one of 32
@@ -312,7 +331,7 @@ is the least significant bit of byte zero. No PR fuzz/smoke job is added.
 
 This is a targeted exploration, not an exhaustive adversarial maximum search. It does not
 exercise every combination of frame/cell/type limits, worst-case canonical
-sharing/type inference, all market branches or multiple module instances at once. Large-state and
+sharing/type inference, arbitrary application policies or multiple module instances at once. Large-state and
 recovery coverage above uses separate workloads and a controlled transport.
 Those remain relevant before production calibration, alongside measurements on
 guardian-class Linux hardware and concurrent invalid-submission load.

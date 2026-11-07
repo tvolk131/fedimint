@@ -1,13 +1,17 @@
 # Contract template vectors
 
-`templates.json` pins the commitment Merkle root (CMR) that each contract
-template in this crate compiles to, for the fixed keys and terms in
-`src/tests/template_vectors.rs`. Builtin descriptor templates also pin the
-execution version that `BuiltinTemplates` returns.
+`templates.json` pins the commitment Merkle root (CMR) and execution version that
+the one template this crate ships, `owner`, compiles to for the fixed key in
+`src/tests/template_vectors.rs`. `BuiltinTemplates` returns exactly these values.
+
+Application templates (top-up, binary market, limit and partial orders, the
+constant-product pool) are maintained with their application and pin their own
+vectors there. Their earlier entries were moved unchanged: this crate's vectors
+no longer cover them.
 
 Wallet recovery recompiles every decrypted descriptor with the current compiler
 and keeps an output only if both values match its stored output. Application
-templates recover the exchange covenants the same way. A changed vector
+templates recover their covenants the same way. A changed vector
 therefore means outputs created by earlier releases are skipped during recovery,
 without an error.
 

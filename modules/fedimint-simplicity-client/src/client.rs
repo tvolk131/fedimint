@@ -1,4 +1,5 @@
 //! Wallet integration with the core client's funding, submission and recovery.
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::ensure;
@@ -9,22 +10,22 @@ use fedimint_client_module::module::init::{
 use fedimint_client_module::module::recovery::{NoModuleBackup, RecoveryProgress};
 use fedimint_client_module::module::{ClientContext, ClientModule, StateGenerator};
 use fedimint_client_module::transaction::{
-    ClientInput, ClientInputBundle, ClientInputSM, ClientOutput, ClientOutputBundle,
-    ClientOutputSM, TransactionBuilder,
+    ClientInputBundle, ClientInputSM, ClientOutput, ClientOutputBundle, ClientOutputSM,
+    TransactionBuilder,
 };
-use fedimint_core::core::{DynInput, DynOutput, OperationId};
+use fedimint_core::core::OperationId;
 use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::module::{AmountUnit, Amounts, ApiVersion, ModuleInit, MultiApiVersion};
 use fedimint_core::secp256k1::Keypair;
-use fedimint_core::transaction::{Transaction, TransactionSignature};
 use fedimint_core::{Amount, OutPoint, TransactionId, apply, async_trait_maybe_send};
 use futures::StreamExt as _;
 
-use crate::authorization::{Authorization, PreparedSpend};
 use crate::common::assets::AssetBundle;
 use crate::common::{ContractInput, ContractOutput, SimplicityCommonInit, SimplicityModuleTypes};
-use crate::compiler::{TemplateProgramWitness, WitnessNameToValueMap, WitnessValues};
+use crate::compiler::{WitnessNameToValueMap, WitnessValues};
 use crate::descriptor::{BuiltinTemplates, ContractDescriptor, ContractTemplates};
+use crate::preparation::{PreparedTransaction, TransactionPlan};
+use crate::pruning::PruningSnapshot;
 use crate::states::{OperationStatus, SimplicityState};
 use crate::wallet::{
     HistoryEntry, SessionHistory, WalletContract, WalletCursor, WalletPage, WalletStore, db,
@@ -60,7 +61,7 @@ impl Default for SimplicityClientInit {
     fn default() -> Self {
         Self {
             templates: Arc::new(BuiltinTemplates),
-            intents: Arc::new(crate::intent::BuiltinIntents),
+            intents: Arc::new(crate::intent::NoIntentHandlers),
         }
     }
 }
@@ -311,18 +312,14 @@ impl SimplicityClientModule {
             version == crate::common::EXECUTION_VERSION,
             "unsupported execution version"
         );
-        if descriptor.template == crate::descriptor::TOP_UP_TEMPLATE {
-            ensure!(
-                bundle == AssetBundle::default(),
-                "top-up-or-release only supports bitcoin"
-            );
-        }
-        program.asset_output(amount, state, recovery, bundle)
+        let output = program.asset_output(amount, state, recovery, bundle)?;
+        self.store.templates.validate_output(descriptor, &output)?;
+        Ok(output)
     }
 
     /// Atomically reserve inputs, obtain native funding/change from the primary
-    /// module, authorize the final intent, and persist the submission. Once
-    /// this returns, the core executor retries submission across client
+    /// module, authorize the final transaction, and persist the submission.
+    /// Once this returns, the core executor retries submission across client
     /// restarts. Asset change and authority successors are explicit
     /// application outputs.
     pub async fn submit(
@@ -331,7 +328,13 @@ impl SimplicityClientModule {
         outputs: Vec<ContractOutput>,
         creations: Vec<Keypair>,
     ) -> anyhow::Result<(OperationId, TransactionId)> {
-        self.submit_inner(spends, outputs, creations, None).await
+        self.submit_plan(TransactionPlan {
+            spends,
+            outputs,
+            creations,
+            ..Default::default()
+        })
+        .await
     }
 
     /// Include an encrypted sender receipt even when owned contracts already
@@ -343,179 +346,76 @@ impl SimplicityClientModule {
         creations: Vec<Keypair>,
         context: Option<crate::receipt::ReceiptContext>,
     ) -> anyhow::Result<(OperationId, TransactionId)> {
-        self.submit_inner(
+        self.submit_plan(TransactionPlan {
             spends,
             outputs,
             creations,
-            Some(crate::receipt::SenderReceipt { context }),
-        )
+            receipt: Some(crate::receipt::SenderReceipt { context }),
+            ..Default::default()
+        })
         .await
     }
 
-    async fn submit_inner(
+    /// Submit a plan, preparing it exactly as [`Self::quote_transaction`]
+    /// does. A quote authorizes nothing and caches no signatures: this reads
+    /// current wallet records and a fresh pruning snapshot, reserves the
+    /// inputs, and finalization checks the funded transaction and the plan's
+    /// `max_fee` again.
+    pub async fn submit_plan(
         &self,
-        spends: Vec<SpendIntent>,
-        outputs: Vec<ContractOutput>,
-        creations: Vec<Keypair>,
-        requested_receipt: Option<crate::receipt::SenderReceipt>,
+        plan: TransactionPlan,
     ) -> anyhow::Result<(OperationId, TransactionId)> {
         let snapshot = self
-            .pruning_snapshot(spends.iter().map(|spend| spend.outpoint))
+            .pruning_snapshot(plan.spends.iter().map(|spend| spend.outpoint))
             .await?;
         let mut dbtx = self.store.db.begin_transaction().await;
         let result = self
-            .submit_dbtx(
-                &mut dbtx.to_ref_nc(),
-                Submission {
-                    spends,
-                    outputs,
-                    creations,
-                    requested_receipt,
-                    max_fee: None,
-                    reserve_funding: false,
-                    snapshot,
-                },
-            )
+            .submit_plan_dbtx(&mut dbtx.to_ref_nc(), plan, false, snapshot)
             .await?;
         dbtx.commit_tx_result().await?;
         Ok(result)
     }
 
-    pub(crate) async fn submit_dbtx(
+    /// Prepare read-only, then write reservations, funding and the submission
+    /// in the caller's database transaction. The pruning snapshot must have
+    /// been fetched before that transaction opened.
+    pub(crate) async fn submit_plan_dbtx(
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
-        submission: Submission,
+        plan: TransactionPlan,
+        reserve_funding: bool,
+        snapshot: PruningSnapshot,
     ) -> anyhow::Result<(OperationId, TransactionId)> {
-        let Submission {
-            spends,
-            mut outputs,
-            creations,
-            requested_receipt,
-            max_fee,
-            reserve_funding,
-            snapshot,
-        } = submission;
-        ensure!(
-            !spends.is_empty() || !outputs.is_empty(),
-            "empty contract operation"
-        );
         ensure!(
             !self.store.is_recovering().await,
             "wallet recovery must finish first"
         );
-        // Do this before durable operations or funding reservations. The
-        // snapshot was fetched before this write transaction was opened.
-        for output in &outputs {
-            crate::common::consensus::check_execution_version(
-                output.version,
-                snapshot.consensus_version,
-            )?;
+        let mut contracts = BTreeMap::new();
+        for spend in &plan.spends {
+            if let Some(contract) = dbtx.get_value(&db::ContractKey(spend.outpoint)).await {
+                contracts.insert(spend.outpoint, contract);
+            }
         }
-        for stored in snapshot.contracts.values() {
-            crate::common::consensus::check_execution_version(
-                stored.output.version,
-                snapshot.consensus_version,
-            )?;
-        }
+        let PreparedTransaction {
+            inputs,
+            outputs,
+            authorization,
+        } = self
+            .store
+            .prepare_transaction(&plan, &contracts, &snapshot)?;
         let operation_id = OperationId::new_random();
-        let points: Vec<_> = spends.iter().map(|spend| spend.outpoint).collect();
+        let points: Vec<_> = plan.spends.iter().map(|spend| spend.outpoint).collect();
         dbtx.insert_new_entry(&db::OperationResultKey(operation_id), &None)
             .await;
-        let mut inputs = vec![];
-        let mut prepared = vec![];
-        let mut recoverable = false;
-        for spend in spends {
-            let contract = dbtx
-                .get_value(&db::ContractKey(spend.outpoint))
-                .await
-                .ok_or_else(|| anyhow::anyhow!("unknown contract"))?;
-            recoverable |= self.store.has_recovery_descriptor(&contract.output)?;
+        for point in &points {
             ensure!(
-                contract.spent_by.is_none(),
-                "contract has already been spent"
-            );
-            ensure!(
-                dbtx.get_value(&db::ReservationKey(spend.outpoint))
-                    .await
-                    .is_none(),
+                dbtx.get_value(&db::ReservationKey(*point)).await.is_none(),
                 "contract is reserved by another operation"
             );
-            dbtx.insert_new_entry(&db::ReservationKey(spend.outpoint), &operation_id)
+            dbtx.insert_new_entry(&db::ReservationKey(*point), &operation_id)
                 .await;
-            let observed = snapshot
-                .contracts
-                .get(&spend.outpoint)
-                .ok_or_else(|| anyhow::anyhow!("missing pruning input context"))?;
-            ensure!(
-                observed.output == contract.output
-                    && observed.creation_session == contract.creation_session,
-                "pruning context differs from authenticated wallet history"
-            );
-            let (version, program) = self
-                .store
-                .keys
-                .program(&contract.descriptor, self.store.templates.as_ref())?;
-            let key = self.store.keys.signing_key(&contract.descriptor);
-            let mut witnesses = spend.witnesses.as_inner().as_ref().clone();
-            if let Some(name) = &spend.signature_witness {
-                witnesses.insert(
-                    TemplateProgramWitness::witness_from_str(name.as_str()),
-                    crate::placeholder_signature(),
-                );
-            }
-            inputs.push(ClientInput {
-                input: program.input(
-                    spend.outpoint,
-                    key.public_key(),
-                    WitnessValues::from_map(witnesses),
-                )?,
-                keys: vec![key],
-                amounts: Amounts::new_bitcoin(contract.output.amount),
-            });
-            prepared.push(PreparedSpend {
-                outpoint: spend.outpoint,
-                version,
-                key,
-                program,
-                witnesses: spend.witnesses,
-                signature_witness: spend.signature_witness,
-            });
         }
-        let receipt = self
-            .store
-            .prepare_receipt(recoverable, &mut outputs, requested_receipt)?;
-        let authorization = Arc::new(Authorization {
-            federation: self.store.federation,
-            module: self.store.module,
-            spends: prepared,
-            creations,
-            receipt,
-            max_fee,
-            snapshot,
-        });
-        // Prune with valid signatures over a draft intent before core selects
-        // funding. Finalization rebuilds from the original template and checks
-        // that the final pruning has exactly the same fee.
-        let draft = Transaction {
-            inputs: inputs
-                .iter()
-                .map(|input| DynInput::from_typed(self.store.module, input.input.clone()))
-                .collect(),
-            outputs: outputs
-                .iter()
-                .cloned()
-                .map(|output| DynOutput::from_typed(self.store.module, output))
-                .collect(),
-            nonce: [0; 8],
-            signatures: TransactionSignature::NaiveMultisig(vec![]),
-        };
-        for (index, input) in authorization.pruned_inputs(&draft)? {
-            inputs[index].input = input
-                .as_any()
-                .downcast_ref::<ContractInput>()
-                .expect("authorization returns Simplicity inputs")
-                .clone();
-        }
+        let authorization = Arc::new(authorization);
         let state_gen: StateGenerator<SimplicityState> = Arc::new(move |range| {
             vec![SimplicityState {
                 operation_id,
@@ -621,16 +521,4 @@ impl SimplicityClientModule {
             .await;
         result.map_err(anyhow::Error::msg)
     }
-}
-
-/// Built and committed in the caller's database transaction so intent attempts,
-/// reservations, primary funding and core submission cannot diverge on a crash.
-pub(crate) struct Submission {
-    pub spends: Vec<SpendIntent>,
-    pub outputs: Vec<ContractOutput>,
-    pub creations: Vec<Keypair>,
-    pub requested_receipt: Option<crate::receipt::SenderReceipt>,
-    pub max_fee: Option<Amount>,
-    pub reserve_funding: bool,
-    pub snapshot: crate::pruning::PruningSnapshot,
 }

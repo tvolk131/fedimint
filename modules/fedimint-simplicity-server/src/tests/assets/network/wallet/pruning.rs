@@ -1,15 +1,49 @@
 //! Funding that changes a pruned fee must roll back real ecash and
-//! reservations.
+//! reservations, and a plan built from stale state must stop for attention
+//! without submitting anything. The templates and handlers here are test-only
+//! stand-ins for application code.
 use fedimint_core::encoding::{Decodable as _, Encodable as _};
 use fedimint_core::secp256k1::XOnlyPublicKey;
+use fedimint_simplicity_client::TransactionPlan;
 use fedimint_simplicity_client::descriptor::{BuiltinTemplates, ContractTemplates};
 use fedimint_simplicity_client::intent::{
-    BuiltinIntents, Intent, IntentContext, IntentHandlers, IntentPlan, IntentPolicy, IntentStatus,
+    Intent, IntentContext, IntentHandlers, IntentPlan, IntentPolicy, IntentStatus, NoIntentHandlers,
 };
 
 use super::*;
 
 mod race;
+
+const FUNDING_SENSITIVE: &str = "funding-sensitive-pruning-test";
+const TOP_UP: &str = "top-up-test";
+const SHARED: &str = "shared-open-test";
+
+/// Anyone may spend this contract once the Bitcoin height reaches `OPENS`.
+const SHARED_POLICY: &str =
+    "fn main() { assert!(jet::le_64(param::OPENS, jet::fm_block_count())); }";
+
+/// Owner-authorized policy with consensus clocks and a collateral-preserving
+/// top-up branch, from the module's test fixtures.
+pub(super) fn top_up_descriptor(
+    key_nonce: [u8; 32],
+    min_session: u64,
+    min_block_count: u64,
+) -> ContractDescriptor {
+    ContractDescriptor {
+        template: TOP_UP.to_owned(),
+        parameters: (min_session, min_block_count).consensus_encode_to_vec(),
+        ..ContractDescriptor::owner(key_nonce)
+    }
+}
+
+/// A public contract no wallet owns; the key nonce is irrelevant to its policy.
+pub(super) fn shared_descriptor(opens: u64) -> ContractDescriptor {
+    ContractDescriptor {
+        template: SHARED.to_owned(),
+        parameters: opens.consensus_encode_to_vec(),
+        ..ContractDescriptor::owner([0; 32])
+    }
+}
 
 #[fedimint_core::apply(fedimint_core::async_trait_maybe_send!)]
 impl IntentHandlers for Templates {
@@ -23,7 +57,7 @@ impl IntentHandlers for Templates {
             return race::build(wallet, intent, context).await;
         }
         if intent.template != "invalid-pruning-plan-test" {
-            return BuiltinIntents.build(wallet, intent, context).await;
+            return NoIntentHandlers.build(wallet, intent, context).await;
         }
         let (point, count) =
             <(OutPoint, u64)>::consensus_decode_whole(&intent.data, &Default::default())?;
@@ -47,49 +81,65 @@ impl IntentHandlers for Templates {
 pub(super) struct Templates;
 impl ContractTemplates for Templates {
     fn owns_balance(&self, descriptor: &ContractDescriptor) -> bool {
-        descriptor.template == "funding-sensitive-pruning-test"
+        matches!(descriptor.template.as_str(), FUNDING_SENSITIVE | TOP_UP)
             || BuiltinTemplates.owns_balance(descriptor)
-    }
-    fn is_successor(
-        &self,
-        descriptor: &ContractDescriptor,
-        before: &ContractOutput,
-        after: &ContractOutput,
-        position: fedimint_simplicity_client::descriptor::SuccessorPosition,
-    ) -> bool {
-        BuiltinTemplates.is_successor(descriptor, before, after, position)
     }
     fn compile(
         &self,
         descriptor: &ContractDescriptor,
         owner: XOnlyPublicKey,
     ) -> anyhow::Result<(u32, fedimint_simplicity_client::ContractProgram)> {
-        if descriptor.template != "funding-sensitive-pruning-test" {
-            return BuiltinTemplates.compile(descriptor, owner);
-        }
-        Ok((
-            fedimint_simplicity_common::EXECUTION_VERSION,
-            fedimint_simplicity_client::ContractProgram::compile(
+        let program = match descriptor.template.as_str() {
+            FUNDING_SENSITIVE => fedimint_simplicity_client::ContractProgram::compile(
                 "fn main() { let signature: Signature = witness::SIGNATURE; jet::bip_0340_verify((param::OWNER, jet::fm_sig_hash_all()), signature); match witness::VARIABLE { true => { match jet::eq_32(jet::fm_output_count(), 1) { true => {}, false => { jet::bip_0340_verify((param::OWNER, jet::fm_sig_hash_all()), signature); }, } }, false => {}, } }",
-                compiler::arguments([(
-                    "OWNER",
-                    Value::u256(compiler::U256::from_byte_array(owner.serialize())),
-                )]),
+                compiler::arguments([("OWNER", word(owner.serialize()))]),
             )?,
-        ))
+            TOP_UP => {
+                let (min_session, min_block_count) = <(u64, u64)>::consensus_decode_whole(
+                    &descriptor.parameters,
+                    &Default::default(),
+                )?;
+                fedimint_simplicity_client::ContractProgram::compile(
+                    ORIGINAL_POLICY,
+                    compiler::arguments([
+                        ("OWNER", word(owner.serialize())),
+                        ("MIN_SESSION", Value::u64(min_session)),
+                        ("MIN_BLOCK_COUNT", Value::u64(min_block_count)),
+                    ]),
+                )?
+            }
+            SHARED => {
+                let opens =
+                    u64::consensus_decode_whole(&descriptor.parameters, &Default::default())?;
+                fedimint_simplicity_client::ContractProgram::compile(
+                    SHARED_POLICY,
+                    compiler::arguments([("OPENS", Value::u64(opens))]),
+                )?
+            }
+            _ => return BuiltinTemplates.compile(descriptor, owner),
+        };
+        Ok((fedimint_simplicity_common::EXECUTION_VERSION, program))
     }
 }
 
 pub(super) async fn check(client: &ClientHandle) {
     let wallet = client.get_first_module::<SimplicityClientModule>().unwrap();
     let descriptor = ContractDescriptor {
-        template: "funding-sensitive-pruning-test".to_owned(),
+        template: FUNDING_SENSITIVE.to_owned(),
         ..ContractDescriptor::owner([98; 32])
     };
     let output = wallet
         .output(&descriptor, Amount::ZERO, [0; 32], Default::default())
         .unwrap();
-    let (operation, txid) = wallet.submit(vec![], vec![output], vec![]).await.unwrap();
+    // A direct send with no spend is quoted by the core funding dry run too,
+    // and submitting the same plan prepares the same transaction.
+    let direct = TransactionPlan {
+        outputs: vec![output.clone()],
+        ..Default::default()
+    };
+    let direct_fee = wallet.quote_transaction(&direct).await.unwrap();
+    assert!(direct_fee >= fedimint_simplicity_common::output_fee(&output));
+    let (operation, txid) = wallet.submit_plan(direct).await.unwrap();
     wallet.await_operation(operation).await.unwrap();
     client.await_no_active_states(operation).await;
     let point = OutPoint { txid, out_idx: 0 };
@@ -103,15 +153,16 @@ pub(super) async fn check(client: &ClientHandle) {
     };
     // Quotes charge the submitted pruned representation, not the larger
     // original policy containing unused signature checks.
-    let context = wallet.intent_context().await;
+    let contracts = wallet.contracts_for([point]).await;
     let snapshot = wallet.pruning_snapshot([point]).await.unwrap();
-    let plan = IntentPlan {
-        max_fee: None,
+    let plan = TransactionPlan {
         spends: vec![spend(false)],
         outputs: vec![destination.clone()],
-        shared_inputs: vec![point],
+        ..Default::default()
     };
-    let request = wallet.plan_fee_request(&plan, &context, &snapshot).unwrap();
+    let request = wallet
+        .plan_fee_request(&plan, &contracts, &snapshot)
+        .unwrap();
     let key = wallet.descriptor_key(&descriptor);
     let program = Templates
         .compile(&descriptor, key.x_only_public_key().0)
@@ -153,10 +204,10 @@ pub(super) async fn check(client: &ClientHandle) {
     assert_eq!(request.input_fee.get_bitcoin(), fee);
     assert!(fee < fedimint_simplicity_common::runtime::input_fee(&raw).unwrap());
     assert_eq!(
-        wallet.quote_plan(&plan, &context).await.unwrap(),
+        wallet.quote_transaction(&plan).await.unwrap(),
         wallet.quote_fee_request(request).await.unwrap()
     );
-    let notes = super::intents::notes(client).await;
+    let notes = super::ecash::notes(client).await;
     let balance = client.get_balance_for_btc().await.unwrap();
     let history = wallet.history().await;
     let error = wallet
@@ -168,7 +219,7 @@ pub(super) async fn check(client: &ClientHandle) {
         "{error:#}"
     );
     assert_eq!(
-        super::intents::notes(client).await,
+        super::ecash::notes(client).await,
         notes,
         "finalization must return the identical ecash notes"
     );
@@ -183,7 +234,7 @@ pub(super) async fn check(client: &ClientHandle) {
     client.await_no_active_states(operation).await;
     // A custom handler returning a stale or oversized plan must stop for
     // attention, rather than spin forever before recording any attempt.
-    let notes = super::intents::notes(client).await;
+    let notes = super::ecash::notes(client).await;
     for (count, reason) in [(1u64, "no longer unspent"), (33, "too many pruning inputs")] {
         let id = wallet
             .submit_intent(
@@ -205,7 +256,22 @@ pub(super) async fn check(client: &ClientHandle) {
             "{record:?}"
         );
         assert!(record.attempts.is_empty());
-        assert_eq!(super::intents::notes(client).await, notes);
+        assert_eq!(super::ecash::notes(client).await, notes);
     }
     race::check(client).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn funding_sensitive_pruning_and_stale_plans_roll_back_real_ecash() {
+    let _ = fedimint_logging::TracingSetup::default().init();
+    tokio::time::timeout(Duration::from_secs(180), async {
+        let mut fed = Federation::new().await;
+        let client = join(ecash::builder, &fed, db(), 61, false, false).await;
+        ecash::funds(&client).await;
+        check(&client).await;
+        client.shutdown().await;
+        fed.completed = true;
+    })
+    .await
+    .unwrap();
 }

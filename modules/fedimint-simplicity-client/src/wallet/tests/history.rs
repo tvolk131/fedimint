@@ -302,10 +302,10 @@ async fn authentication_failure_keeps_recovery_pending_and_retryable() {
     assert_recovered(&store, &txs).await;
 }
 
-// Use the same position-bound public-order template as the recovery tests.
+// Use the same position-bound successor template as the lineage tests.
 #[tokio::test]
 async fn batch_watch_matches_sequential_imports_across_the_open_prefix() {
-    use crate::exchange::{OrderState, PartialLimitOrder};
+    use super::lineage::{AssignedTemplates, assigned_descriptor};
 
     let make_store = || async {
         WalletStore::open(
@@ -313,32 +313,31 @@ async fn batch_watch_matches_sequential_imports_across_the_open_prefix() {
             &root(),
             federation(),
             MODULE,
-            Arc::new(super::partial::PartialTemplates),
+            Arc::new(AssignedTemplates),
         )
         .await
         .unwrap()
     };
     let batch = make_store().await;
     let sequential = make_store().await;
-    let mut descriptor = ContractDescriptor::owner([51; 32]);
-    let order = PartialLimitOrder {
-        module: MODULE,
-        maker: batch.keys.signing_key(&descriptor).x_only_public_key().0,
-        asset: AssetId([5; 32]),
-        unit_price: Amount::from_msats(400),
-        buy: false,
-        close_block: 100,
-    };
-    descriptor.template = "partial".into();
-    descriptor.parameters = order.consensus_encode_to_vec();
-    let program = order.program().unwrap();
-    let output = |quantity| {
-        let (amount, bundle) = order.balances(OrderState::new(quantity)).unwrap();
+    let descriptor = assigned_descriptor(51);
+    let program = batch
+        .keys
+        .program(&descriptor, &AssignedTemplates)
+        .unwrap()
+        .1;
+    // Distinct amounts identify each lineage; the policy is identical.
+    let output = |msats| {
         program
-            .asset_output(amount, [0; 32], vec![], bundle)
+            .asset_output(
+                Amount::from_msats(msats),
+                [0; 32],
+                vec![],
+                AssetBundle::default(),
+            )
             .unwrap()
     };
-    let creation = tx(40, &[], vec![output(10), output(20)]);
+    let creation = tx(40, &[], vec![output(10_000), output(20_000)]);
     let origins = [
         point(&creation),
         OutPoint {
@@ -346,7 +345,7 @@ async fn batch_watch_matches_sequential_imports_across_the_open_prefix() {
             out_idx: 1,
         },
     ];
-    let mut fill = tx(41, &origins, vec![output(7), output(16)]);
+    let mut fill = tx(41, &origins, vec![output(7_000), output(16_000)]);
     fill.inputs
         .insert(0, DynInput::from_typed(1234, DynUnknown(vec![7])));
     let successors = [

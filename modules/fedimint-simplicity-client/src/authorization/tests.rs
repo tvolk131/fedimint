@@ -9,7 +9,7 @@ use crate::compiler::witnesses;
 #[test]
 fn finalization_checks_the_combined_resource_budget_before_submission() {
     let owner = Keypair::from_secret_key(SECP256K1, &SecretKey::from_slice(&[1; 32]).unwrap());
-    let program = crate::market::owner_program(owner.x_only_public_key().0).unwrap();
+    let program = crate::owner_program(owner.x_only_public_key().0).unwrap();
     let authorization = Authorization {
         federation: FederationId(Hash::all_zeros()),
         module: 4,

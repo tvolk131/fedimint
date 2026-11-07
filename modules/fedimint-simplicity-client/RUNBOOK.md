@@ -10,6 +10,13 @@ Track remaining release work and the scope of completed rehearsals in the
 [beta checklist](BETA-CHECKLIST.md). The [v0.13.0 port notes](RELEASE-v0.13.0.md)
 identify this branch's official baseline and compatibility boundaries.
 
+The default core wallet registers only the single-key owner template and no
+application intent handlers. Market/exchange/top-up implementations are separate
+reference consumers. Applications explicitly register their templates/handlers
+and bundle historical definitions in compatible wallet binaries. Keep the exact
+application revision with deployment records; recovery must not require fetching
+source or an external metadata backup.
+
 ## Build and identify the artifact
 
 Use one reviewed, clean Git commit on every guardian. Preserve its commit ID,
@@ -212,7 +219,8 @@ decrypted wallet material. Recovery does not recreate abandoned intents,
 original local operation IDs, local-only labels or watch-only subscriptions.
 Low-level program imports have no implicit recovery guarantee.
 
-For market wallets, calling `watch_market` alone is a local subscription.
+For application wallets, importing a public contract through the watch API alone
+is a local subscription.
 Participation can store its encrypted descriptor in federation history, but
 previously observed public predecessors from before that participation need
 not be reconstructed. Compare owned contracts and recoverable interactions,

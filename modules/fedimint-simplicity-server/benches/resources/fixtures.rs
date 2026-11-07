@@ -20,9 +20,9 @@ use fedimint_server_core::{
     DynServerModule, ModuleTransactionContext, ServerModule, ServerModuleRegistry,
     TransactionConsensusContext,
 };
-use fedimint_simplicity_client::compiler::{Value, ValueConstructible, arguments, witnesses};
+use fedimint_simplicity_client::compiler::{U256, Value, ValueConstructible, arguments, witnesses};
 use fedimint_simplicity_client::{
-    ContractProgram, assets, market, placeholder_signature, sign_transaction,
+    ContractProgram, assets, owner_program, placeholder_signature, sign_transaction,
 };
 use fedimint_simplicity_common::assets::{
     AssetActions, AssetAmount, AssetBundle, AssetExtension, AssetId, AssetRecord,
@@ -43,8 +43,6 @@ use simplicity::{BitWriter, ConstructNode, encode};
 
 #[path = "adversarial.rs"]
 pub mod adversarial;
-#[path = "pruning.rs"]
-mod pruning;
 #[path = "scale.rs"]
 pub mod scale;
 #[path = "storage.rs"]
@@ -55,9 +53,6 @@ const FUNDING_MODULE: u16 = 5;
 pub const EXECUTION_CASES: &[&str] = &[
     "unit_v1",
     "owner",
-    "market_issue",
-    "market_resolve",
-    "bad_oracle",
     "cost_near_limit",
     "signature_cost_near_limit",
     "wide_value",
@@ -67,8 +62,6 @@ pub const EXECUTION_CASES: &[&str] = &[
 pub const DECODE_CASES: &[&str] = &[
     "unit_v1",
     "owner",
-    "market_issue",
-    "market_resolve",
     "cost_near_limit",
     "signature_cost_near_limit",
     "wide_value",
@@ -85,9 +78,6 @@ pub const DECODE_CASES: &[&str] = &[
 pub const TRANSACTION_CASES: &[&str] = &[
     "unit_v1",
     "owner",
-    "market_issue",
-    "market_resolve",
-    "bad_oracle",
     "inputs_8",
     "inputs_32",
     "context_32",
@@ -424,7 +414,10 @@ fn hash_blocks(count: usize) -> Fixture {
         &format!("fn hash(block: (u256, u256), acc: u256) -> u256 {{ let (a, b): (u256, u256) = block; jet::sha_256_block(acc, a, b) }} fn main() {{ let hash: u256 = array_fold::<hash, {count}>(witness::DATA, jet::sha_256_iv()); }}"),
         arguments([]),
     ).expect("hash workload compiles");
-    let block = Value::tuple([market::word([0; 32]), market::word([0; 32])]);
+    let block = Value::tuple([
+        Value::u256(U256::from_byte_array([0; 32])),
+        Value::u256(U256::from_byte_array([0; 32])),
+    ]);
     let data = Value::array(vec![block.clone(); count], block.ty().clone());
     let satisfied = program
         .satisfy(witnesses([("DATA", data)]))
@@ -480,7 +473,6 @@ pub fn build(name: &str) -> Fixture {
     let mut fixture = match name {
         "owner" | "late_bad_signature" => owner(name == "late_bad_signature"),
         "creation_19" | "creation_20" => creation_case(if name == "creation_19" { 19 } else { 20 }),
-        "market_issue" | "market_resolve" | "bad_oracle" => market_case(name),
         "cost_near_limit" | "cost_32" | "cost_over_limit" => {
             // 3 * 2^14 unit executions fit near the cost cap; doubling does not.
             let mut fixture = encoded(
@@ -652,9 +644,6 @@ pub fn build(name: &str) -> Fixture {
         _ => {}
     }
     fixture.finish();
-    if matches!(name, "market_issue" | "market_resolve" | "bad_oracle") {
-        pruning::market(&mut fixture);
-    }
     fixture.preflight_error = match name {
         "cost_near_limit"
         | "cost_32"
@@ -723,7 +712,7 @@ fn record(id: AssetId) -> AssetRecord {
 }
 
 fn owner(late_failure: bool) -> Fixture {
-    let program = market::owner_program(key().x_only_public_key().0).expect("owner compiles");
+    let program = owner_program(key().x_only_public_key().0).expect("owner compiles");
     let input = program
         .input(
             point(0),
@@ -753,105 +742,6 @@ fn owner(late_failure: bool) -> Fixture {
             .expect("owner input");
     }
     if late_failure {
-        fixture.validation_error = Some(ContractError::Rejected);
-    }
-    fixture
-}
-
-fn market_case(name: &str) -> Fixture {
-    let yes = AssetId([1; 32]);
-    let no = AssetId([2; 32]);
-    let terms = market::BinaryMarket {
-        federation: federation(),
-        module: MODULE,
-        yes,
-        no,
-        event: [3; 32],
-        rules: [4; 32],
-        oracle: key().x_only_public_key().0,
-        // Fixtures execute at block 5: issuance must precede resolution.
-        resolution_start: if name == "market_issue" { 6 } else { 5 },
-        deadline: 10,
-    };
-    let program = terms.program().expect("market compiles");
-    let signature = SECP256K1.sign_schnorr_no_aux_rand(
-        &Message::from_digest(
-            terms
-                .attestation_message(if name == "bad_oracle" { 2 } else { 1 })
-                .expect("oracle message"),
-        ),
-        &key(),
-    );
-    let input = program
-        .input(
-            point(0),
-            key().public_key(),
-            witnesses([
-                (
-                    "ACTION",
-                    Value::u8(if name == "market_issue" { 0 } else { 2 }),
-                ),
-                ("OUTCOME", Value::u8(1)),
-                ("ORACLE_SIGNATURE", Value::byte_array(*signature.as_ref())),
-            ]),
-        )
-        .expect("market input");
-    let mut fixture = empty(input.program, input.witness, program.cmr());
-    fixture.consumed[0].extension = Some(AssetExtension::Bundle(AssetBundle {
-        balances: vec![],
-        authorities: vec![yes, no],
-    }));
-    fixture
-        .records
-        .extend([(yes, record(yes)), (no, record(no))]);
-    let mut successor = fixture.consumed[0].clone();
-    if name == "market_issue" {
-        successor.amount += Amount::from_msats(1000);
-    } else {
-        successor.state = market::state(1).expect("YES state");
-    }
-    fixture
-        .transaction
-        .outputs
-        .push(DynOutput::from_typed(MODULE, successor));
-    if name == "market_issue" {
-        let balances = vec![
-            AssetAmount {
-                asset: yes,
-                quantity: 1,
-            },
-            AssetAmount {
-                asset: no,
-                quantity: 1,
-            },
-        ];
-        let holding = market::owner_program(key().x_only_public_key().0)
-            .expect("owner compiles")
-            .asset_output(
-                Amount::ZERO,
-                [0; 32],
-                vec![],
-                AssetBundle {
-                    balances: balances.clone(),
-                    authorities: vec![],
-                },
-            )
-            .expect("holding");
-        fixture
-            .transaction
-            .outputs
-            .push(DynOutput::from_typed(MODULE, holding));
-        fixture.transaction.outputs.push(DynOutput::from_typed(
-            MODULE,
-            assets::action_output(AssetActions {
-                issuance: balances,
-                ..Default::default()
-            })
-            .expect("actions"),
-        ));
-    }
-    if name == "bad_oracle" {
-        fixture.execution_error = Some(ContractError::Rejected);
         fixture.validation_error = Some(ContractError::Rejected);
     }
     fixture

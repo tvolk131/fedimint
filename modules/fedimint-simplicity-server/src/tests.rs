@@ -33,7 +33,7 @@ use fedimint_server_core::{
 };
 use fedimint_simplicity_client::compiler::{U256, Value, ValueConstructible, arguments, witnesses};
 use fedimint_simplicity_client::{
-    ContractProgram, TOP_UP_OR_RELEASE, placeholder_signature, sign_transaction, signature_value,
+    ContractProgram, owner_program, placeholder_signature, sign_transaction, signature_value,
 };
 use fedimint_simplicity_common::{
     ContractError, ContractInput, MAX_PROGRAM_BYTES, MAX_RECOVERY_BYTES, MAX_WITNESS_BYTES,
@@ -46,6 +46,16 @@ use super::db::{ContractKey, StoredContract};
 const SIMP: u16 = 4;
 const MINT: u16 = 5;
 const DUMMY: u16 = 6;
+
+/// A test-only owner-authorized policy with consensus clocks and a branch that
+/// preserves its policy and state while adding collateral. It stands in for an
+/// application policy; the application's own template is tested with the
+/// application.
+const ORIGINAL_POLICY: &str = include_str!("tests/fixtures/top_up_or_release.simf");
+
+fn word(bytes: [u8; 32]) -> Value {
+    Value::u256(U256::from_byte_array(bytes))
+}
 
 fn key() -> Keypair {
     Keypair::new(SECP256K1, &mut rand::thread_rng())
@@ -64,14 +74,9 @@ fn transaction(inputs: Vec<DynInput>, outputs: Vec<DynOutput>) -> Transaction {
 
 fn contract_program(owner: &Keypair, session: u64, block_count: u64) -> ContractProgram {
     ContractProgram::compile(
-        TOP_UP_OR_RELEASE,
+        ORIGINAL_POLICY,
         arguments([
-            (
-                "OWNER",
-                Value::u256(U256::from_byte_array(
-                    owner.x_only_public_key().0.serialize(),
-                )),
-            ),
+            ("OWNER", word(owner.x_only_public_key().0.serialize())),
             ("MIN_SESSION", Value::u64(session)),
             ("MIN_BLOCK_COUNT", Value::u64(block_count)),
         ]),
@@ -725,12 +730,17 @@ async fn invalid_outputs_and_duplicate_spends_roll_back() {
         txid: funding.tx_hash(),
         out_idx: 0,
     };
-    for change in 0..3 {
+    for change in 0..4 {
         let mut invalid = output.clone();
         match change {
             0 => invalid.version += 1,
             1 => invalid.recovery.push(0),
-            _ => invalid.amount = Amount::from_msats(u64::MAX),
+            2 => invalid.amount = Amount::from_msats(u64::MAX),
+            // A pre-asset output has no execution version this module accepts.
+            _ => {
+                invalid.version = 0;
+                invalid.extension = None;
+            }
         }
         let mut tx = draft_spend(
             &program,
@@ -744,7 +754,7 @@ async fn invalid_outputs_and_duplicate_spends_roll_back() {
         let Some(TransactionError::Input(error)) = error.downcast_ref::<TransactionError>() else {
             panic!("expected a structural preflight error: {error:#}");
         };
-        let expected = if change == 0 {
+        let expected = if matches!(change, 0 | 3) {
             ContractError::Version
         } else {
             ContractError::Limit

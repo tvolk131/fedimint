@@ -10,12 +10,11 @@ use fedimint_core::core::{DynInputError, DynOutputError, ModuleInstanceId};
 use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::module::{Amounts, InputMeta, TransactionItemAmounts};
-use fedimint_core::secp256k1::{Message, SECP256K1};
 use fedimint_core::transaction::{Transaction, TransactionError};
 use fedimint_core::{Amount, OutPoint, TransactionId};
 use fedimint_server_core::ModuleTransactionContext;
-use fedimint_simplicity_common::assets::accounting::balances;
-use fedimint_simplicity_common::assets::{AssetActions, AssetId, AssetRecord, asset_id, namespace};
+use fedimint_simplicity_common::assets::accounting::{balances, check_creation};
+use fedimint_simplicity_common::assets::{AssetActions, AssetId, AssetRecord, namespace};
 use fedimint_simplicity_common::resources::check_output;
 use fedimint_simplicity_common::runtime::{
     Environment, EnvironmentInput, EnvironmentOutput, execute_decoded,
@@ -250,57 +249,44 @@ async fn validate_assets(
         {
             return Err(ContractError::NamespaceUsed);
         }
-        let message = Message::from_digest(hashes.intent()?);
-        SECP256K1
-            .verify_schnorr(
-                &creation.signature,
-                &message,
-                &creation.key.x_only_public_key().0,
-            )
-            .map_err(|_| ContractError::CreationSignature)?;
-        for (ordinal, output_index) in creation.authority_outputs.iter().enumerate() {
-            let id = asset_id(
-                hashes.federation_id,
-                hashes.module_id,
-                creation.key,
-                ordinal as u32,
-            );
-            let output = outputs
-                .get(*output_index as usize)
-                .and_then(|output| output.contract.as_ref())
-                .ok_or(ContractError::Assets)?;
-            if !output
-                .bundle()
-                .is_some_and(|bundle| bundle.authorities.contains(&id))
-                || creations.contains_key(&id)
-                || dbtx.get_value(&AssetKey(id)).await.is_some()
+        let authorities = check_creation(
+            hashes.federation_id,
+            hashes.module_id,
+            creation,
+            hashes.intent()?,
+            |index| {
+                outputs
+                    .get(index as usize)
+                    .and_then(|output| output.contract.as_ref())
+            },
+        )?;
+        for authority in authorities {
+            if creations.contains_key(&authority.id)
+                || dbtx.get_value(&AssetKey(authority.id)).await.is_some()
             {
                 return Err(ContractError::Assets);
             }
             creations.insert(
-                id,
+                authority.id,
                 AssetRecord {
                     creation_key: creation.key,
-                    ordinal: ordinal as u32,
+                    ordinal: authority.ordinal,
                     authority_outpoint: OutPoint {
                         txid: hashes.txid(),
-                        out_idx: u64::from(*output_index),
+                        out_idx: u64::from(authority.output_index),
                     },
-                    authority_cmr: output.cmr,
-                    authority_state: output.state,
+                    authority_cmr: authority.output.cmr,
+                    authority_state: authority.output.state,
                 },
             );
         }
     }
     for (id, balance) in balances {
-        if creations.contains_key(&id) {
-            balance.check_genesis()?;
-        } else {
-            if dbtx.get_value(&AssetKey(id)).await.is_none() {
-                return Err(ContractError::Assets);
-            }
-            balance.check_existing()?;
+        let created = creations.contains_key(&id);
+        if !created && dbtx.get_value(&AssetKey(id)).await.is_none() {
+            return Err(ContractError::Assets);
         }
+        balance.check(created)?;
     }
 
     Ok((

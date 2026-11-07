@@ -30,13 +30,10 @@ async fn spends_and_creation_signatures_share_one_intent_and_preserve_per_input_
             arguments([
                 ("INDEX", Value::u32(index as u32)),
                 ("AMOUNT", Value::u64(amount.msats)),
-                ("STATE", market::word(state)),
+                ("STATE", word(state)),
                 ("SESSION", Value::u64(session)),
                 ("BLOCKS", Value::u64(blocks)),
-                (
-                    "OWNER",
-                    market::word(owner.x_only_public_key().0.serialize()),
-                ),
+                ("OWNER", word(owner.x_only_public_key().0.serialize())),
             ]),
         )
         .unwrap();

@@ -1,15 +1,16 @@
-//! Read-only quotes for complete spending plans; finalization checks fees
+//! Read-only quotes for complete transaction plans; finalization checks fees
 //! again.
-use anyhow::{Context as _, ensure};
-use fedimint_client_module::transaction::FeeQuoteRequest;
-use fedimint_core::Amount;
-use fedimint_core::core::{DynInput, DynOutput, OperationId};
-use fedimint_core::module::{AmountUnit, Amounts};
-use fedimint_core::transaction::{Transaction, TransactionSignature};
+use std::collections::BTreeMap;
 
-use crate::compiler::{TemplateProgramWitness, WitnessNameToValueMap, WitnessValues};
-use crate::intent::{IntentContext, IntentPlan};
-use crate::{LOG_CLIENT_SIMPLICITY_TIMING, SimplicityClientModule, common};
+use fedimint_client_module::transaction::FeeQuoteRequest;
+use fedimint_core::core::OperationId;
+use fedimint_core::db::IDatabaseTransactionOpsCoreTyped as _;
+use fedimint_core::module::AmountUnit;
+use fedimint_core::{Amount, OutPoint};
+
+use crate::pruning::PruningSnapshot;
+use crate::wallet::{WalletContract, db};
+use crate::{LOG_CLIENT_SIMPLICITY_TIMING, SimplicityClientModule, TransactionPlan};
 
 impl SimplicityClientModule {
     pub async fn consensus_block_count(&self) -> anyhow::Result<u64> {
@@ -24,154 +25,70 @@ impl SimplicityClientModule {
             .await?)
     }
 
-    /// Calculate explicit amounts/fees and enforce consensus resource bounds.
-    /// Includes an automatic sender receipt when input/output annotations do
-    /// not establish mnemonic recoverability, just like submission.
-    pub fn plan_fee_request(
+    /// Authenticated wallet records for `points`, read in one database view.
+    /// Unknown outpoints are omitted; preparation reports them. Use this to
+    /// build the `contracts` argument of [`Self::plan_fee_request`].
+    pub async fn contracts_for(
         &self,
-        plan: &IntentPlan,
-        context: &IntentContext,
-        snapshot: &crate::pruning::PruningSnapshot,
-    ) -> anyhow::Result<FeeQuoteRequest> {
-        ensure!(
-            !plan.spends.is_empty(),
-            "fee quote requires a spending plan"
-        );
-        let mut input_amount = 0u64;
-        let mut input_fee = 0u64;
-        let mut inputs = vec![];
-        let mut prepared = vec![];
-        let mut recoverable = false;
-        for spend in &plan.spends {
-            let contract = context
-                .contracts
-                .get(&spend.outpoint)
-                .context("unknown quote input")?;
-            ensure!(contract.spent_by.is_none(), "quote input is spent");
-            recoverable |= self.store.has_recovery_descriptor(&contract.output)?;
-            let (version, program) = self
-                .store
-                .keys
-                .program(&contract.descriptor, self.store.templates.as_ref())?;
-            let mut witnesses = spend.witnesses.as_inner().as_ref().clone();
-            if let Some(name) = &spend.signature_witness {
-                witnesses.insert(
-                    TemplateProgramWitness::witness_from_str(name.as_str()),
-                    crate::placeholder_signature(),
-                );
+        points: impl IntoIterator<Item = OutPoint>,
+    ) -> BTreeMap<OutPoint, WalletContract> {
+        let mut view = self.store.db.begin_transaction_nc().await;
+        let mut contracts = BTreeMap::new();
+        for point in points {
+            if let Some(contract) = view.get_value(&db::ContractKey(point)).await {
+                contracts.insert(point, contract);
             }
-            let input = program.input(
-                spend.outpoint,
-                self.descriptor_key(&contract.descriptor).public_key(),
-                WitnessValues::from_map(witnesses),
-            )?;
-            input_amount = input_amount
-                .checked_add(contract.output.amount.msats)
-                .context("quote amount overflow")?;
-            let observed = snapshot
-                .contracts
-                .get(&spend.outpoint)
-                .context("missing pruning input context")?;
-            ensure!(
-                observed.output == contract.output
-                    && observed.creation_session == contract.creation_session,
-                "pruning context differs from authenticated wallet history"
-            );
-            prepared.push(crate::authorization::PreparedSpend {
-                outpoint: spend.outpoint,
-                version,
-                program,
-                key: self.descriptor_key(&contract.descriptor),
-                witnesses: spend.witnesses.clone(),
-                signature_witness: spend.signature_witness.clone(),
-            });
-            inputs.push(DynInput::from_typed(self.store.module, input));
         }
-        let mut output_amount = 0u64;
-        let mut output_fee = 0u64;
-        let mut outputs = plan.outputs.clone();
-        let receipt = self
-            .store
-            .prepare_receipt(recoverable, &mut outputs, None)?;
-        for output in &outputs {
-            output_amount = output_amount
-                .checked_add(output.amount.msats)
-                .context("quote amount overflow")?;
-            output_fee = output_fee
-                .checked_add(common::output_fee(output).msats)
-                .context("quote fee overflow")?;
-        }
-        let mut draft = Transaction {
-            inputs,
-            outputs: outputs
-                .into_iter()
-                .map(|output| DynOutput::from_typed(self.store.module, output))
-                .collect(),
-            nonce: [0; 8],
-            signatures: TransactionSignature::NaiveMultisig(vec![]),
-        };
-        let authorization = crate::authorization::Authorization {
-            federation: self.store.federation,
-            module: self.store.module,
-            spends: prepared,
-            creations: vec![],
-            receipt,
-            max_fee: None,
-            snapshot: snapshot.clone(),
-        };
-        for (index, input) in authorization.pruned_inputs(&draft)? {
-            input_fee = input_fee
-                .checked_add(
-                    common::runtime::input_fee(
-                        input
-                            .as_any()
-                            .downcast_ref::<common::ContractInput>()
-                            .expect("authorization returns Simplicity inputs"),
-                    )?
-                    .msats,
-                )
-                .context("quote fee overflow")?;
-            draft.inputs[index] = input;
-        }
-        output_amount
-            .checked_add(input_fee)
-            .and_then(|value| value.checked_add(output_fee))
-            .context("quote funding overflow")?;
-        common::resources::check_transaction(&draft)?;
-        Ok(FeeQuoteRequest {
-            input_amount: Amounts::new_bitcoin(Amount::from_msats(input_amount)),
-            output_amount: Amounts::new_bitcoin(Amount::from_msats(output_amount)),
-            input_fee: Amounts::new_bitcoin(Amount::from_msats(input_fee)),
-            output_fee: Amounts::new_bitcoin(Amount::from_msats(output_fee)),
-        })
+        contracts
     }
 
-    /// Use the core client's exact primary-module funding/change dry run. This
-    /// reserves nothing; note inventory may change before actual submission.
-    pub async fn quote_plan(
+    /// Calculate explicit amounts/fees and enforce consensus resource bounds,
+    /// offline. This prepares exactly what submission does for the same plan:
+    /// it compiles descriptors, applies draft witnesses, compares each wallet
+    /// record with the federation snapshot, prunes, and adds the sender receipt
+    /// output when needed. Output-only plans are supported. The request
+    /// describes a quote only: it reserves no notes and authorizes no spend.
+    pub fn plan_fee_request(
         &self,
-        plan: &IntentPlan,
-        context: &IntentContext,
-    ) -> anyhow::Result<Amount> {
+        plan: &TransactionPlan,
+        contracts: &BTreeMap<OutPoint, WalletContract>,
+        snapshot: &PruningSnapshot,
+    ) -> anyhow::Result<FeeQuoteRequest> {
+        self.store
+            .prepare_transaction(plan, contracts, snapshot)?
+            .fee_request()
+    }
+
+    /// Use the core client's exact primary-module funding/change dry run on the
+    /// current wallet records and a fresh pruning snapshot. This reserves
+    /// nothing; note inventory may change before actual submission. A plan's
+    /// `max_fee` is checked with the same boundary as finalization.
+    pub async fn quote_transaction(&self, plan: &TransactionPlan) -> anyhow::Result<Amount> {
         let started = fedimint_core::time::now();
         let snapshot = self
             .pruning_snapshot(plan.spends.iter().map(|spend| spend.outpoint))
             .await?;
-        let request = self.plan_fee_request(plan, context, &snapshot)?;
+        let contracts = self
+            .contracts_for(plan.spends.iter().map(|spend| spend.outpoint))
+            .await;
+        let request = self.plan_fee_request(plan, &contracts, &snapshot)?;
         tracing::debug!(
             target: LOG_CLIENT_SIMPLICITY_TIMING,
-            operation = "quote_plan", stage = "explicit_fee",
+            operation = "quote_transaction", stage = "explicit_fee",
             elapsed_us = started.elapsed().unwrap_or_default().as_micros() as u64,
             "stage complete"
         );
-        self.quote_fee_request(request).await
+        let fee = self.quote_fee_request(request).await?;
+        plan.check_fee_ceiling(fee)?;
+        Ok(fee)
     }
 
     /// Quote total fees from an already calculated request. Route planners can
     /// inspect the result of `plan_fee_request` before this funding dry run
     /// without preparing and decoding every input a second time. The request
     /// describes a quote only: it reserves no notes and authorizes no spend.
-    /// Submission still constructs and validates the actual transaction.
+    /// Submission still constructs and validates the actual transaction; apply
+    /// [`TransactionPlan::check_fee_ceiling`] to compare with a plan's ceiling.
     pub async fn quote_fee_request(&self, request: FeeQuoteRequest) -> anyhow::Result<Amount> {
         let started = fedimint_core::time::now();
         let quote = self

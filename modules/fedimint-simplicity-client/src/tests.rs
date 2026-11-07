@@ -1,17 +1,19 @@
+pub(crate) mod support;
 mod template_vectors;
 
 use bitcoin::hashes::{Hash, sha256};
 use fedimint_core::config::FederationId;
 use fedimint_core::secp256k1::{Keypair, SECP256K1, SecretKey};
 use fedimint_core::{Amount, OutPoint, TransactionId};
+use support::owner_program;
 
+use crate::assets;
 use crate::common::assets::{AssetAmount, AssetBundle, AssetId};
-use crate::{assets, market};
 
 #[test]
 fn selection_preserves_other_assets_and_excludes_issuance_authorities() {
     let owner = Keypair::from_secret_key(SECP256K1, &SecretKey::from_slice(&[1; 32]).unwrap());
-    let program = market::owner_program(owner.x_only_public_key().0).unwrap();
+    let program = owner_program(owner.x_only_public_key().0).unwrap();
     let yes = AssetId([1; 32]);
     let no = AssetId([2; 32]);
     let balance = |asset, quantity| AssetAmount { asset, quantity };
@@ -82,7 +84,7 @@ fn creation_signatures_compose_across_instances_in_either_order() {
     use crate::common::assets::{AssetActions, AssetExtension, signature_hash};
     let key = Keypair::from_secret_key(SECP256K1, &SecretKey::from_slice(&[3; 32]).unwrap());
     let federation = FederationId(sha256::Hash::hash(b"composable-creation"));
-    let program = market::owner_program(key.x_only_public_key().0).unwrap();
+    let program = owner_program(key.x_only_public_key().0).unwrap();
     let mut outputs = vec![];
     for (index, module) in [4, 5].into_iter().enumerate() {
         let (creation, ids) =

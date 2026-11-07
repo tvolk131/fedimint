@@ -7,8 +7,8 @@ pub mod status;
 pub use client::{SimplicityClientInit, SimplicityClientModule, SpendIntent};
 pub mod assets;
 pub mod descriptor;
-pub mod exchange;
-pub mod market;
+mod owner;
+pub use owner::owner_program;
 pub mod receipt;
 pub mod wallet;
 mod watch;
@@ -26,10 +26,6 @@ use fedimint_core::secp256k1::{Keypair, Message, PublicKey, SECP256K1};
 use fedimint_core::transaction::{Transaction, TransactionSignature};
 use fedimint_core::{Amount, OutPoint};
 pub use fedimint_simplicity_common as common;
-
-/// Example contract: an owner authorizes every transition, with consensus
-/// timelocks and a branch preserving the policy/state while adding collateral.
-pub const TOP_UP_OR_RELEASE: &str = include_str!("../contracts/top_up_or_release.simf");
 
 #[derive(Debug, Clone)]
 pub struct ContractProgram(CompiledProgram);
@@ -147,8 +143,10 @@ pub fn sign_transaction(transaction: &mut Transaction, keys: &[Keypair]) -> anyh
 pub mod intent;
 
 pub mod preflight;
+mod preparation;
 pub mod pruning;
 mod quote;
+pub use preparation::TransactionPlan;
 
 const LOG_CLIENT_SIMPLICITY: &str = "fm::client::module::simplicity";
 const LOG_CLIENT_SIMPLICITY_SYNC: &str = "fm::client::module::simplicity::sync";
