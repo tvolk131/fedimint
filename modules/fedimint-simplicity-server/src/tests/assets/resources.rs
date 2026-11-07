@@ -61,12 +61,12 @@ async fn shared_cost_budget_accepts_exact_boundary_and_rejects_before_execution(
             DynOutput::from_typed(
                 if index == 0 { SIMP } else { OTHER },
                 ContractOutput {
-                    version: u32::from(index != 0),
+                    version: fedimint_simplicity_common::EXECUTION_VERSION,
                     amount: Amount::from_sats(100),
                     cmr: decoded.cmr().to_byte_array(),
                     state: [0; 32],
                     recovery: vec![],
-                    extension: (index != 0).then(|| AssetExtension::Bundle(AssetBundle::default())),
+                    extension: Some(AssetExtension::Bundle(AssetBundle::default())),
                 },
             )
         })

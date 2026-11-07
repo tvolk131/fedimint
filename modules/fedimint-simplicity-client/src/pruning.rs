@@ -98,14 +98,12 @@ impl PruningSnapshot {
                 contract,
             });
         }
+        ensure!(
+            stored.output.version == common::EXECUTION_VERSION,
+            "unsupported execution version"
+        );
         Ok(Environment {
-            signature_hash: match stored.output.version {
-                common::EXECUTION_VERSION => common::signature_hash(federation, module, tx)?,
-                common::assets::ASSET_VERSION => {
-                    common::assets::signature_hash_v1(federation, module, tx)?
-                }
-                _ => anyhow::bail!("unsupported execution version"),
-            },
+            signature_hash: common::signature_hash(federation, module, tx)?,
             session_index: self.session_index,
             block_count: self.block_count,
             current: stored.output.clone(),

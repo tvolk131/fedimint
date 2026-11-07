@@ -200,7 +200,7 @@ after authorization. Guardians interpret none of the receipt plaintext and
 retain only the ordinary transaction history, with no receipt UTXO or index.
 
 
-Execution version one adds public assets with guardian-enforced conservation and
+Execution version one is the sole beta baseline, with public assets, guardian-enforced conservation and
 unique issuance capabilities. Creation starts at zero supply; first issuance must
 execute the authority contract. Fresh client creation keys authenticate immutable
 asset origins but have no continuing issuance power. Namespace-use markers and

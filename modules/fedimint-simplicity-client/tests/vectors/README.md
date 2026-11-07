@@ -23,6 +23,11 @@ The predeployment beta.1 market/AMM reset documented in the
 exception: those prototypes are disposable test state, not the compatibility
 baseline for the fresh v0.13.0 deployment. That exception does not authorize
 replacing a deployed template or silently abandoning its recovery support.
+The fresh v0.13.0 execution-v1 reset also changes the undeployed
+`top-up-or-release/v1` execution identifier from 0 to 1 while preserving its CMR.
+Native outputs now carry empty asset bundles and use the v1 signing intent.
+No deployed wallet state is migrated.
+
 Freeze these vectors with the first deployed candidate; subsequent compatible
 releases must retain its template versions.
 

@@ -111,26 +111,34 @@ fn action_shape_and_creation_destinations_precede_decoding() {
     ];
     assert_eq!(check_transaction(&tx), Err(ContractError::Program));
 
-    // Out-of-range, foreign-instance, v0 and action-output destinations fail.
-    for destination in [
-        None,
-        Some(DynOutput::from_typed(7, bundle())),
-        Some(DynOutput::from_typed(
-            4,
-            ContractOutput {
-                version: 0,
-                extension: None,
-                ..bundle()
-            },
-        )),
-        Some(DynOutput::from_typed(
-            4,
-            ContractOutput::action_output(AssetActions::default()),
-        )),
+    for (destination, expected) in [
+        (None, ContractError::Assets),
+        (
+            Some(DynOutput::from_typed(7, bundle())),
+            ContractError::Assets,
+        ),
+        (
+            Some(DynOutput::from_typed(
+                4,
+                ContractOutput {
+                    version: 0,
+                    extension: None,
+                    ..bundle()
+                },
+            )),
+            ContractError::Version,
+        ),
+        (
+            Some(DynOutput::from_typed(
+                4,
+                ContractOutput::action_output(AssetActions::default()),
+            )),
+            ContractError::Assets,
+        ),
     ] {
         tx.outputs = vec![DynOutput::from_typed(4, action.clone())];
         tx.outputs.extend(destination);
-        assert_eq!(check_transaction(&tx), Err(ContractError::Assets));
+        assert_eq!(check_transaction(&tx), Err(expected));
     }
     let mut multiple = creations(1, 1);
     let Some(AssetExtension::Actions(actions)) = &mut multiple.extension else {

@@ -1,5 +1,5 @@
 //! Experimental, explicit Bitcoin contract outputs controlled by Simplicity.
-//! Execution version zero is a prototype, not a production consensus format.
+//! Execution version one is the fresh-federation beta baseline.
 
 pub mod assets;
 #[cfg(feature = "compiler")]
@@ -10,18 +10,17 @@ pub mod jet;
 pub mod resources;
 pub mod runtime;
 
+pub use assets::signature_hash;
+
 #[cfg(test)]
 mod tests;
 
 use std::fmt;
 
-use bitcoin::hashes::{Hash, sha256};
-use fedimint_core::config::FederationId;
 use fedimint_core::core::{Decoder, ModuleInstanceId, ModuleKind};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::{CommonModuleInit, ModuleCommon, ModuleConsensusVersion};
 use fedimint_core::secp256k1::PublicKey;
-use fedimint_core::transaction::Transaction;
 use fedimint_core::{Amount, OutPoint, plugin_types_trait_impl_common};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -30,13 +29,13 @@ pub const KIND: ModuleKind = ModuleKind::from_static_str("simplicity");
 /// Immutable configuration baseline for the extensible consensus-item format.
 /// Future activations must keep accepting configurations with this version.
 pub const MODULE_CONSENSUS_VERSION: ModuleConsensusVersion = ModuleConsensusVersion::new(0, 1);
-pub const EXECUTION_VERSION: u32 = 0;
+pub const EXECUTION_VERSION: u32 = 1;
 pub const MAX_CONTRACTS: usize = 32;
 pub const MAX_PROGRAM_BYTES: usize = 8_192;
 pub const MAX_WITNESS_BYTES: usize = 8_192;
 pub const MAX_RECOVERY_BYTES: usize = 1_024;
 
-/// Bitcoin amounts remain millisatoshis; v1 adds explicit asset extensions.
+/// Bitcoin amounts remain millisatoshis; assets use an explicit extension.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ContractOutput {
     pub version: u32,
@@ -156,48 +155,6 @@ display_type!(
     config::SimplicityClientConfig
 );
 
-/// Signs all spends of this module instance and every enclosing output. Program
-/// witnesses and outer signatures are excluded to avoid signature circularity.
-/// Foreign funding inputs may be supplied by a sponsor. The claim keys are
-/// bound here so a sponsor cannot redirect the approved transaction.
-pub fn signature_hash(
-    federation_id: FederationId,
-    module_id: ModuleInstanceId,
-    transaction: &Transaction,
-) -> Result<[u8; 32], ContractError> {
-    let mut engine = sha256::Hash::engine();
-    let spends = transaction
-        .inputs
-        .iter()
-        .filter(|input| input.module_instance_id() == module_id)
-        .map(|input| {
-            input
-                .as_any()
-                .downcast_ref::<ContractInput>()
-                .map(|input| (input.outpoint, input.claim_key))
-                .ok_or(ContractError::Context)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if spends.len() > MAX_CONTRACTS {
-        return Err(ContractError::Limit);
-    }
-    (
-        "fedimint/simplicity/intent/v0".to_owned(),
-        federation_id,
-        module_id,
-        EXECUTION_VERSION,
-        spends,
-        transaction.nonce,
-    )
-        .consensus_encode(&mut engine)
-        .expect("hash engines accept all bytes");
-    transaction
-        .outputs
-        .consensus_encode(&mut engine)
-        .expect("hash engines accept all bytes");
-    Ok(sha256::Hash::from_engine(engine).to_byte_array())
-}
-
 pub fn output_fee(output: &ContractOutput) -> Amount {
     let extra = output
         .extension
@@ -218,9 +175,6 @@ pub fn output_fee(output: &ContractOutput) -> Amount {
     Amount::from_msats(100 + output.recovery.len() as u64 + extra + creation)
 }
 
-// Preserve the exact v0 wire/database encoding. New fields are present only in
-// version one, and unknown versions fail decoding rather than being
-// reinterpreted.
 impl Encodable for ContractOutput {
     fn consensus_encode<W: std::io::Write>(&self, writer: &mut W) -> Result<(), std::io::Error> {
         (
@@ -231,9 +185,7 @@ impl Encodable for ContractOutput {
             &self.recovery,
         )
             .consensus_encode(writer)?;
-        if self.version == assets::ASSET_VERSION {
-            self.extension.consensus_encode(writer)?;
-        }
+        self.extension.consensus_encode(writer)?;
         Ok(())
     }
 }
@@ -245,16 +197,12 @@ impl Decodable for ContractOutput {
     ) -> Result<Self, fedimint_core::encoding::DecodeError> {
         let (version, amount, cmr, state, recovery) =
             Decodable::consensus_decode_partial_from_finite_reader(reader, modules)?;
-        if version != EXECUTION_VERSION && version != assets::ASSET_VERSION {
+        if version != EXECUTION_VERSION {
             return Err(fedimint_core::encoding::DecodeError::from_str(
                 "unknown Simplicity output version",
             ));
         }
-        let extension = if version == assets::ASSET_VERSION {
-            Decodable::consensus_decode_partial_from_finite_reader(reader, modules)?
-        } else {
-            None
-        };
+        let extension = Decodable::consensus_decode_partial_from_finite_reader(reader, modules)?;
         Ok(Self {
             version,
             amount,

@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use anyhow::ensure;
 use common::assets::{
-    ASSET_VERSION, AssetActions, AssetAmount, AssetBundle, AssetCreation, AssetExtension, AssetId,
-    asset_id, signature_hash_v1, validate_amounts,
+    AssetActions, AssetAmount, AssetBundle, AssetCreation, AssetExtension, AssetId, asset_id,
+    signature_hash, validate_amounts,
 };
 use fedimint_core::config::FederationId;
 use fedimint_core::core::{DynOutput, ModuleInstanceId};
@@ -14,7 +14,7 @@ use fedimint_core::secp256k1::{Keypair, Message, SECP256K1};
 use fedimint_core::transaction::Transaction;
 use fedimint_core::{Amount, OutPoint};
 
-use crate::compiler::{Value, ValueConstructible};
+pub use crate::signature_value;
 use crate::{ContractProgram, common};
 
 impl ContractProgram {
@@ -34,7 +34,6 @@ impl ContractProgram {
             "invalid authority collection"
         );
         let mut output = self.output(bitcoin, state, recovery)?;
-        output.version = ASSET_VERSION;
         output.extension = Some(AssetExtension::Bundle(bundle));
         Ok(output)
     }
@@ -73,15 +72,15 @@ pub fn action_output(mut actions: AssetActions) -> anyhow::Result<common::Contra
     Ok(common::ContractOutput::action_output(actions))
 }
 
-/// Sign creation intents before computing any v0 program signatures or outer
-/// transaction signatures. All creation signatures are excluded from v1 intent.
+/// Set creation signatures before applying outer transaction signatures.
+/// Creation signatures are excluded from the inner intent.
 pub fn sign_creation(
     tx: &mut Transaction,
     federation: FederationId,
     module: ModuleInstanceId,
     key: &Keypair,
 ) -> anyhow::Result<()> {
-    let message = Message::from_digest(signature_hash_v1(federation, module, tx)?);
+    let message = Message::from_digest(signature_hash(federation, module, tx)?);
     let signature = SECP256K1.sign_schnorr_no_aux_rand(&message, key);
     let mut found = 0;
     for output in &mut tx.outputs {
@@ -105,18 +104,6 @@ pub fn sign_creation(
     }
     ensure!(found == 1, "expected exactly one creation for this key");
     Ok(())
-}
-
-pub fn signature_value(
-    federation: FederationId,
-    module: ModuleInstanceId,
-    tx: &Transaction,
-    key: &Keypair,
-) -> anyhow::Result<Value> {
-    let message = Message::from_digest(signature_hash_v1(federation, module, tx)?);
-    Ok(Value::byte_array(
-        *SECP256K1.sign_schnorr_no_aux_rand(&message, key).as_ref(),
-    ))
 }
 
 /// Select ordinary asset outputs deterministically, leaving authority-bearing

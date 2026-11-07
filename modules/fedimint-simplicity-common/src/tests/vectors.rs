@@ -1,4 +1,4 @@
-//! Fixed values from tests/vectors/reference.py; no runtime regeneration.
+//! Fixed values from examples/consensus_reference.rs; no runtime regeneration.
 #[cfg(feature = "compiler")]
 mod contract_outputs;
 mod execution;
@@ -49,20 +49,19 @@ fn input() -> ContractInput {
     }
 }
 
-fn legacy() -> ContractOutput {
+fn native() -> ContractOutput {
     ContractOutput {
-        version: 0,
+        version: crate::EXECUTION_VERSION,
         amount: Amount::from_msats(1000),
         cmr: [0x11; 32],
         state: [0x22; 32],
         recovery: vec![0xde, 0xad],
-        extension: None,
+        extension: Some(AssetExtension::Bundle(AssetBundle::default())),
     }
 }
 
 fn asset() -> ContractOutput {
-    let mut output = legacy();
-    output.version = 1;
+    let mut output = native();
     output.amount = Amount::from_msats(65536);
     output.extension = Some(AssetExtension::Bundle(AssetBundle {
         balances: vec![
@@ -107,7 +106,7 @@ fn environment() -> Environment {
             },
             EnvironmentInput {
                 outpoint: input().outpoint,
-                contract: legacy(),
+                contract: native(),
             },
         ]
         .into(),
@@ -134,7 +133,7 @@ fn environment() -> Environment {
             EnvironmentOutput {
                 module_id: 4,
                 hash: [0xcc; 32],
-                contract: Some(legacy()),
+                contract: Some(native()),
             },
             EnvironmentOutput {
                 module_id: 4,

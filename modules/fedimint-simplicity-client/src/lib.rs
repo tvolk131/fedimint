@@ -61,7 +61,9 @@ impl ContractProgram {
             cmr: self.cmr(),
             state,
             recovery,
-            extension: None,
+            extension: Some(common::assets::AssetExtension::Bundle(
+                common::assets::AssetBundle::default(),
+            )),
         })
     }
 

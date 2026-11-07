@@ -206,19 +206,10 @@ fn every_context_jet_matches_fixed_encoding_identity_type_cost_and_ffi_result() 
 }
 
 #[test]
-fn indexed_jets_reject_missing_foreign_and_action_outputs_and_respect_version_gates() {
+fn indexed_jets_reject_missing_foreign_and_action_outputs() {
     use ContextJet::*;
     for (jet, source, expected) in cases() {
-        let mut env = environment();
-        if jet as u8 >= 16 {
-            env.current.version = 0;
-            assert_eq!(
-                run(jet, &source, expected.len(), &env),
-                None,
-                "legacy {jet:?}"
-            );
-            env.current.version = 1;
-        }
+        let env = environment();
         if source.len() >= 32 && !matches!(jet, IssuedQuantity | BurnedQuantity) {
             // Check both the first missing index and the largest representable
             // index. The source suffix remains valid for asset/entry lookups.
@@ -277,39 +268,36 @@ fn indexed_jets_reject_missing_foreign_and_action_outputs_and_respect_version_ga
 }
 
 #[test]
-fn contract_field_jets_preserve_zero_values_and_reject_actions_in_both_versions() {
+fn contract_field_jets_preserve_zero_values_and_reject_actions() {
     use std::sync::Arc;
 
     use ContextJet::*;
-    for version in [0, 1] {
-        let mut env = environment();
-        env.current.version = version;
-        let output = Arc::make_mut(&mut env.outputs)[0]
-            .contract
-            .as_mut()
-            .unwrap();
-        output.amount = Amount::ZERO;
-        output.state = [0; 32];
-        assert_eq!(
-            run(OutputAmount, &index(0), 64, &env),
-            Some(vec![false; 64])
-        );
-        assert_eq!(
-            run(OutputState, &index(0), 256, &env),
-            Some(vec![false; 256])
-        );
-        assert_eq!(
-            run(OutputCmr, &index(0), 256, &env),
-            Some(bits(&[0x11; 32]))
-        );
-        for (jet, width) in [(OutputAmount, 64), (OutputCmr, 256), (OutputState, 256)] {
-            assert_eq!(run(jet, &index(3), width, &env), None, "v{version} {jet:?}");
-        }
+    let mut env = environment();
+    let output = Arc::make_mut(&mut env.outputs)[0]
+        .contract
+        .as_mut()
+        .unwrap();
+    output.amount = Amount::ZERO;
+    output.state = [0; 32];
+    assert_eq!(
+        run(OutputAmount, &index(0), 64, &env),
+        Some(vec![false; 64])
+    );
+    assert_eq!(
+        run(OutputState, &index(0), 256, &env),
+        Some(vec![false; 256])
+    );
+    assert_eq!(
+        run(OutputCmr, &index(0), 256, &env),
+        Some(bits(&[0x11; 32]))
+    );
+    for (jet, width) in [(OutputAmount, 64), (OutputCmr, 256), (OutputState, 256)] {
+        assert_eq!(run(jet, &index(3), width, &env), None, "{jet:?}");
     }
 }
 
 #[test]
-fn asset_lookups_distinguish_absent_assets_entries_and_legacy_bundles() {
+fn asset_lookups_distinguish_absent_assets_entries_and_native_bundles() {
     use ContextJet::*;
     let env = environment();
     for jet in [InputAssetQuantity, OutputAssetQuantity] {
@@ -349,12 +337,13 @@ fn asset_lookups_distinguish_absent_assets_entries_and_legacy_bundles() {
     for (jet, i) in [
         (InputAssetCount, 1),
         (InputAuthorityCount, 1),
-        (InputVersion, 1),
         (OutputAssetCount, 2),
         (OutputAuthorityCount, 2),
-        (OutputVersion, 2),
     ] {
         assert_eq!(run(jet, &index(i), 32, &env), Some(index(0)));
+    }
+    for (jet, position) in [(InputVersion, 1), (OutputVersion, 2)] {
+        assert_eq!(run(jet, &index(position), 32, &env), Some(index(1)));
     }
     for (quantity, authority, entry, i) in [
         (InputAssetQuantity, InputAuthority, InputAssetId, 1),

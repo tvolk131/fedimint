@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::compiler::{Value, ValueConstructible, arguments};
 use crate::{ContractProgram, TOP_UP_OR_RELEASE, common, market};
 
+pub(crate) const TOP_UP_TEMPLATE: &str = "top-up-or-release";
+
 const ENVELOPE: &[u8; 4] = b"FMS1";
 const DESCRIPTOR_VERSION: u16 = 1;
 
@@ -52,7 +54,7 @@ impl ContractDescriptor {
 
     pub fn top_up(key_nonce: [u8; 32], min_session: u64, min_block_count: u64) -> Self {
         Self {
-            template: "top-up-or-release".to_owned(),
+            template: TOP_UP_TEMPLATE.to_owned(),
             parameters: (min_session, min_block_count).consensus_encode_to_vec(),
             ..Self::owner(key_nonce)
         }
@@ -110,7 +112,7 @@ pub struct BuiltinTemplates;
 impl ContractTemplates for BuiltinTemplates {
     fn owns_balance(&self, descriptor: &ContractDescriptor) -> bool {
         descriptor.template_version == 1
-            && matches!(descriptor.template.as_str(), "owner" | "top-up-or-release")
+            && matches!(descriptor.template.as_str(), "owner" | TOP_UP_TEMPLATE)
     }
 
     fn is_successor(
@@ -140,9 +142,9 @@ impl ContractTemplates for BuiltinTemplates {
                     descriptor.parameters.is_empty(),
                     "unexpected owner parameters"
                 );
-                Ok((common::assets::ASSET_VERSION, market::owner_program(owner)?))
+                Ok((common::EXECUTION_VERSION, market::owner_program(owner)?))
             }
-            "top-up-or-release" => {
+            TOP_UP_TEMPLATE => {
                 let (min_session, min_block_count) = <(u64, u64)>::consensus_decode_whole(
                     &descriptor.parameters,
                     &Default::default(),
@@ -164,7 +166,7 @@ impl ContractTemplates for BuiltinTemplates {
                     &descriptor.parameters,
                     &Default::default(),
                 )?;
-                Ok((common::assets::ASSET_VERSION, market.program()?))
+                Ok((common::EXECUTION_VERSION, market.program()?))
             }
             _ => anyhow::bail!("unsupported contract template: {}", descriptor.template),
         }

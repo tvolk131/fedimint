@@ -250,40 +250,23 @@ fn units(count: usize) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn later_execution_version_failure_precedes_earlier_vm_failure() {
+async fn unsupported_output_version_precedes_earlier_vm_failure() {
     let (db, modules) = federation();
     let (first, stored) = spend(0, false);
     seed(&db, 4, &first, &stored).await;
-    let (mut last, mut stored) = spend(1, true);
-    last.program = simplicity::types::Context::with_context(|ctx| {
-        let word: Arc<ConstructNode> = Arc::const_word(
-            &ctx,
-            simplicity::Value::from_byte_array([0; 16])
-                .to_word()
-                .unwrap(),
-        );
-        let jet = Arc::jet(
-            &ctx,
-            &fedimint_simplicity_common::jet::FedimintJet::Core(simplicity::jet::Core::Multiply64),
-        );
-        Arc::comp(&Arc::comp(&word, &jet).unwrap(), &Arc::unit(&ctx))
-            .unwrap()
-            .finalize_types()
-            .unwrap()
-            .to_vec_without_witness()
-    });
-    last.witness.clear();
-    stored.output.cmr = runtime::decode_program(&last)
-        .unwrap()
-        .cmr()
-        .to_byte_array();
+    let (last, stored) = spend(1, true);
     seed(&db, 7, &last, &stored).await;
-    let tx = transaction(vec![(4, first), (7, last)]);
+    let mut invalid = stored.output;
+    invalid.version = 0;
+    let mut tx = transaction(vec![(4, first), (7, last)]);
+    tx.outputs
+        .push(fedimint_core::core::DynOutput::from_typed(7, invalid));
+    sign_transaction(&mut tx, &[owner(), owner()]).unwrap();
     check(
         &db,
         &modules,
         &tx,
-        Err(input_error(7, ContractError::Version)),
+        Err(input_error(4, ContractError::Version)),
     )
     .await;
 }

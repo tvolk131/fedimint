@@ -56,31 +56,50 @@ fn unknown_context_and_disallowed_core_jets_are_rejected() {
 }
 
 #[test]
-fn legacy_output_encoding_is_preserved_and_asset_outputs_round_trip() {
+fn only_current_output_encoding_is_accepted() {
     use fedimint_core::encoding::{Decodable, Encodable};
     use fedimint_core::module::registry::ModuleDecoderRegistry;
 
-    use crate::assets::{ASSET_VERSION, AssetBundle, AssetExtension};
+    use crate::assets::{AssetBundle, AssetExtension};
     let legacy = (
         0u32,
         fedimint_core::Amount::from_msats(42),
         [1u8; 32],
         [2u8; 32],
         vec![3u8],
-    );
-    let bytes = legacy.consensus_encode_to_vec();
-    let decoded =
-        crate::ContractOutput::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
-            .unwrap();
-    assert_eq!(decoded.extension, None);
-    assert_eq!(decoded.consensus_encode_to_vec(), bytes);
-    let mut asset = decoded;
-    asset.version = ASSET_VERSION;
-    asset.extension = Some(AssetExtension::Bundle(AssetBundle::default()));
-    let round_trip = crate::ContractOutput::consensus_decode_whole(
-        &asset.consensus_encode_to_vec(),
-        &ModuleDecoderRegistry::default(),
     )
-    .unwrap();
-    assert_eq!(asset, round_trip);
+        .consensus_encode_to_vec();
+    assert!(
+        crate::ContractOutput::consensus_decode_whole(&legacy, &ModuleDecoderRegistry::default())
+            .is_err()
+    );
+    let output = crate::ContractOutput {
+        version: crate::EXECUTION_VERSION,
+        amount: fedimint_core::Amount::from_msats(42),
+        cmr: [1; 32],
+        state: [2; 32],
+        recovery: vec![3],
+        extension: Some(AssetExtension::Bundle(AssetBundle::default())),
+    };
+    assert_eq!(crate::output_fee(&output).msats, 105);
+    let mut native = output.clone();
+    native.recovery.clear();
+    assert_eq!(crate::output_fee(&native).msats, 104);
+    let bytes = output.consensus_encode_to_vec();
+    assert_eq!(
+        crate::ContractOutput::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
+            .unwrap(),
+        output
+    );
+    for version in [0, 2, u32::MAX] {
+        let mut invalid = output.clone();
+        invalid.version = version;
+        assert!(
+            crate::ContractOutput::consensus_decode_whole(
+                &invalid.consensus_encode_to_vec(),
+                &ModuleDecoderRegistry::default()
+            )
+            .is_err()
+        );
+    }
 }

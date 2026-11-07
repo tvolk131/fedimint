@@ -362,8 +362,6 @@ async fn version_endpoints_distinguish_support_from_activation() {
 #[tokio::test]
 async fn existing_contracts_keep_their_commitments_and_fees_after_activation() {
     let mut fed = Harness::new();
-    // Same transaction processor as production, with a future binary that
-    // keeps supporting the two original contract execution environments.
     fed.modules =
         ServerModuleRegistry::new(fed.modules.iter_modules().map(|(id, kind, existing)| {
             (
@@ -424,7 +422,10 @@ async fn existing_contracts_keep_their_commitments_and_fees_after_activation() {
     }
     for (index, (point, input)) in points.iter().zip(inputs).enumerate() {
         let stored = fed.contract(*point).await.unwrap();
-        assert_eq!(stored.output.version, index as u32);
+        assert_eq!(
+            stored.output.version,
+            fedimint_simplicity_common::EXECUTION_VERSION
+        );
         assert_eq!(stored.output.cmr, program.cmr());
         assert_eq!(
             fedimint_simplicity_common::runtime::input_fee(&input).unwrap(),

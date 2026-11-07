@@ -94,7 +94,7 @@ amounts, asset transfers, policies, and public witnesses remain transparent.
 
 ## Pruned redemption programs
 
-Both execution versions require maximal pruning for the submitted witness and
+The execution baseline requires maximal pruning for the submitted witness and
 actual execution environment. Every revealed node must execute, and every
 revealed `case` must execute both branches at least once. A shared case can
 legitimately reveal both branches when different invocations use each one.
@@ -146,11 +146,13 @@ variants, without promising old wallets can interpret arbitrary future contracts
 
 ## Execution versions and explicit assets
 
-Execution version zero pins its runtime, permitted jets, commitments, and cost
-semantics. Future versions must preserve the interpretation of existing outputs;
+Execution version one is the sole fresh-federation beta baseline. Prototype
+execution version zero is not accepted; no prototype state migration is provided.
+The baseline pins its runtime, permitted jets, commitments, and cost semantics.
+Future versions must preserve the interpretation of existing beta outputs;
 contract-authorized spending is the migration boundary.
 
-Execution version one adds bounded multi-asset balances and unique, indivisible
+The baseline supports bounded multi-asset balances and unique, indivisible
 issuance authorities to contract outputs. A separate module action output carries
 creation, issuance, and destruction declarations without creating a UTXO. Asset
 conservation is module-owned; core bitcoin accounting and the mint remain unaware
@@ -164,7 +166,8 @@ Permanent namespace markers prevent replay after destruction. Immutable asset
 records identify the initial authority policy so clients can verify provenance.
 Creation keys confer no ongoing authority. Creation signatures across Simplicity
 module instances are excluded from the v1 intent to avoid self-reference and
-cross-instance signing cycles; v0 encoding and signing remain unchanged.
+cross-instance signing cycles. Native-only and asset-bearing programs use this
+same intent and output format; native-only contracts carry an empty asset bundle.
 
 The expanded execution environment exposes all resolved module inputs, successor
 asset balances and authorities, and issuance/destruction quantities. The client

@@ -178,7 +178,7 @@ malformed parameters, missing/spent contracts, and retained asset origins.
 Per-request work stays bounded by record/configuration limits; simultaneous calls,
 transport parsing, and core history downloads are outside these module API bounds.
 
-## Execution environment v0
+## Execution environment v1
 
 | Jet | Result / indexing |
 | --- | --- |
@@ -192,19 +192,19 @@ transport parsing, and core history downloads are outside these module API bound
 | `fm_output_amount(i)`, `fm_output_cmr(i)`, `fm_output_state(i)` | Contract fields at outer output index `i`; fail for foreign or action outputs |
 | `fm_output_module(i)`, `fm_output_hash(i)` | Module instance and canonical encoded hash for any outer output |
 
-The inner digest commits to the federation, module instance, execution version,
+The version-one inner digest commits to the federation, module instance,
 ordered contract outpoints and claim keys, transaction nonce, and **every outer
 output**, including mint blinded nonces. It excludes witnesses, outer signatures,
-and foreign funding inputs. This avoids signing a signature and permits a funding
+creation signatures across decoded Simplicity instances, and foreign funding
+inputs. This avoids signing a signature and permits a funding
 sponsor to add inputs. Reordering/removing/changing this module's inputs or any
 output requires fresh inner authorization. Changing witnesses requires fresh
 outer signatures.
 
 Programs receive rich typed successor data for their own module instance.
 Foreign outputs have an authenticated module ID and opaque hash; they do not get
-a mint-specific blinded-nonce parser. The current consumed UTXO is exposed, but
-rich indexed access to *other consumed contracts* is not part of this first jet
-set. There are no foreign-input inspection jets.
+a mint-specific blinded-nonce parser. Resolved consumed contracts are exposed
+through the indexed input jets below. There are no foreign-input inspection jets.
 
 Output indices are outer transaction indices; input indices are module-local.
 A program can inspect the same successor as another program. Applications that
@@ -213,7 +213,7 @@ does not infer exclusivity or prevent contract-author double-satisfaction bugs.
 
 ### Consensus clocks and expiring spend paths
 
-Both execution versions expose consensus clocks directly. Bitcoin votes are
+The execution environment exposes consensus clocks directly. Bitcoin votes are
 monotonic and require the configured guardian threshold to
 advance the clock. With insufficient votes, the exposed count is zero. Session
 indices are supplied by the core during both live consensus and replay.
@@ -265,7 +265,7 @@ care:
 
 ## Limits, fees, and retention
 
-Both execution versions allow at most 32 contract inputs and 32 contract outputs for this
+The baseline allows at most 32 contract inputs and 32 contract outputs for this
 module instance, within at most 128 total outputs. Each program and witness is
 limited to 8 KiB, each recovery annotation to 1 KiB. An allocation-free structural
 scan checks declared node counts and constant payload lengths against the actual
@@ -298,14 +298,14 @@ require additional memory. Outer transaction bytes, recovery data, assets,
 types, cells and frames retain their separate limits. None of these bounds
 aggregate guardian load from repeated requests.
 
-Fixed [consensus vectors](tests/vectors/README.md) pin v0/v1 encodings and signing
-hashes, asset IDs, all custom jet identities/types/costs, and selected execution
+Fixed [consensus vectors](tests/vectors/README.md) pin v1 encodings and the signing
+hash, asset IDs, all custom jet identities/types/costs, and selected execution
 commitments/resource bounds. Direct jet tests cover the C-frame adapter boundary;
 server tests also exercise two instances through core processing and rollback.
 
 Spending costs 100 msat plus one msat per rounded static cost weight unit and
 per encoded program/witness byte. Each output costs 100 msat plus one msat per
-recovery byte; v1 also charges one msat per encoded extension byte and 100 msat
+recovery byte; each output also charges one msat per encoded extension byte and 100 msat
 per newly registered asset ID. The asset charge applies once at genesis, not on
 later issuance of the same asset. Rejected transactions pay no module fee.
 These are the agreed prototype coefficients, pending production calibration.
@@ -395,7 +395,7 @@ CMRs, types, and costs are consensus-critical. Custom environment jets currently
 use domain-separated prototype commitments; formal Simplicity specifications and
 production cost calibration remain outstanding. Unsupported jets are rejected.
 Liquid programs must be ported to this environment. Do not reinterpret existing
-v0 outputs when adding versions: migration requires an authorized spend.
+beta outputs when adding versions: migration requires an authorized spend.
 
 This is a development prototype, not an audited module for holding real funds.
 
@@ -408,7 +408,7 @@ name or the shared workspace package version is not a sufficient identity.
 | Component | Pinned interpretation |
 | --- | --- |
 | Module kind / configuration baseline | `simplicity` / `0.1` |
-| Contract execution versions | `0` (bitcoin), `1` (bitcoin and explicit assets) |
+| Contract execution version | `1` (bitcoin and explicit assets) |
 | Guardian Rust runtime | `simplicity-lang =0.9.0` |
 | C runtime and frame adapters | `simplicity-sys =0.8.0` |
 | Wallet compiler | SimplicityHL commit `351eb068e30affc69189993739cd1b30b02b269d` |
@@ -416,13 +416,16 @@ name or the shared workspace package version is not a sufficient identity.
 | Context jet identities | SHA-256 of UTF-8 `fedimint/simplicity/jet/v0/` followed by the jet name |
 | Context jet cost | 1,000 milliweight each; allowed Core jets use the pinned runtime's costs |
 
+The `jet/v0/` identity domain names the custom-jet commitment scheme, not
+execution version zero. It is retained so existing jet identities and program
+CMRs remain unchanged.
+
 [The jet definitions](src/jet.rs) own the exact allowlist, IDs, types and adapters;
 the fixed [reference vectors](tests/vectors/README.md) independently pin identities
-and selected execution results. V0 rejects context IDs 16–35 and `Multiply64`;
-V1 allows those additions. The interpretation of indices, clocks, signing
+and selected execution results. The interpretation of indices, clocks, signing
 commitments, absent assets and invalid indices is specified in the execution
 sections above and below. The [limits and fees](#limits-fees-and-retention) apply
-to both versions; all guardians must run matching validity and fee rules.
+to this baseline; all guardians must run matching validity and fee rules.
 
 These are explicit prototype primitive identities, not CMRs backed by upstream
 formal jet specifications. Pinning them does not establish worst-case cost
@@ -442,10 +445,12 @@ is required by this baseline. Deployment and recovery procedures are in the
 
 ## Explicit assets and execution version one
 
-The baseline supports execution versions 0 and 1. Version 1 adds explicit assets;
-v0 keeps its binary encoding, digest, jet allowlist and fee behavior. New asset
-jets and `multiply_64` are rejected when spending a v0 output. Moving bitcoin
-into v1 requires an authorized transaction.
+The fresh-federation beta supports execution version 1 only. Prototype execution
+version 0 is rejected, with no prototype migration path. Native-only and
+asset-bearing contracts share the same output format, jet set, and signing
+helper. `program.output` uses an empty asset bundle; `program.asset_output`
+supplies balances and authorities. The SDK top-up/release template remains
+bitcoin-only as SDK policy, not a consensus restriction on its raw covenant.
 
 `program.asset_output(bitcoin, state, recovery, AssetBundle { balances,
 authorities })` creates a v1 UTXO. Balances have strictly sorted unique asset IDs
@@ -481,13 +486,14 @@ placed in the designated outer output. The first issuance is a second transactio
 spending that authority. No initial-issuance bypass exists.
 
 After assembling outputs, call `assets::sign_creation` for every creation key.
-V1 programs use `assets::signature_value` rather than the v0 helper. The v1 digest
+All programs use `signature_value`; `assets::signature_value` re-exports the same
+helper. The v1 digest
 covers all module spend references/claim keys, nonce, and outer outputs, including
 asset operations, but substitutes zeroes for creation signatures in v1 action outputs across all
 decoded Simplicity instances, preserving their module IDs. This avoids circular
 commitments when several instances create assets together. Other foreign output
-bytes remain opaque and unchanged. Sign creations before any v0 program signatures in
-a mixed transaction, then apply outer signatures after all witnesses are final.
+bytes remain opaque and unchanged. Apply outer signatures after creation
+signatures and all program witnesses are final.
 Foreign funding inputs remain excluded from inner signatures for sponsorship.
 
 Namespace reuse is rejected forever, including after all authorities and tokens
@@ -571,7 +577,7 @@ creation, collateral funding from real Mint v2 notes, split holdings, independen
 YES trading for ecash, recombination, all outcomes, timeout, redemption into ecash,
 and spending the resulting note. Negative cases cover forgery, inflation,
 namespace replay, authority copying/destruction, overflow, invalid signatures,
-provenance, legacy compatibility, and transaction rollback.
+provenance, native and asset output construction, and transaction rollback.
 
 [Market hardening tests](../fedimint-simplicity-server/src/tests/assets/market_hardening.rs)
 exercise oracle domain binding, exact resolution/timeout boundaries, altered

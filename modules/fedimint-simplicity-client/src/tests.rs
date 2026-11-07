@@ -79,7 +79,7 @@ fn creation_signatures_compose_across_instances_in_either_order() {
     use fedimint_core::secp256k1::Message;
     use fedimint_core::transaction::{Transaction, TransactionSignature};
 
-    use crate::common::assets::{AssetActions, AssetExtension, signature_hash_v1};
+    use crate::common::assets::{AssetActions, AssetExtension, signature_hash};
     let key = Keypair::from_secret_key(SECP256K1, &SecretKey::from_slice(&[3; 32]).unwrap());
     let federation = FederationId(sha256::Hash::hash(b"composable-creation"));
     let program = market::owner_program(key.x_only_public_key().0).unwrap();
@@ -125,7 +125,7 @@ fn creation_signatures_compose_across_instances_in_either_order() {
                 .downcast_ref::<crate::common::ContractOutput>()
                 .unwrap();
             let signature = output.actions().unwrap().creations[0].signature;
-            let message = Message::from_digest(signature_hash_v1(federation, module, &tx).unwrap());
+            let message = Message::from_digest(signature_hash(federation, module, &tx).unwrap());
             SECP256K1
                 .verify_schnorr(&signature, &message, &key.x_only_public_key().0)
                 .unwrap();
@@ -149,7 +149,7 @@ fn creation_signatures_compose_across_instances_in_either_order() {
             actions.creations[0].authority_outputs[0] = 0;
         }
         tx.outputs[3] = DynOutput::from_typed(5, foreign);
-        let message = Message::from_digest(signature_hash_v1(federation, 4, &tx).unwrap());
+        let message = Message::from_digest(signature_hash(federation, 4, &tx).unwrap());
         assert!(
             SECP256K1
                 .verify_schnorr(&signature, &message, &key.x_only_public_key().0)

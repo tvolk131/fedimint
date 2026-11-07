@@ -72,7 +72,7 @@ jobs:
           LIBCLANG_PATH: /usr/lib/llvm-18/lib
           FM_SIMPLICITY_REPORT_DIR: ${{ github.workspace }}/evidence
         run: |
-          python3 modules/fedimint-simplicity-common/tests/vectors/reference.py > evidence/reference.json
+          rustup run 1.93.0 cargo run --release --locked -p fedimint-simplicity-common --example consensus_reference > evidence/reference.json
           diff -u modules/fedimint-simplicity-common/tests/vectors/consensus.json evidence/reference.json
           rustup run 1.93.0 cargo test --release --locked -p fedimint-simplicity-common --features compiler
           rustup run 1.93.0 cargo test --release --locked -p fedimint-simplicity-common --features compiler --lib -- --ignored --nocapture --test-threads=1

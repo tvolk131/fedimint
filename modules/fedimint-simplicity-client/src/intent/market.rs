@@ -55,7 +55,7 @@ impl MintPairs {
             (self.market.no, &self.no_destination),
         ] {
             ensure!(
-                output.version == crate::common::assets::ASSET_VERSION
+                output.version == crate::common::EXECUTION_VERSION
                     && output.amount == Amount::ZERO
                     && output.bundle()
                         == Some(&AssetBundle {
@@ -128,7 +128,7 @@ impl MintPairs {
 fn matches_market(output: &ContractOutput, market: &BinaryMarket, cmr: [u8; 32]) -> bool {
     let mut authorities = vec![market.yes, market.no];
     authorities.sort();
-    output.version == crate::common::assets::ASSET_VERSION
+    output.version == crate::common::EXECUTION_VERSION
         && output.cmr == cmr
         && output.bundle()
             == Some(&AssetBundle {

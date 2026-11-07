@@ -6,10 +6,10 @@ use fedimint_core::core::{DynInputError, ModuleInstanceId};
 use fedimint_core::transaction::{Transaction, TransactionError, TransactionSignature};
 use simplicity::Cost;
 
-use crate::assets::{ASSET_VERSION, MAX_ASSETS, validate_amounts};
+use crate::assets::{MAX_ASSETS, validate_amounts};
 use crate::{
-    ContractError, ContractInput, ContractOutput, MAX_CONTRACTS, MAX_PROGRAM_BYTES,
-    MAX_RECOVERY_BYTES, MAX_WITNESS_BYTES, runtime,
+    ContractError, ContractInput, ContractOutput, EXECUTION_VERSION, MAX_CONTRACTS,
+    MAX_PROGRAM_BYTES, MAX_RECOVERY_BYTES, MAX_WITNESS_BYTES, runtime,
 };
 
 #[cfg(test)]
@@ -191,10 +191,7 @@ fn check_programs(transaction: &Transaction, mut cost: Cost) -> Result<Cost, Con
 /// validation. Asset conservation, namespace existence and creation signatures
 /// are checked by the guardian later.
 pub fn check_output(output: &ContractOutput) -> Result<(), ContractError> {
-    if output.version > ASSET_VERSION
-        || (output.version == 0 && output.extension.is_some())
-        || (output.version == ASSET_VERSION && output.extension.is_none())
-    {
+    if output.version != EXECUTION_VERSION || output.extension.is_none() {
         return Err(ContractError::Version);
     }
     if output.recovery.len() > MAX_RECOVERY_BYTES || output.amount.msats > 2_100_000_000_000_000_000

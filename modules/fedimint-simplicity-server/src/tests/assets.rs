@@ -862,8 +862,7 @@ async fn asset_signatures_bind_operations_and_foreign_outputs_and_inputs_share_a
         .unwrap();
     assert_error(fed.process(&substituted, 1).await, "program rejected");
     fed.process(&tx, 1).await.unwrap();
-    // The same new context jet is never enabled for a legacy contract.
-    let legacy = fed
+    let native = fed
         .fund(vec![output(
             later
                 .output(Amount::from_msats(10_000), [0; 32], vec![])
@@ -873,14 +872,14 @@ async fn asset_signatures_bind_operations_and_foreign_outputs_and_inputs_share_a
     let (mut spend, sponsor) = sponsored(
         vec![owner_input(
             &later,
-            point(&legacy, 0),
+            point(&native, 0),
             &owner,
             placeholder_signature(),
         )],
         vec![],
     );
     let signature = signature_value(federation_id(), SIMP, &spend, &owner).unwrap();
-    spend.inputs[0] = owner_input(&later, point(&legacy, 0), &owner, signature);
+    spend.inputs[0] = owner_input(&later, point(&native, 0), &owner, signature);
     fed.sign(&mut spend, &[owner, sponsor]).await.unwrap();
-    assert_error(fed.process(&spend, 2).await, "execution version");
+    fed.process(&spend, 2).await.unwrap();
 }

@@ -213,7 +213,7 @@ async fn issuance_preserves_the_vault_policy_authorities_state_and_pair_backing(
             8 => {
                 successor.version = 0;
                 successor.extension = None;
-                "program rejected"
+                "execution version"
             }
             _ => unreachable!(),
         };

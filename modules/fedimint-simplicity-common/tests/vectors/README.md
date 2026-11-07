@@ -4,19 +4,22 @@
 from the implementation under test. A changed expectation requires review of the
 consensus change, including its execution-version implications.
 
-`reference.py` derives the fixture using only Python's standard library, without
-calling or importing Fedimint, rust-simplicity, or the compiler. It spells out
-BigSize framing, enum/dynamic-output framing, the v0/v1 signing preimages,
+`examples/consensus_reference.rs` derives the fixture without calling or importing
+Fedimint, rust-simplicity, or the compiler. It spells out
+BigSize framing, enum/dynamic-output framing, the v1 signing preimage,
 namespace/asset derivation, and all 36 custom jet identities and type widths.
-Its standalone SHA-256 compression routine derives Simplicity tagged midstates
-and program CMRs; it checks itself against `hashlib` on a padded test block.
+It uses the Bitcoin SHA-256 primitive to derive tagged midstates and program
+CMRs, independently of the Simplicity commitment implementation.
+Only the underlying `bitcoin_hashes` SHA-256 primitive is shared with the module;
+a padded-block assertion checks the reference's use of compression. JSON object
+keys are explicitly sorted so Cargo feature unification cannot change the fixture.
 The three execution vectors use literal DAG encodings and independently
 calculated static bounds and fees.
 
 To inspect the reference without changing the fixture:
 
 ```sh
-python3 modules/fedimint-simplicity-common/tests/vectors/reference.py > /tmp/simplicity-reference.json
+cargo run --release --locked -p fedimint-simplicity-common --example consensus_reference > /tmp/simplicity-reference.json
 diff -u modules/fedimint-simplicity-common/tests/vectors/consensus.json /tmp/simplicity-reference.json
 cargo test -p fedimint-simplicity-common
 ```
@@ -24,7 +27,7 @@ cargo test -p fedimint-simplicity-common
 The Rust tests exercise every custom jet through its actual C-frame entry point,
 checking output bits, declared widths, exact destination cursor movement and
 outside guard words. They cover absent assets, invalid indices, foreign outputs,
-action outputs and execution-version gates. These are regression tests, not an
+action outputs and rejection of unsupported execution versions. These are regression tests, not an
 independent implementation of the full Simplicity interpreter or a memory-safety
 proof. Cross-platform execution and deeper unsafe-code review remain separate
 hardening work.
@@ -82,7 +85,7 @@ dispatch. It uses hosted Ubuntu 24.04 x86-64 and ARM64 runners, checks their act
 architecture, and pins Rust 1.93.0 with the committed Cargo lockfile. Ordinary
 tests still check the independent fixture; the ignored observation test writes
 actual implementation results, including wire encodings, hashes, all custom jet
-outputs/version gates, program commitments, static bounds and execution fees.
+outputs, program commitments, static bounds and execution fees.
 The mutation campaign also hashes its generated inputs and observed decode/VM/
 frame results, not just pass counts. A dependent job requires identical JSON
 reports from both native architectures.

@@ -405,7 +405,7 @@ fn check_assets(
     let mut created = BTreeSet::new();
     for creation in &actions.creations {
         let message =
-            Message::from_digest(assets::signature_hash_v1(federation, module, transaction)?);
+            Message::from_digest(assets::signature_hash(federation, module, transaction)?);
         SECP256K1
             .verify_schnorr(
                 &creation.signature,

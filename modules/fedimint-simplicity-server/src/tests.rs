@@ -342,13 +342,8 @@ async fn ecash_deposit_top_up_and_redeem_through_core() {
         )
         .await;
 
-    let initial = program
-        .output(
-            Amount::from_msats(note.amount().msats - 100),
-            [7; 32],
-            vec![],
-        )
-        .unwrap();
+    let mut initial = program.output(note.amount(), [7; 32], vec![]).unwrap();
+    initial.amount.msats -= output_fee(&initial).msats;
     let mut deposit = transaction(
         vec![DynInput::from_typed(MINT, MintInput::new_v0(note))],
         vec![DynOutput::from_typed(SIMP, initial.clone())],
@@ -572,7 +567,7 @@ async fn signatures_commit_to_claim_key_federation_module_and_foreign_outputs() 
     );
     assert_ne!(
         original_hash,
-        fedimint_simplicity_common::signature_hash(federation_id(), SIMP + 1, &tx).unwrap()
+        fedimint_simplicity_common::signature_hash(federation_id(), SIMP + 2, &tx).unwrap()
     );
 
     let mut redirected = tx.clone();

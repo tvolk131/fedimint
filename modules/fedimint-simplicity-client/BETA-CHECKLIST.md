@@ -115,7 +115,7 @@ they retain the outstanding platform, operational, or candidate-specific work.
    Verify safe funding reuse. Complete live shared-market race, invalid-oracle,
    and timeout scenarios beyond the already automated coverage. The existing
    federation can support this work; tests must isolate wallet databases.
-   **Completed:** v0/v1 same-session block-vote and close/reopen tests; live
+   **Completed:** same-session block-vote and close/reopen tests; live
    partial/routed buy/sell races, cancellation/fee conservation, crash/lost-ack,
    opening-block resolution, and three full mnemonic recoveries with late-join
    price history. The v0.12.2 candidate passed the four automated guardian
@@ -149,11 +149,14 @@ they retain the outstanding platform, operational, or candidate-specific work.
    successor exists; full future-version validation cannot happen beforehand.
    Do not imply support for rolling mixed-version consensus or migrations from
    every undeployed prototype.
-   **Completed:** the first-beta `0.1` candidate has a private, checksummed
+   **Historical evidence, predating the execution-v1-only reset:** the earlier
+   `0.1` candidate has a private, checksummed
    71-file guardian/client/template/pending-operation baseline retained outside
    build caches, with all checksums verified. Its four wallet copies loaded
    offline with networking denied;
-   the guardian checkpoint restored and caught up live. The upgrade foundation
+   the guardian checkpoint restored and caught up live. This does not qualify
+   the reset candidate: capture and verify a new baseline before deployment.
+   The upgrade foundation
    adds all-peer readiness, durable ordered activation, fail-stop downgrade
    handling, and client capability discovery. Deterministic tests emulate
    successor `0.2` support. A concrete feature-bearing successor still needs

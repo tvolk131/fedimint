@@ -45,7 +45,7 @@ impl LimitOrder {
             AssetBundle::default()
         };
         ensure!(
-            self.payment.version == 1
+            self.payment.version == crate::common::EXECUTION_VERSION
                 && self.payment.cmr == owner_program(self.maker)?.cmr()
                 && self.payment.state == [0; 32]
                 && self.payment.amount == if self.buy { Amount::ZERO } else { self.price }
@@ -76,7 +76,7 @@ impl LimitOrder {
     pub fn validate_output(&self, output: &ContractOutput) -> anyhow::Result<()> {
         let (amount, bundle) = self.escrow();
         ensure!(
-            output.version == 1
+            output.version == crate::common::EXECUTION_VERSION
                 && output.cmr == self.program()?.cmr()
                 && output.amount == amount
                 && output.bundle() == Some(&bundle),
@@ -123,7 +123,8 @@ impl ConstantProductPool {
 
     pub fn reserves(&self, output: &ContractOutput) -> anyhow::Result<PoolReserves> {
         ensure!(
-            output.version == 1 && output.cmr == self.program()?.cmr(),
+            output.version == crate::common::EXECUTION_VERSION
+                && output.cmr == self.program()?.cmr(),
             "wrong pool policy"
         );
         let bundle = output.bundle().context("pool is not an asset output")?;

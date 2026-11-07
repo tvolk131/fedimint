@@ -41,10 +41,14 @@ fn consensus_envelope_preserves_future_votes_and_unknown_variants() {
 
 #[test]
 fn execution_versions_require_activation_and_unknown_versions_are_never_enabled() {
-    for execution in [0, 1] {
-        assert!(check_execution_version(execution, ModuleConsensusVersion::new(0, 0)).is_err());
-        check_execution_version(execution, MODULE_CONSENSUS_VERSION).unwrap();
-        check_execution_version(execution, ModuleConsensusVersion::new(0, 2)).unwrap();
+    let execution = crate::EXECUTION_VERSION;
+    assert!(check_execution_version(execution, ModuleConsensusVersion::new(0, 0)).is_err());
+    check_execution_version(execution, MODULE_CONSENSUS_VERSION).unwrap();
+    check_execution_version(execution, ModuleConsensusVersion::new(0, 2)).unwrap();
+    for execution in [0, 2, u32::MAX] {
+        assert!(
+            check_execution_version(execution, ModuleConsensusVersion::new(u32::MAX, u32::MAX))
+                .is_err()
+        );
     }
-    assert!(check_execution_version(2, ModuleConsensusVersion::new(u32::MAX, u32::MAX)).is_err());
 }

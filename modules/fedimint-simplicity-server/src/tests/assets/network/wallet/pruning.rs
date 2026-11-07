@@ -68,7 +68,7 @@ impl ContractTemplates for Templates {
             return BuiltinTemplates.compile(descriptor, owner);
         }
         Ok((
-            0,
+            fedimint_simplicity_common::EXECUTION_VERSION,
             fedimint_simplicity_client::ContractProgram::compile(
                 "fn main() { let signature: Signature = witness::SIGNATURE; jet::bip_0340_verify((param::OWNER, jet::fm_sig_hash_all()), signature); match witness::VARIABLE { true => { match jet::eq_32(jet::fm_output_count(), 1) { true => {}, false => { jet::bip_0340_verify((param::OWNER, jet::fm_sig_hash_all()), signature); }, } }, false => {}, } }",
                 compiler::arguments([(

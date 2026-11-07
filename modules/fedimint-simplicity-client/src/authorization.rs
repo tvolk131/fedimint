@@ -127,16 +127,12 @@ impl Authorization {
             .map(|(index, spend)| {
                 let mut witnesses = spend.witnesses.as_inner().as_ref().clone();
                 if let Some(name) = &spend.signature_witness {
-                    let signature = match spend.version {
-                        common::EXECUTION_VERSION => {
-                            crate::signature_value(self.federation, self.module, tx, &spend.key)
-                        }
-                        common::assets::ASSET_VERSION => {
-                            assets::signature_value(self.federation, self.module, tx, &spend.key)
-                        }
-                        _ => return Err(anyhow::Error::msg("unsupported execution version")),
-                    }
-                    .map_err(anyhow::Error::msg)?;
+                    anyhow::ensure!(
+                        spend.version == common::EXECUTION_VERSION,
+                        "unsupported execution version"
+                    );
+                    let signature =
+                        crate::signature_value(self.federation, self.module, tx, &spend.key)?;
                     witnesses.insert(
                         TemplateProgramWitness::witness_from_str(name.as_str()),
                         signature,

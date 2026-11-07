@@ -351,7 +351,7 @@ async fn cross_instance_substitutions_and_bad_second_witness_leave_both_unchange
 }
 
 #[tokio::test]
-async fn legacy_and_asset_programs_cannot_read_the_other_instances_rich_outputs() {
+async fn native_and_asset_programs_cannot_read_the_other_instances_rich_outputs() {
     let fed = harness();
     let owner = key();
     let program = ContractProgram::compile(

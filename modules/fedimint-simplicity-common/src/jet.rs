@@ -369,7 +369,7 @@ fn asset_jet(
     use fedimint_core::encoding::Encodable;
 
     use crate::assets::AssetId;
-    if env.current.version != crate::assets::ASSET_VERSION {
+    if env.current.version != crate::EXECUTION_VERSION {
         return false;
     }
     if matches!(jet, IssuedQuantity | BurnedQuantity) {

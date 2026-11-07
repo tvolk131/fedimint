@@ -53,7 +53,6 @@ pub mod storage;
 pub const MODULE: u16 = 4;
 const FUNDING_MODULE: u16 = 5;
 pub const EXECUTION_CASES: &[&str] = &[
-    "unit_v0",
     "unit_v1",
     "owner",
     "market_issue",
@@ -66,7 +65,7 @@ pub const EXECUTION_CASES: &[&str] = &[
     "large_witness",
 ];
 pub const DECODE_CASES: &[&str] = &[
-    "unit_v0",
+    "unit_v1",
     "owner",
     "market_issue",
     "market_resolve",
@@ -84,7 +83,6 @@ pub const DECODE_CASES: &[&str] = &[
     "trailing_witness",
 ];
 pub const TRANSACTION_CASES: &[&str] = &[
-    "unit_v0",
     "unit_v1",
     "owner",
     "market_issue",
@@ -165,15 +163,8 @@ pub fn case(name: &str) -> &'static Fixture {
 
 impl Fixture {
     pub fn signature_hash(&self) -> [u8; 32] {
-        let hash = if self.consumed[0].version == 0 {
-            fedimint_simplicity_common::signature_hash(federation(), MODULE, &self.transaction)
-        } else {
-            fedimint_simplicity_common::assets::signature_hash_v1(
-                federation(),
-                MODULE,
-                &self.transaction,
-            )
-        };
+        let hash =
+            fedimint_simplicity_common::signature_hash(federation(), MODULE, &self.transaction);
         hash.expect("bounded fixture transaction")
     }
 
@@ -595,10 +586,6 @@ pub fn build(name: &str) -> Fixture {
         _ => compiled("fn main() {}"),
     };
     match name {
-        "unit_v0" => {
-            fixture.consumed[0].version = 0;
-            fixture.consumed[0].extension = None;
-        }
         "inputs_8" => duplicate(&mut fixture, 8, false),
         "inputs_32" => duplicate(&mut fixture, 32, false),
         "context_32" | "recovery_32" | "assets_32" | "asset_failure" => {

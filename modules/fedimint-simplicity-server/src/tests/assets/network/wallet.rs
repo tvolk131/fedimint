@@ -127,7 +127,7 @@ async fn run() {
     assert_eq!(wallet.history().await.len(), 1);
     assert_eq!(wallet.contracts().await[0].0.txid, deposit_id);
 
-    // v0 covenant top-up needs external primary-module funding, and release
+    // Native covenant top-up needs external primary-module funding, and release
     // pays into primary-module change. Both signatures must cover final change.
     let descriptor = ContractDescriptor::top_up([5; 32], 0, 0);
     let top_up = wallet

@@ -5,7 +5,7 @@ use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::transaction::{Transaction, TransactionSignature};
 
 use super::*;
-use crate::assets::{asset_id, namespace, signature_hash_v1};
+use crate::assets::{asset_id, namespace, signature_hash};
 
 pub(super) fn transaction() -> (FederationId, Transaction) {
     let federation = FederationId(bitcoin::hashes::sha256::Hash::from_byte_array([0x99; 32]));
@@ -17,7 +17,7 @@ pub(super) fn transaction() -> (FederationId, Transaction) {
             DynInput::from_typed(7, foreign),
         ],
         outputs: vec![
-            DynOutput::from_typed(4, legacy()),
+            DynOutput::from_typed(4, native()),
             DynOutput::from_typed(4, asset()),
             DynOutput::from_typed(7, ContractOutput::action_output(actions())),
         ],
@@ -32,7 +32,7 @@ fn encodings_and_domains_match_independent_reference() {
     let fixture = fixtures();
     let wire = &fixture["wire"];
     for (name, output) in [
-        ("legacy_output", legacy()),
+        ("native_output", native()),
         ("asset_output", asset()),
         ("actions_output", ContractOutput::action_output(actions())),
     ] {
@@ -57,11 +57,7 @@ fn encodings_and_domains_match_independent_reference() {
             "outpoint_hash",
             input().outpoint.consensus_hash_sha256().to_byte_array(),
         ),
-        (
-            "sighash_v0",
-            crate::signature_hash(federation, 4, &tx).unwrap(),
-        ),
-        ("sighash_v1", signature_hash_v1(federation, 4, &tx).unwrap()),
+        ("sighash_v1", signature_hash(federation, 4, &tx).unwrap()),
     ] {
         assert_eq!(
             hash.as_slice(),
@@ -69,19 +65,15 @@ fn encodings_and_domains_match_independent_reference() {
             "{name}"
         );
     }
-    let v0 = crate::signature_hash(federation, 4, &tx).unwrap();
-    let v1 = signature_hash_v1(federation, 4, &tx).unwrap();
+    let v1 = signature_hash(federation, 4, &tx).unwrap();
     let mut changed_actions = actions();
     changed_actions.creations[0].signature = schnorr::Signature::from_slice(&[0x77; 64]).unwrap();
     tx.outputs[2] = DynOutput::from_typed(7, ContractOutput::action_output(changed_actions));
-    assert_ne!(crate::signature_hash(federation, 4, &tx).unwrap(), v0);
-    assert_eq!(signature_hash_v1(federation, 4, &tx).unwrap(), v1);
-    // Foreign funding inputs are outside the inner intent; claim references in
-    // this module are not. This also pins the two versions' signing boundary.
+    assert_eq!(signature_hash(federation, 4, &tx).unwrap(), v1);
     tx.inputs.pop();
-    assert_eq!(signature_hash_v1(federation, 4, &tx).unwrap(), v1);
+    assert_eq!(signature_hash(federation, 4, &tx).unwrap(), v1);
     let mut changed = input();
     changed.outpoint.out_idx += 1;
     tx.inputs[0] = DynInput::from_typed(4, changed);
-    assert_ne!(signature_hash_v1(federation, 4, &tx).unwrap(), v1);
+    assert_ne!(signature_hash(federation, 4, &tx).unwrap(), v1);
 }

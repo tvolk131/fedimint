@@ -10,11 +10,10 @@ use fedimint_core::transaction::Transaction;
 use fedimint_core::{Amount, OutPoint};
 use serde::{Deserialize, Serialize};
 
-use crate::{ContractError, ContractInput, ContractOutput, MAX_CONTRACTS};
+use crate::{ContractError, ContractInput, ContractOutput, EXECUTION_VERSION, MAX_CONTRACTS};
 
 pub mod accounting;
 
-pub const ASSET_VERSION: u32 = 1;
 pub const MAX_ASSETS: usize = 32;
 pub const CREATION_FEE_MSAT: u64 = 100;
 
@@ -141,7 +140,7 @@ impl ContractOutput {
 
     pub fn action_output(actions: AssetActions) -> Self {
         Self {
-            version: ASSET_VERSION,
+            version: EXECUTION_VERSION,
             amount: Amount::ZERO,
             cmr: [0; 32],
             state: [0; 32],
@@ -151,9 +150,9 @@ impl ContractOutput {
     }
 }
 
-/// The v0 digest is unchanged. V1 removes only creation signatures, avoiding
-/// self-reference, and commits all operations, claim keys, and outer outputs.
-pub fn signature_hash_v1(
+/// Commits all operations, claim keys, and outer outputs while excluding
+/// creation signatures to avoid self-reference.
+pub fn signature_hash(
     federation: FederationId,
     module: ModuleInstanceId,
     tx: &Transaction,
@@ -188,7 +187,7 @@ pub fn signature_hash_v1(
             // instance, so simultaneous creation batches do not sign each
             // other's signatures. Other foreign output types stay opaque.
             let mut contract = contract.clone();
-            if contract.version == ASSET_VERSION
+            if contract.version == EXECUTION_VERSION
                 && let Some(AssetExtension::Actions(actions)) = &mut contract.extension
             {
                 for creation in &mut actions.creations {

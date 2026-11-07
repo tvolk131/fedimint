@@ -307,19 +307,17 @@ impl SimplicityClientModule {
             .keys
             .program(descriptor, self.store.templates.as_ref())?;
         let recovery = self.store.keys.encrypt(descriptor)?;
-        match version {
-            crate::common::EXECUTION_VERSION => {
-                ensure!(
-                    bundle == AssetBundle::default(),
-                    "v0 contracts cannot hold assets"
-                );
-                program.output(amount, state, recovery)
-            }
-            crate::common::assets::ASSET_VERSION => {
-                program.asset_output(amount, state, recovery, bundle)
-            }
-            _ => anyhow::bail!("unsupported execution version"),
+        ensure!(
+            version == crate::common::EXECUTION_VERSION,
+            "unsupported execution version"
+        );
+        if descriptor.template == crate::descriptor::TOP_UP_TEMPLATE {
+            ensure!(
+                bundle == AssetBundle::default(),
+                "top-up-or-release only supports bitcoin"
+            );
         }
+        program.asset_output(amount, state, recovery, bundle)
     }
 
     /// Atomically reserve inputs, obtain native funding/change from the primary

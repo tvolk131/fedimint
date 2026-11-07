@@ -102,7 +102,7 @@ fn pruning_authorization(source: &str) -> (Authorization, Transaction) {
         module: 4,
         spends: vec![PreparedSpend {
             outpoint: point,
-            version: 0,
+            version: common::EXECUTION_VERSION,
             key,
             program,
             witnesses: witnesses([]),
@@ -217,13 +217,11 @@ fn a_funding_dependent_branch_cannot_silently_change_pruning_fees() {
 }
 
 #[test]
-fn version_restrictions_apply_to_revealed_code_after_pruning() {
+fn current_context_jets_work_in_both_pruned_branches() {
     let (mut authorization, tx) = pruning_authorization(
-        "fn main() { jet::bip_0340_verify((param::OWNER, jet::fm_sig_hash_all()), witness::SIGNATURE); match jet::lt_64(jet::fm_session_index(), 5) { true => {}, false => { assert!(jet::eq_32(jet::fm_input_version(0), 0)); }, } }",
+        "fn main() { jet::bip_0340_verify((param::OWNER, jet::fm_sig_hash_all()), witness::SIGNATURE); match jet::lt_64(jet::fm_session_index(), 5) { true => {}, false => { assert!(jet::eq_32(jet::fm_input_version(0), 1)); }, } }",
     );
-    // The v1-only jet is hidden and therefore is not part of the submitted v0
-    // program's allowlist check, exactly as in guardian validation.
     assert!(authorization.finalize_inputs(&tx).is_ok());
     authorization.snapshot.session_index = 6;
-    assert!(authorization.pruned_inputs(&tx).is_err());
+    assert!(authorization.pruned_inputs(&tx).is_ok());
 }

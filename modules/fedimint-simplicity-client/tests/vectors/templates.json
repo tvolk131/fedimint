@@ -1,6 +1,6 @@
 {
   "owner/v1": { "execution_version": 1, "cmr": "ca2d9715bcabcfc2896789708b49e6e5244ba329c9f9bb8ff0dcfd21401053a6" },
-  "top-up-or-release/v1": { "execution_version": 0, "cmr": "71fb57a6e314492cca2b7945e557961498a4bd1376c7e51fc0c97e69a22ef80f" },
+  "top-up-or-release/v1": { "execution_version": 1, "cmr": "71fb57a6e314492cca2b7945e557961498a4bd1376c7e51fc0c97e69a22ef80f" },
   "binary-market/v1": { "execution_version": 1, "cmr": "1e0a4ca51597b6a4a38ca2881ca3f0536277730f4eda9aba4d729e258420ac1f" },
   "limit-order/sell": { "cmr": "8ed5e382683e9e6f49f7ea29406b9a4214fcaa7f717cd3885162becc0708f052" },
   "limit-order/buy": { "cmr": "24afb7fc23408a07ca8878a1e9a3724e1e76f4033f2defea57f390b7923ab72e" },

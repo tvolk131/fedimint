@@ -15,9 +15,7 @@ use fedimint_core::transaction::{Transaction, TransactionError};
 use fedimint_core::{Amount, OutPoint, TransactionId};
 use fedimint_server_core::ModuleTransactionContext;
 use fedimint_simplicity_common::assets::accounting::balances;
-use fedimint_simplicity_common::assets::{
-    ASSET_VERSION, AssetActions, AssetId, AssetRecord, asset_id, namespace, signature_hash_v1,
-};
+use fedimint_simplicity_common::assets::{AssetActions, AssetId, AssetRecord, asset_id, namespace};
 use fedimint_simplicity_common::resources::check_output;
 use fedimint_simplicity_common::runtime::{
     Environment, EnvironmentInput, EnvironmentOutput, execute_decoded,
@@ -127,21 +125,19 @@ pub(crate) async fn validate(
         .enumerate()
         .map(|(index, ((input, stored), input_index))| Execution {
             input: (*input).clone(),
-            environment: hashes
-                .intent(stored.output.version)
-                .map(|signature_hash| Environment {
-                    signature_hash,
-                    session_index: context.consensus.session_index,
-                    block_count,
-                    current: stored.output.clone(),
-                    creation_session: stored.creation_session,
-                    creation_block_count: stored.creation_block_count,
-                    input_index: index as u32,
-                    input_count: inputs.len() as u32,
-                    outputs: outputs.clone(),
-                    inputs: resolved.clone(),
-                    actions: actions.clone(),
-                }),
+            environment: hashes.intent().map(|signature_hash| Environment {
+                signature_hash,
+                session_index: context.consensus.session_index,
+                block_count,
+                current: stored.output.clone(),
+                creation_session: stored.creation_session,
+                creation_block_count: stored.creation_block_count,
+                input_index: index as u32,
+                input_count: inputs.len() as u32,
+                outputs: outputs.clone(),
+                inputs: resolved.clone(),
+                actions: actions.clone(),
+            }),
             program: prepared
                 .programs
                 .get(input_index)
@@ -206,8 +202,7 @@ struct TransactionHashes<'a> {
     transaction: &'a Transaction,
     federation_id: FederationId,
     module_id: ModuleInstanceId,
-    legacy: OnceLock<Result<[u8; 32], ContractError>>,
-    assets: OnceLock<Result<[u8; 32], ContractError>>,
+    intent: OnceLock<Result<[u8; 32], ContractError>>,
     txid: OnceLock<TransactionId>,
 }
 
@@ -217,20 +212,14 @@ impl<'a> TransactionHashes<'a> {
             transaction: context.transaction,
             federation_id: context.consensus.federation_id,
             module_id: context.module_instance_id,
-            legacy: OnceLock::new(),
-            assets: OnceLock::new(),
+            intent: OnceLock::new(),
             txid: OnceLock::new(),
         }
     }
 
-    fn intent(&self, version: u32) -> Result<[u8; 32], ContractError> {
-        let (cache, hash) = if version == 0 {
-            (&self.legacy, signature_hash as fn(_, _, _) -> _)
-        } else {
-            (&self.assets, signature_hash_v1 as fn(_, _, _) -> _)
-        };
-        cache
-            .get_or_init(|| hash(self.federation_id, self.module_id, self.transaction))
+    fn intent(&self) -> Result<[u8; 32], ContractError> {
+        self.intent
+            .get_or_init(|| signature_hash(self.federation_id, self.module_id, self.transaction))
             .clone()
     }
 
@@ -261,7 +250,7 @@ async fn validate_assets(
         {
             return Err(ContractError::NamespaceUsed);
         }
-        let message = Message::from_digest(hashes.intent(ASSET_VERSION)?);
+        let message = Message::from_digest(hashes.intent()?);
         SECP256K1
             .verify_schnorr(
                 &creation.signature,

@@ -31,11 +31,7 @@ fn literal_programs_pin_cmr_resource_bounds_fees_and_execution_versions() {
             vector["fee"].as_u64().unwrap()
         );
         env.current.version = 0;
-        if vector["name"] == "issuance" {
-            assert_eq!(runtime::execute(&input, &env), Err(ContractError::Version));
-        } else {
-            assert!(runtime::execute(&input, &env).is_ok());
-        }
+        assert_eq!(runtime::execute(&input, &env), Err(ContractError::Version));
         env.current.version = 1;
         env.current.cmr[0] ^= 1;
         assert_eq!(

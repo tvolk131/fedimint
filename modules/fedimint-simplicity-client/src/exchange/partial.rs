@@ -58,7 +58,9 @@ impl PartialLimitOrder {
 
     pub fn state(&self, output: &ContractOutput) -> anyhow::Result<OrderState> {
         ensure!(
-            output.version == 1 && output.cmr == self.program()?.cmr() && output.state == [0; 32],
+            output.version == crate::common::EXECUTION_VERSION
+                && output.cmr == self.program()?.cmr()
+                && output.state == [0; 32],
             "wrong order policy"
         );
         let bundle = output.bundle().context("missing order assets")?;

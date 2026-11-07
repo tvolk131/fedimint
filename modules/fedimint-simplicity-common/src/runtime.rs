@@ -28,7 +28,7 @@ pub struct EnvironmentInput {
 #[derive(Debug, Clone)]
 pub struct Environment {
     /// Transaction-wide data is shared across input executions. Only the
-    /// current contract, its clocks/index, and versioned intent hash vary.
+    /// current contract and its clocks/index vary.
     pub inputs: Arc<[EnvironmentInput]>,
     pub actions: Arc<crate::assets::AssetActions>,
     pub signature_hash: [u8; 32],
@@ -119,20 +119,8 @@ pub fn check_commitment(
     program: &RedeemNode,
     output: &ContractOutput,
 ) -> Result<(), ContractError> {
-    if output.version == 0 {
-        for node in program.post_order_iter::<InternalSharing>() {
-            if let simplicity::node::Inner::Jet(jet) = node.node.inner()
-                && let Some(jet) = jet.as_any().downcast_ref::<FedimintJet>()
-            {
-                let new_jet = match jet {
-                    FedimintJet::Context(jet) => (*jet as u8) >= 16,
-                    FedimintJet::Core(jet) => *jet == simplicity::jet::Core::Multiply64,
-                };
-                if new_jet {
-                    return Err(ContractError::Version);
-                }
-            }
-        }
+    if output.version != crate::EXECUTION_VERSION {
+        return Err(ContractError::Version);
     }
     if program.cmr().to_byte_array() != output.cmr {
         return Err(ContractError::Commitment);

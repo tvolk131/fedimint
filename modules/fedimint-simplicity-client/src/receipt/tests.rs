@@ -274,7 +274,7 @@ fn receipts_precede_creation_signatures_across_instances_in_either_order() {
                 .verify_schnorr(
                     &signature,
                     &Message::from_digest(
-                        crate::common::assets::signature_hash_v1(federation(), plan.module, &tx)
+                        crate::common::assets::signature_hash(federation(), plan.module, &tx)
                             .unwrap(),
                     ),
                     &keys[i].x_only_public_key().0,

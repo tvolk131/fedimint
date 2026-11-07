@@ -185,7 +185,7 @@ JSON outside the branch; preserve compact comparisons in `RESULTS.md`.
 | `decode` | Production `decode_program`: length checks, structural preflight, type inference/limits, redemption decoding and static bounds, including dropping its result. |
 | `vm_cached` | A predecoded program: allocate a fresh BitMachine, execute, and drop the machine/result. Excludes decoding, CMR and execution-version checks. |
 | `runtime_execute` | Production `execute`, including decode, CMR/version checks, VM allocation/execution and fee calculation. |
-| `intent_hash` | One production v0/v1 transaction intent hash. |
+| `intent_hash` | One production v1 transaction intent hash. |
 | `environment_clone` | Clone and drop one already constructed environment. Shares immutable input/output/action data through `Arc` and copies the current contract snapshot. It is **not** a measurement of the entire context-building path. The first baseline predates sharing and copied the full context. |
 | `guardian_validation` | The production structural, state-resolution, kind-preparation and instance-validation hooks: limits, decoding/commitments, output hashing, conservation, clocks, intent hashes, environments and VM execution. Includes current-thread executor entry and dropping preparations/results. |
 | `transaction_preflight` | Production `resources::check_transaction`: combined byte/count checks, creation-signature charges, structural checks and sequential redemption decoding/static cost accumulation. This unsigned client preflight omits the outer signature envelope. Stops on the first error, before VM execution or database access. |
@@ -232,7 +232,7 @@ keeps peak allocation associated with one operation.
 
 ## Cases
 
-- `unit_v0` / `unit_v1`: minimal programs, exposing fixed overhead.
+- `unit_v1`: minimal programs, exposing fixed overhead.
 - Adversarial `context_*` cases repeat a context jet 512 times with full
   32-entry balance, authority, issuance and burn lists. They cover first/last/
   missing asset searches, authority absence, outpoint hashing, a scalar-read
