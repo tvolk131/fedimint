@@ -8,6 +8,10 @@ readme = { workspace = true }
 repository = { workspace = true }
 version = { workspace = true }
 
+[features]
+# Client-side examples only; no additional guardian primitives or wire types.
+ptlc = ["dep:schnorr_fun", "dep:sha2"]
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -21,7 +25,9 @@ fedimint-derive-secret = { workspace = true }
 fedimint-simplicity-common = { workspace = true, features = ["compiler"] }
 futures = { workspace = true }
 rand = { workspace = true }
+schnorr_fun = { workspace = true, optional = true, features = ["serde"] }
 serde = { workspace = true }
+sha2 = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

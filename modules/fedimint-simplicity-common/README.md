@@ -536,6 +536,11 @@ records. These fees and context-jet costs still require production calibration.
 
 ## External reference applications
 
+The opt-in [PTLC settlement example](../fedimint-simplicity-client/PTLC.md)
+demonstrates adaptor-signature claims and timeout refunds using the existing
+signature and clock jets. Enable the client `ptlc` feature for its low-level
+helpers; it adds no guardian rules or default wallet/template integration.
+
 `tvolk131/fedimint-simplicity` contains separately maintained binary-market,
 limit-order, partial-order, constant-product, and top-up/release implementations.
 These are reference consumers of the public Rust API, not officially supported

@@ -5,6 +5,7 @@ mod config;
 mod diagnostics;
 mod preflight;
 mod pruning;
+mod ptlc;
 mod upgrades;
 
 use std::collections::BTreeMap;

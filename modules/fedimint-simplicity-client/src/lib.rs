@@ -9,6 +9,8 @@ pub mod assets;
 pub mod descriptor;
 mod owner;
 pub use owner::owner_program;
+#[cfg(feature = "ptlc")]
+pub mod ptlc;
 pub mod receipt;
 pub mod wallet;
 mod watch;
