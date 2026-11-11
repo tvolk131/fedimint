@@ -53,7 +53,7 @@ fedimint-mintv2-server = { workspace = true }
 fedimint-portalloc = { workspace = true }
 fedimint-rocksdb = { workspace = true }
 fedimint-server = { workspace = true }
-fedimint-simplicity-client = { workspace = true }
+fedimint-simplicity-client = { workspace = true, features = ["ptlc"] }
 fedimint-testing-core = { workspace = true }
 libc = "0.2"
 rand = { workspace = true }

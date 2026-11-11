@@ -1,0 +1,15 @@
+fn main() {
+    let funder_signature: Signature = witness::FUNDER_SIGNATURE;
+    assert!(jet::eq_256(jet::fm_current_state(), param::PAYMENT));
+    match witness::REFUND {
+        true => {
+            jet::bip_0340_verify((param::REFUNDER, jet::fm_sig_hash_all()), funder_signature);
+            assert!(jet::le_64(param::EXPIRY, jet::fm_block_count()));
+        },
+        false => {
+            jet::bip_0340_verify((param::FUNDER, jet::fm_sig_hash_all()), funder_signature);
+            assert!(jet::lt_64(jet::fm_block_count(), param::EXPIRY));
+            jet::bip_0340_verify((param::CLAIMANT, jet::fm_sig_hash_all()), witness::CLAIMANT_SIGNATURE);
+        },
+    }
+}
