@@ -365,11 +365,11 @@ impl ClientModule for LightningClientModule {
     fn output_fee(
         &self,
         amounts: &Amounts,
-        _output: &<Self::Common as ModuleCommon>::Output,
+        output: &<Self::Common as ModuleCommon>::Output,
     ) -> Option<Amounts> {
-        Some(Amounts::new_bitcoin(
-            self.cfg.fee_consensus.fee(amounts.expect_only_bitcoin()),
-        ))
+        self.cfg
+            .output_fee(output.ensure_v0_ref().ok()?, amounts.expect_only_bitcoin())
+            .map(Amounts::new_bitcoin)
     }
 
     #[cfg(feature = "cli")]

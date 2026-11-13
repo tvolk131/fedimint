@@ -9,6 +9,16 @@ pub const GATEWAYS_ENDPOINT: &str = "gateways";
 pub const OUTGOING_CONTRACT_EXPIRATION_ENDPOINT: &str = "outgoing_contract_expiration";
 pub const REMOVE_GATEWAY_ENDPOINT: &str = "remove_gateway";
 
+// Federated BOLT12 federation endpoints
+pub const BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT: &str = "bolt12_registration_by_handle";
+pub const BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT: &str = "bolt12_registration_by_recipient";
+pub const BOLT12_NEXT_STOCK_ENDPOINT: &str = "bolt12_next_stock";
+pub const BOLT12_RESERVATION_ENDPOINT: &str = "bolt12_reservation";
+pub const BOLT12_AWAIT_RECEIVES_ENDPOINT: &str = "bolt12_await_receives";
+pub const BOLT12_CONTRACT_ENDPOINT: &str = "bolt12_contract";
+pub const BOLT12_GATEWAY_APPROVED_ENDPOINT: &str = "bolt12_gateway_approved";
+pub const BOLT12_SET_GATEWAY_VOTE_ENDPOINT: &str = "bolt12_set_gateway_vote";
+
 // Gateway endpoints
 pub const CREATE_BOLT11_INVOICE_ENDPOINT: &str = "/create_bolt11_invoice";
 pub const VERIFY_BOLT11_PREIMAGE_ENDPOINT: &str = "/verify_bolt11_preimage";

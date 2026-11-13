@@ -10,7 +10,8 @@ use group::Curve;
 use serde::{Deserialize, Serialize};
 use tpe::{AggregatePublicKey, PublicKeyShare, SecretKeyShare};
 
-use crate::LightningCommonInit;
+use crate::bolt12::{Bolt12Config, output_amount_and_fee};
+use crate::{LightningCommonInit, LightningOutputV0};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LightningConfig {
@@ -29,11 +30,33 @@ pub struct LightningConfigConsensus {
     pub tpe_pks: BTreeMap<PeerId, PublicKeyShare>,
     pub fee_consensus: FeeConsensus,
     pub network: Network,
+    /// Present only when the experimental BOLT12 receive path was enabled at
+    /// setup.
+    #[serde(default)]
+    pub bolt12: Option<Bolt12Config>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LightningConfigPrivate {
     pub sk: SecretKeyShare,
+    #[serde(default)]
+    pub bolt12: Option<Bolt12PrivateConfig>,
+}
+
+/// This guardian's share of the invoice signing key and its private channel
+/// identity.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Bolt12PrivateConfig {
+    /// Serialized FROST key package.
+    pub key_package: Vec<u8>,
+    pub transport_secret: bitcoin::secp256k1::SecretKey,
+}
+
+impl std::fmt::Debug for Bolt12PrivateConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bolt12PrivateConfig")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
@@ -42,6 +65,26 @@ pub struct LightningClientConfig {
     pub tpe_pks: BTreeMap<PeerId, PublicKeyShare>,
     pub fee_consensus: FeeConsensus,
     pub network: Network,
+    #[serde(default)]
+    pub bolt12: Option<Bolt12Config>,
+}
+
+impl LightningClientConfig {
+    /// The fee the federation charges for `output`. `declared` is the amount
+    /// the client attaches to it, which only a funded BOLT12 receive needs
+    /// because its amount is fixed by the reservation, not the output.
+    pub fn output_fee(&self, output: &LightningOutputV0, declared: Amount) -> Option<Amount> {
+        match output {
+            LightningOutputV0::Outgoing(contract) => Some(self.fee_consensus.fee(contract.amount)),
+            LightningOutputV0::Incoming(contract) => {
+                Some(self.fee_consensus.fee(contract.commitment.amount))
+            }
+            LightningOutputV0::Bolt12(output) => {
+                output_amount_and_fee(&self.fee_consensus, self.bolt12.as_ref()?, output, declared)
+                    .map(|(_, fee)| fee)
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for LightningClientConfig {
@@ -175,6 +218,7 @@ fn migrate_config_consensus(
             .collect(),
         fee_consensus: FeeConsensus::new(1000).expect("Relative fee is within range"),
         network: config.network.0,
+        bolt12: None,
     }
 }
 
@@ -184,6 +228,7 @@ fn migrate_config_private(
 ) -> LightningConfigPrivate {
     LightningConfigPrivate {
         sk: SecretKeyShare(config.threshold_sec_key.0.0.0),
+        bolt12: None,
     }
 }
 

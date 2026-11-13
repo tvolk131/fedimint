@@ -2,8 +2,13 @@ use std::collections::BTreeMap;
 
 use fedimint_core::db::{DbMigrationError, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::encoding::{Decodable, Encodable};
+use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::util::SafeUrl;
 use fedimint_core::{OutPoint, PeerId, impl_db_lookup, impl_db_record};
+use fedimint_lnv2_common::bolt12::{
+    Pending, ReceiveContract, Registration, RegistrationId, Reservation, ReservationId, StockItem,
+    StreamedReceive,
+};
 use fedimint_lnv2_common::contracts::{IncomingContract, OutgoingContract};
 use fedimint_lnv2_common::{ContractId, LightningInputV0, LightningOutputV0};
 use fedimint_server_core::migration::{
@@ -30,6 +35,22 @@ pub enum DbKeyPrefix {
     IncomingContractStreamIndex = 0x09,
     IncomingContractStream = 0x10,
     IncomingContractIndex = 0x11,
+    Bolt12Registration = 0x20,
+    Bolt12RegistrationCount = 0x21,
+    Bolt12Handle = 0x22,
+    Bolt12Recipient = 0x23,
+    Bolt12Expiry = 0x24,
+    Bolt12Stock = 0x25,
+    Bolt12PaymentHash = 0x26,
+    Bolt12Reservation = 0x27,
+    Bolt12OfferPending = 0x28,
+    Bolt12GatewayPending = 0x29,
+    Bolt12GatewayVote = 0x2a,
+    Bolt12GatewayDesiredVote = 0x2b,
+    Bolt12Contract = 0x2c,
+    Bolt12StreamIndex = 0x2d,
+    Bolt12Stream = 0x2e,
+    Bolt12ContractIndex = 0x2f,
 }
 
 impl std::fmt::Display for DbKeyPrefix {
@@ -270,3 +291,210 @@ pub(crate) async fn migrate_to_v1(
 
     Ok(())
 }
+
+// Federated BOLT12 receives. See `docs/federated_bolt12.md` for the tables.
+
+#[derive(Debug, Clone, Encodable, Decodable)]
+pub struct Bolt12RegistrationKey(pub RegistrationId);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12RegistrationPrefix;
+
+impl_db_record!(
+    key = Bolt12RegistrationKey,
+    value = Registration,
+    db_prefix = DbKeyPrefix::Bolt12Registration,
+);
+
+impl_db_lookup!(
+    key = Bolt12RegistrationKey,
+    query_prefix = Bolt12RegistrationPrefix
+);
+
+/// Number of live registrations.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12RegistrationCountKey;
+
+impl_db_record!(
+    key = Bolt12RegistrationCountKey,
+    value = u64,
+    db_prefix = DbKeyPrefix::Bolt12RegistrationCount,
+);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12HandleKey(pub [u8; 32]);
+
+impl_db_record!(
+    key = Bolt12HandleKey,
+    value = RegistrationId,
+    db_prefix = DbKeyPrefix::Bolt12Handle,
+);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12RecipientKey(pub PublicKey);
+
+impl_db_record!(
+    key = Bolt12RecipientKey,
+    value = RegistrationId,
+    db_prefix = DbKeyPrefix::Bolt12Recipient,
+);
+
+/// Registrations ordered by expiry, so expired ones can be pruned without a
+/// full scan.
+#[derive(Debug, Clone, Encodable, Decodable)]
+pub struct Bolt12ExpiryKey(pub u64, pub RegistrationId);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12ExpiryPrefix;
+
+impl_db_record!(
+    key = Bolt12ExpiryKey,
+    value = (),
+    db_prefix = DbKeyPrefix::Bolt12Expiry,
+);
+
+impl_db_lookup!(key = Bolt12ExpiryKey, query_prefix = Bolt12ExpiryPrefix);
+
+/// Unused stock only: a row is removed when a reservation consumes it.
+#[derive(Debug, Clone, Encodable, Decodable)]
+pub struct Bolt12StockKey(pub RegistrationId, pub u64);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12StockRegistrationPrefix(pub RegistrationId);
+
+impl_db_record!(
+    key = Bolt12StockKey,
+    value = StockItem,
+    db_prefix = DbKeyPrefix::Bolt12Stock,
+);
+
+impl_db_lookup!(
+    key = Bolt12StockKey,
+    query_prefix = Bolt12StockRegistrationPrefix
+);
+
+/// Payment hashes that are in stock or have ever been reserved. A hash that
+/// has appeared in a reservation is never removed.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PaymentHashKey(pub [u8; 32]);
+
+impl_db_record!(
+    key = Bolt12PaymentHashKey,
+    value = (),
+    db_prefix = DbKeyPrefix::Bolt12PaymentHash,
+);
+
+/// Unfunded reservations only: funding removes the row.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12ReservationKey(pub ReservationId);
+
+impl_db_record!(
+    key = Bolt12ReservationKey,
+    value = Reservation,
+    db_prefix = DbKeyPrefix::Bolt12Reservation,
+    notify_on_modify = true
+);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12OfferPendingKey(pub RegistrationId);
+
+impl_db_record!(
+    key = Bolt12OfferPendingKey,
+    value = Vec<Pending>,
+    db_prefix = DbKeyPrefix::Bolt12OfferPending,
+);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12GatewayPendingKey(pub PublicKey);
+
+impl_db_record!(
+    key = Bolt12GatewayPendingKey,
+    value = Vec<Pending>,
+    db_prefix = DbKeyPrefix::Bolt12GatewayPending,
+);
+
+/// A guardian's latest consensus vote on a gateway.
+#[derive(Debug, Clone, Encodable, Decodable)]
+pub struct Bolt12GatewayVoteKey(pub PublicKey, pub PeerId);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12GatewayVoteGatewayPrefix(pub PublicKey);
+
+impl_db_record!(
+    key = Bolt12GatewayVoteKey,
+    value = bool,
+    db_prefix = DbKeyPrefix::Bolt12GatewayVote,
+);
+
+impl_db_lookup!(
+    key = Bolt12GatewayVoteKey,
+    query_prefix = Bolt12GatewayVoteGatewayPrefix
+);
+
+/// The vote this guardian's operator asked for. Local, not consensus state.
+#[derive(Debug, Clone, Encodable, Decodable)]
+pub struct Bolt12GatewayDesiredVoteKey(pub PublicKey);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12GatewayDesiredVotePrefix;
+
+impl_db_record!(
+    key = Bolt12GatewayDesiredVoteKey,
+    value = bool,
+    db_prefix = DbKeyPrefix::Bolt12GatewayDesiredVote,
+);
+
+impl_db_lookup!(
+    key = Bolt12GatewayDesiredVoteKey,
+    query_prefix = Bolt12GatewayDesiredVotePrefix
+);
+
+#[derive(Debug, Clone, Encodable, Decodable)]
+pub struct Bolt12ContractKey(pub OutPoint);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12ContractPrefix;
+
+impl_db_record!(
+    key = Bolt12ContractKey,
+    value = ReceiveContract,
+    db_prefix = DbKeyPrefix::Bolt12Contract,
+    notify_on_modify = true
+);
+
+impl_db_lookup!(key = Bolt12ContractKey, query_prefix = Bolt12ContractPrefix);
+
+/// Next index of the receive stream; see the incoming contract stream above
+/// for the indexing scheme this mirrors.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12StreamIndexKey;
+
+impl_db_record!(
+    key = Bolt12StreamIndexKey,
+    value = u64,
+    db_prefix = DbKeyPrefix::Bolt12StreamIndex,
+    notify_on_modify = true
+);
+
+#[derive(Debug, Clone, Encodable, Decodable)]
+pub struct Bolt12StreamKey(pub u64);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12StreamPrefix(pub u64);
+
+impl_db_record!(
+    key = Bolt12StreamKey,
+    value = StreamedReceive,
+    db_prefix = DbKeyPrefix::Bolt12Stream,
+);
+
+impl_db_lookup!(key = Bolt12StreamKey, query_prefix = Bolt12StreamPrefix);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12ContractIndexKey(pub OutPoint);
+
+impl_db_record!(
+    key = Bolt12ContractIndexKey,
+    value = u64,
+    db_prefix = DbKeyPrefix::Bolt12ContractIndex,
+);

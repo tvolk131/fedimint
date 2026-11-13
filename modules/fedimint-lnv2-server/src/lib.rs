@@ -4,6 +4,7 @@
 
 pub use fedimint_lnv2_common as common;
 
+mod bolt12;
 pub mod db;
 mod metrics;
 
@@ -67,12 +68,13 @@ use tpe::{
 use tracing::trace;
 
 use crate::db::{
-    BlockCountVoteKey, BlockCountVotePrefix, DbKeyPrefix, DecryptionKeyShareKey,
-    DecryptionKeySharePrefix, GatewayKey, GatewayPrefix, IncomingContractIndexKey,
-    IncomingContractIndexPrefix, IncomingContractKey, IncomingContractOutpointKey,
-    IncomingContractOutpointPrefix, IncomingContractPrefix, IncomingContractStreamIndexKey,
-    IncomingContractStreamKey, IncomingContractStreamPrefix, OutgoingContractKey,
-    OutgoingContractPrefix, PreimageKey, PreimagePrefix, UnixTimeVoteKey, UnixTimeVotePrefix,
+    BlockCountVoteKey, BlockCountVotePrefix, Bolt12ContractPrefix, Bolt12GatewayDesiredVotePrefix,
+    Bolt12GatewayVoteKey, DbKeyPrefix, DecryptionKeyShareKey, DecryptionKeySharePrefix, GatewayKey,
+    GatewayPrefix, IncomingContractIndexKey, IncomingContractIndexPrefix, IncomingContractKey,
+    IncomingContractOutpointKey, IncomingContractOutpointPrefix, IncomingContractPrefix,
+    IncomingContractStreamIndexKey, IncomingContractStreamKey, IncomingContractStreamPrefix,
+    OutgoingContractKey, OutgoingContractPrefix, PreimageKey, PreimagePrefix, UnixTimeVoteKey,
+    UnixTimeVotePrefix,
 };
 use crate::metrics::{LN_FUNDED_CONTRACT_SATS, LN_OUTGOING_CONTRACT_SETTLED};
 
@@ -205,6 +207,23 @@ impl ModuleInit for LightningInit {
                         "Lightning Incoming Contract Stream"
                     );
                 }
+                // BOLT12 tables are experimental and omitted from dumps.
+                DbKeyPrefix::Bolt12Registration
+                | DbKeyPrefix::Bolt12RegistrationCount
+                | DbKeyPrefix::Bolt12Handle
+                | DbKeyPrefix::Bolt12Recipient
+                | DbKeyPrefix::Bolt12Expiry
+                | DbKeyPrefix::Bolt12Stock
+                | DbKeyPrefix::Bolt12PaymentHash
+                | DbKeyPrefix::Bolt12Reservation
+                | DbKeyPrefix::Bolt12OfferPending
+                | DbKeyPrefix::Bolt12GatewayPending
+                | DbKeyPrefix::Bolt12GatewayVote
+                | DbKeyPrefix::Bolt12GatewayDesiredVote
+                | DbKeyPrefix::Bolt12Contract
+                | DbKeyPrefix::Bolt12StreamIndex
+                | DbKeyPrefix::Bolt12Stream
+                | DbKeyPrefix::Bolt12ContractIndex => {}
                 DbKeyPrefix::IncomingContractIndex => {
                     push_db_pair_items!(
                         dbtx,
@@ -256,6 +275,7 @@ impl ServerModuleInit for LightningInit {
 
         Ok(Lightning {
             cfg: args.cfg().to_typed()?,
+            our_peer_id: args.our_peer_id(),
             db: args.db().clone(),
             server_bitcoin_rpc_monitor: args.server_bitcoin_rpc_monitor(),
         })
@@ -286,9 +306,11 @@ impl ServerModuleInit for LightningInit {
                             FeeConsensus::new(0).expect("Relative fee is within range")
                         },
                         network: args.network,
+                        bolt12: None,
                     },
                     private: LightningConfigPrivate {
                         sk: dealer_sk(&polynomial, *peer),
+                        bolt12: None,
                     },
                 };
 
@@ -318,9 +340,11 @@ impl ServerModuleInit for LightningInit {
                     FeeConsensus::new(0).expect("Relative fee is within range")
                 },
                 network: args.network,
+                bolt12: None,
             },
             private: LightningConfigPrivate {
                 sk: SecretKeyShare(sks),
+                bolt12: None,
             },
         };
 
@@ -353,6 +377,7 @@ impl ServerModuleInit for LightningInit {
             tpe_pks: config.tpe_pks,
             fee_consensus: config.fee_consensus,
             network: config.network,
+            bolt12: config.bolt12,
         })
     }
 
@@ -408,6 +433,7 @@ fn dealer_sk(polynomial: &[Scalar], peer: PeerId) -> SecretKeyShare {
 #[derive(Debug)]
 pub struct Lightning {
     cfg: LightningConfig,
+    our_peer_id: PeerId,
     db: Database,
     server_bitcoin_rpc_monitor: ServerBitcoinRpcMonitor,
 }
@@ -419,7 +445,7 @@ impl ServerModule for Lightning {
 
     async fn consensus_proposal(
         &self,
-        _dbtx: &mut DatabaseTransaction<'_>,
+        dbtx: &mut DatabaseTransaction<'_>,
     ) -> Vec<LightningConsensusItem> {
         // We reduce the time granularity to deduplicate votes more often and not save
         // one consensus item every second.
@@ -430,6 +456,31 @@ impl ServerModule for Lightning {
         if let Ok(block_count) = self.get_block_count() {
             trace!(target: LOG_MODULE_LNV2, ?block_count, "Proposing block count");
             items.push(LightningConsensusItem::BlockCountVote(block_count));
+        }
+
+        if self.cfg.consensus.bolt12.is_some() {
+            // Propose every gateway vote our operator asked for that consensus
+            // does not reflect yet. An absent consensus vote counts as a
+            // rejection.
+            let desired = dbtx
+                .find_by_prefix(&Bolt12GatewayDesiredVotePrefix)
+                .await
+                .collect::<Vec<_>>()
+                .await;
+
+            for (key, approve) in desired {
+                let current = dbtx
+                    .get_value(&Bolt12GatewayVoteKey(key.0, self.our_peer_id))
+                    .await
+                    .unwrap_or(false);
+
+                if current != approve {
+                    items.push(LightningConsensusItem::Bolt12GatewayVote {
+                        gateway: key.0,
+                        approve,
+                    });
+                }
+            }
         }
 
         items
@@ -463,6 +514,9 @@ impl ServerModule for Lightning {
                 ensure!(current_vote < vote, "Unix time vote is redundant");
 
                 Ok(())
+            }
+            LightningConsensusItem::Bolt12GatewayVote { gateway, approve } => {
+                bolt12::process_gateway_vote(dbtx, &self.cfg, peer, gateway, approve).await
             }
             LightningConsensusItem::Default { variant, .. } => Err(anyhow!(
                 "Received lnv2 consensus item with unknown variant {variant}"
@@ -553,6 +607,9 @@ impl ServerModule for Lightning {
 
                 (pub_key, contract.commitment.amount)
             }
+            LightningInputV0::Bolt12Receive(outpoint, agg_decryption_key) => {
+                bolt12::process_input(dbtx, &self.cfg, *outpoint, agg_decryption_key).await?
+            }
         };
 
         Ok(InputMeta {
@@ -571,6 +628,23 @@ impl ServerModule for Lightning {
         outpoint: OutPoint,
     ) -> Result<TransactionItemAmounts, LightningOutputError> {
         let amount = match output.ensure_v0_ref()? {
+            LightningOutputV0::Bolt12(output) => {
+                let now = self.consensus_unix_time(dbtx).await;
+
+                let effect = bolt12::process_output(dbtx, &self.cfg, output, outpoint, now)
+                    .await
+                    .map_err(|e| LightningOutputError::Bolt12(e.to_string()))?;
+
+                if effect.funded {
+                    observe_funded_contract(dbtx, "incoming", effect.amount);
+                }
+
+                // These outputs carry their own fee schedule.
+                return Ok(TransactionItemAmounts {
+                    amounts: Amounts::new_bitcoin(effect.amount),
+                    fees: Amounts::new_bitcoin(effect.fee),
+                });
+            }
             LightningOutputV0::Outgoing(contract) => {
                 dbtx.insert_new_entry(&OutgoingContractKey(outpoint), contract)
                     .await;
@@ -661,10 +735,19 @@ impl ServerModule for Lightning {
                 |_, contract| -(contract.commitment.amount.msats as i64),
             )
             .await;
+
+        audit
+            .add_items(
+                dbtx,
+                module_instance_id,
+                &Bolt12ContractPrefix,
+                |_, contract| -(contract.amount.msats as i64),
+            )
+            .await;
     }
 
     fn api_endpoints(&self) -> Vec<ApiEndpoint<Self>> {
-        vec![
+        let mut endpoints = vec![
             public_api_endpoint! {
                 CONSENSUS_BLOCK_COUNT_ENDPOINT,
                 ApiVersion::new(0, 0),
@@ -761,7 +844,11 @@ impl ServerModule for Lightning {
                     Ok(Lightning::gateways(db).await)
                 }
             },
-        ]
+        ];
+
+        endpoints.extend(Self::bolt12_api_endpoints());
+
+        endpoints
     }
 }
 

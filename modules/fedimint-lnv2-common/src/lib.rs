@@ -9,6 +9,7 @@
 //! This module allows to atomically and trustlessly (in the federated trust
 //! model) interact with the Lightning network through a Lightning gateway.
 
+pub mod bolt12;
 pub mod config;
 pub mod contracts;
 pub mod endpoint_constants;
@@ -59,6 +60,8 @@ extensible_associated_module_type!(
 pub enum LightningInputV0 {
     Outgoing(OutPoint, OutgoingWitness),
     Incoming(OutPoint, AggregateDecryptionKey),
+    /// Claim or refund a funded federated BOLT12 receive.
+    Bolt12Receive(OutPoint, AggregateDecryptionKey),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]
@@ -70,7 +73,7 @@ pub enum OutgoingWitness {
 
 impl std::fmt::Display for LightningInputV0 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "LightningInputV0",)
+        write!(f, "LightningInputV0")
     }
 }
 
@@ -85,6 +88,7 @@ extensible_associated_module_type!(
 pub enum LightningOutputV0 {
     Outgoing(OutgoingContract),
     Incoming(IncomingContract),
+    Bolt12(bolt12::Bolt12Output),
 }
 
 impl std::fmt::Display for LightningOutputV0 {
@@ -128,12 +132,19 @@ pub enum LightningOutputError {
     InvalidContract,
     #[error("The contract is expired")]
     ContractExpired,
+    #[error("Invalid federated BOLT12 output: {0}")]
+    Bolt12(String),
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Encodable, Decodable, Serialize, Deserialize)]
 pub enum LightningConsensusItem {
     BlockCountVote(u64),
     UnixTimeVote(u64),
+    /// A guardian's vote on whether a gateway may reserve BOLT12 invoices.
+    Bolt12GatewayVote {
+        gateway: bitcoin::secp256k1::PublicKey,
+        approve: bool,
+    },
     #[encodable_default]
     Default {
         variant: u64,
@@ -149,6 +160,9 @@ impl std::fmt::Display for LightningConsensusItem {
             }
             LightningConsensusItem::UnixTimeVote(t) => {
                 write!(f, "LNv2 Unix Time {t}")
+            }
+            LightningConsensusItem::Bolt12GatewayVote { gateway, approve } => {
+                write!(f, "LNv2 BOLT12 Gateway Vote {gateway} {approve}")
             }
             LightningConsensusItem::Default { variant, bytes } => write!(
                 f,

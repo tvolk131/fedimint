@@ -283,15 +283,12 @@ impl ClientModule for GatewayClientModuleV2 {
 
     fn output_fee(
         &self,
-        _amount: &Amounts,
+        amount: &Amounts,
         output: &<Self::Common as ModuleCommon>::Output,
     ) -> Option<Amounts> {
-        let amount = match output.ensure_v0_ref().ok()? {
-            LightningOutputV0::Outgoing(contract) => contract.amount,
-            LightningOutputV0::Incoming(contract) => contract.commitment.amount,
-        };
-
-        Some(Amounts::new_bitcoin(self.cfg.fee_consensus.fee(amount)))
+        self.cfg
+            .output_fee(output.ensure_v0_ref().ok()?, amount.expect_only_bitcoin())
+            .map(Amounts::new_bitcoin)
     }
 }
 
