@@ -187,6 +187,22 @@ impl Reservation {
     pub fn net_amount(&self) -> Amount {
         self.amount.saturating_sub(self.gateway_fee)
     }
+
+    /// The contract funding this reservation creates. Known before funding,
+    /// so the gateway can verify decryption shares against it.
+    pub fn contract(&self) -> ReceiveContract {
+        ReceiveContract {
+            reservation: Self::id(self.registration, self.source),
+            registration: self.registration,
+            source: self.source,
+            payment_hash: self.payment_hash,
+            ciphertext: self.ciphertext,
+            amount: self.net_amount(),
+            gateway_fee: self.gateway_fee,
+            claim_pk: self.claim_pk,
+            refund_pk: self.gateway,
+        }
+    }
 }
 
 /// Hash pinning the opaque BOLT12 bytes an invoice is built from.

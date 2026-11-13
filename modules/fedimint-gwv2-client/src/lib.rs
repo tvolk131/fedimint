@@ -1,4 +1,5 @@
 mod api;
+pub mod bolt12;
 mod complete_sm;
 pub mod events;
 mod receive_sm;
@@ -57,6 +58,7 @@ use tpe::{AggregatePublicKey, PublicKeyShare};
 use tracing::{info, warn};
 
 use crate::api::GatewayFederationApi;
+use crate::bolt12::Bolt12ReceiveSMState;
 pub use crate::complete_sm::IncomingCircuitKey;
 use crate::complete_sm::{
     CircuitCompleteSMCommon, CircuitCompleteStateMachine, CompleteSMState, CompleteStateMachine,
@@ -166,6 +168,8 @@ pub enum GatewayOperationRoleV2 {
     Receive,
     /// An incoming Lightning circuit completion operation.
     CircuitCompletion,
+    /// A federated BOLT12 invoice reservation, which moves no funds.
+    Bolt12Reserve,
 }
 
 impl GatewayOperationMetaV2 {
@@ -302,6 +306,8 @@ pub enum GatewayClientStateMachinesV2 {
     /// Completes one incoming circuit independently of other circuits carrying
     /// the same payment hash and amount.
     CircuitComplete(CircuitCompleteStateMachine),
+    /// Funds a federated BOLT12 receive and recovers its preimage.
+    Bolt12Receive(bolt12::Bolt12ReceiveStateMachine),
 }
 
 impl fmt::Display for GatewayClientStateMachinesV2 {
@@ -318,6 +324,9 @@ impl fmt::Display for GatewayClientStateMachinesV2 {
             }
             GatewayClientStateMachinesV2::CircuitComplete(complete) => {
                 write!(f, "{complete}")
+            }
+            GatewayClientStateMachinesV2::Bolt12Receive(receive) => {
+                write!(f, "{receive}")
             }
         }
     }
@@ -364,6 +373,12 @@ impl State for GatewayClientStateMachinesV2 {
                     GatewayClientStateMachinesV2::CircuitComplete
                 )
             }
+            GatewayClientStateMachinesV2::Bolt12Receive(state) => {
+                sm_enum_variant_translation!(
+                    state.transitions(context, global_context),
+                    GatewayClientStateMachinesV2::Bolt12Receive
+                )
+            }
         }
     }
 
@@ -373,6 +388,7 @@ impl State for GatewayClientStateMachinesV2 {
             GatewayClientStateMachinesV2::Receive(state) => state.operation_id(),
             GatewayClientStateMachinesV2::Complete(state) => state.operation_id(),
             GatewayClientStateMachinesV2::CircuitComplete(state) => state.operation_id(),
+            GatewayClientStateMachinesV2::Bolt12Receive(state) => state.operation_id(),
         }
     }
 }
@@ -765,6 +781,24 @@ impl GatewayClientModuleV2 {
             }
         }
 
+        self.start_circuit_completion(
+            receive_operation_id,
+            completion_operation_id,
+            payment_hash,
+            circuit,
+        )
+        .await
+    }
+
+    /// Start the operation that settles or fails one incoming circuit once
+    /// its receive operation reaches a final state.
+    async fn start_circuit_completion(
+        &self,
+        receive_operation_id: OperationId,
+        completion_operation_id: OperationId,
+        payment_hash: sha256::Hash,
+        circuit: IncomingCircuitKey,
+    ) -> Result<(), RelayIncomingHtlcError> {
         let completion =
             GatewayClientStateMachinesV2::CircuitComplete(CircuitCompleteStateMachine {
                 common: CircuitCompleteSMCommon {
@@ -889,8 +923,24 @@ impl GatewayClientModuleV2 {
         let mut stream = self.notifier.subscribe(operation_id).await;
 
         loop {
-            if let Some(GatewayClientStateMachinesV2::Receive(state)) = stream.next().await {
-                match state.state {
+            // A federated BOLT12 receive ends in the same outcomes as an
+            // incoming contract, so both are read as one kind of state.
+            let state = match stream.next().await {
+                Some(GatewayClientStateMachinesV2::Receive(state)) => state.state,
+                Some(GatewayClientStateMachinesV2::Bolt12Receive(state)) => match state.state {
+                    Bolt12ReceiveSMState::Funding => ReceiveSMState::Funding,
+                    Bolt12ReceiveSMState::Rejected(error) => ReceiveSMState::Rejected(error),
+                    Bolt12ReceiveSMState::Success(preimage) => ReceiveSMState::Success(preimage),
+                    Bolt12ReceiveSMState::Failure => ReceiveSMState::Failure,
+                    Bolt12ReceiveSMState::Refunding(out_points) => {
+                        ReceiveSMState::Refunding(out_points)
+                    }
+                },
+                _ => continue,
+            };
+
+            {
+                match state {
                     ReceiveSMState::Funding => {}
                     ReceiveSMState::Rejected(..) => return FinalReceiveState::Rejected,
                     ReceiveSMState::Success(preimage) => {
@@ -1046,6 +1096,16 @@ pub enum RelayIncomingHtlcError {
     /// started.
     #[error("The incoming contract could not be funded")]
     Transaction(#[from] TransactionSubmitError),
+
+    /// The held payment's amount is not the amount of the federated BOLT12
+    /// invoice it pays, so funding the recipient would not be covered.
+    #[error("Held {received_msat} msat for a BOLT12 invoice over {expected_msat} msat")]
+    Bolt12AmountMismatch {
+        /// The invoice amount.
+        expected_msat: u64,
+        /// The amount the Lightning node holds.
+        received_msat: u64,
+    },
 }
 
 impl From<FederationError> for GatewaySendPaymentError {

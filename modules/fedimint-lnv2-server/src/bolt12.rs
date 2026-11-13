@@ -16,8 +16,8 @@ use fedimint_lnv2_common::LightningInputError;
 use fedimint_lnv2_common::bolt12::{
     AddStock, Bolt12Output, INVOICE_LIFETIME, MAX_PENDING_PER_GATEWAY, MAX_PENDING_PER_OFFER,
     MAX_REGISTRATION_LIFETIME, MAX_REGISTRATIONS, MAX_STOCK, MAX_STOCK_BATCH, Pending,
-    REGISTRATIONS_PRUNED_PER_REGISTER, ReceiveContract, Register, Registration, RegistrationId,
-    Reservation, ReservationId, Reserve, Source, StreamedReceive, output_amount_and_fee, quorum,
+    REGISTRATIONS_PRUNED_PER_REGISTER, Register, Registration, RegistrationId, Reservation,
+    ReservationId, Reserve, Source, StreamedReceive, output_amount_and_fee, quorum,
     reservation_is_economical,
 };
 use fedimint_lnv2_common::config::LightningConfig;
@@ -53,6 +53,11 @@ pub async fn process_output(
         .bolt12
         .as_ref()
         .context("federated BOLT12 is disabled")?;
+
+    // Registrations, reservations and invoices are all timed against the
+    // consensus clock. Until a threshold of guardians has voted on it, it
+    // reads zero, and an invoice created at time zero is expired on arrival.
+    ensure!(now > 0, "the consensus clock is not established yet");
 
     let receive_amount = match output {
         Bolt12Output::Register(register) => {
@@ -451,17 +456,7 @@ async fn process_receive(
         dbtx.insert_entry(&gateway_key, &gateway_pending).await;
     }
 
-    let contract = ReceiveContract {
-        reservation: id,
-        registration: reservation.registration,
-        source: reservation.source,
-        payment_hash: reservation.payment_hash,
-        ciphertext: reservation.ciphertext,
-        amount: reservation.net_amount(),
-        gateway_fee: reservation.gateway_fee,
-        claim_pk: reservation.claim_pk,
-        refund_pk: reservation.gateway,
-    };
+    let contract = reservation.contract();
 
     dbtx.insert_new_entry(&Bolt12ContractKey(outpoint), &contract)
         .await;

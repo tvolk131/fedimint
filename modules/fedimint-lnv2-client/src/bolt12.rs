@@ -271,6 +271,12 @@ impl LightningClientModule {
             .context("The offer expired while stock was being added")
     }
 
+    /// The federation's Lightning configuration, including the fees and the
+    /// signing key of federated BOLT12 receives if they are enabled.
+    pub fn lightning_config(&self) -> &fedimint_lnv2_common::config::LightningClientConfig {
+        &self.cfg
+    }
+
     /// The offers this wallet knows it registered.
     pub async fn bolt12_offers(&self) -> Vec<Bolt12Offer> {
         self.client_ctx

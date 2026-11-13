@@ -553,6 +553,9 @@ async fn claiming_outgoing_contract_triggers_success() -> anyhow::Result<()> {
         LightningOperationMeta::LnurlReceive(..) => {
             panic!("Operation Meta is a LnurlReceive variant")
         }
+        LightningOperationMeta::Bolt12Setup(..) | LightningOperationMeta::Bolt12Receive(..) => {
+            panic!("Operation Meta is a BOLT12 variant")
+        }
     };
 
     let client_input = ClientInput::<LightningInput> {

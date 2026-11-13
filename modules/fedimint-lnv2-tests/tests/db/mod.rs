@@ -330,7 +330,25 @@ async fn test_server_db_migrations() -> anyhow::Result<()> {
                 | DbKeyPrefix::OutgoingContract
                 | DbKeyPrefix::DecryptionKeyShare
                 | DbKeyPrefix::Preimage
-                | DbKeyPrefix::Gateway => {
+                | DbKeyPrefix::Gateway
+                | DbKeyPrefix::Bolt12Registration
+                | DbKeyPrefix::Bolt12RegistrationCount
+                | DbKeyPrefix::Bolt12Handle
+                | DbKeyPrefix::Bolt12Recipient
+                | DbKeyPrefix::Bolt12Expiry
+                | DbKeyPrefix::Bolt12Stock
+                | DbKeyPrefix::Bolt12PaymentHash
+                | DbKeyPrefix::Bolt12Reservation
+                | DbKeyPrefix::Bolt12OfferPending
+                | DbKeyPrefix::Bolt12GatewayPending
+                | DbKeyPrefix::Bolt12GatewayVote
+                | DbKeyPrefix::Bolt12GatewayDesiredVote
+                | DbKeyPrefix::Bolt12Contract
+                | DbKeyPrefix::Bolt12StreamIndex
+                | DbKeyPrefix::Bolt12Stream
+                | DbKeyPrefix::Bolt12ContractIndex
+                | DbKeyPrefix::Bolt12Nonce
+                | DbKeyPrefix::Bolt12NonceCount => {
                     // Neither read nor written by `migrate_to_v1`, and
                     // the v0 snapshot holds no rows under them, so there
                     // is nothing to validate. Seeding them would widen
@@ -419,6 +437,12 @@ async fn test_client_db_migrations() -> anyhow::Result<()> {
                             index == 7,
                             "the stream index must round-trip unchanged, got {index}"
                         );
+                    }
+                    db::DbKeyPrefix::Bolt12ReceiveStreamIndex
+                    | db::DbKeyPrefix::Bolt12Offer
+                    | db::DbKeyPrefix::Bolt12NextOfferIndex => {
+                        // Added after the snapshot was taken and absent
+                        // from it, so there is no row to read back.
                     }
                     db::DbKeyPrefix::ExternalReservedStart
                     | db::DbKeyPrefix::CoreInternalReservedStart

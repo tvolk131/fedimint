@@ -3,8 +3,13 @@ use fedimint_core::module::ApiRequestErased;
 use fedimint_core::task::{MaybeSend, MaybeSync};
 use fedimint_core::{OutPoint, apply, async_trait_maybe_send};
 use fedimint_lnv2_common::ContractId;
+use fedimint_lnv2_common::bolt12::{
+    Registration, RegistrationId, Reservation, ReservationId, StockItem,
+};
 use fedimint_lnv2_common::endpoint_constants::{
-    CONSENSUS_BLOCK_COUNT_ENDPOINT, OUTGOING_CONTRACT_EXPIRATION_ENDPOINT,
+    BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
+    BOLT12_RESERVATION_ENDPOINT, CONSENSUS_BLOCK_COUNT_ENDPOINT,
+    OUTGOING_CONTRACT_EXPIRATION_ENDPOINT,
 };
 
 #[apply(async_trait_maybe_send!)]
@@ -17,6 +22,23 @@ pub trait GatewayFederationApi {
     /// The consensus block count, answered once a threshold of guardians
     /// report the same value.
     async fn consensus_block_count(&self) -> FederationResult<u64>;
+
+    async fn bolt12_registration_by_handle(
+        &self,
+        handle: [u8; 32],
+    ) -> FederationResult<Option<(RegistrationId, Registration)>>;
+
+    /// The lowest-indexed unused stock item of a registration.
+    async fn bolt12_next_stock(
+        &self,
+        registration: RegistrationId,
+    ) -> FederationResult<Option<(u64, StockItem)>>;
+
+    /// An unfunded reservation.
+    async fn bolt12_reservation(
+        &self,
+        reservation: ReservationId,
+    ) -> FederationResult<Option<Reservation>>;
 }
 
 #[apply(async_trait_maybe_send!)]
@@ -39,6 +61,39 @@ where
         self.request_current_consensus(
             CONSENSUS_BLOCK_COUNT_ENDPOINT.to_string(),
             ApiRequestErased::new(()),
+        )
+        .await
+    }
+
+    async fn bolt12_registration_by_handle(
+        &self,
+        handle: [u8; 32],
+    ) -> FederationResult<Option<(RegistrationId, Registration)>> {
+        self.request_current_consensus(
+            BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT.to_string(),
+            ApiRequestErased::new(handle),
+        )
+        .await
+    }
+
+    async fn bolt12_next_stock(
+        &self,
+        registration: RegistrationId,
+    ) -> FederationResult<Option<(u64, StockItem)>> {
+        self.request_current_consensus(
+            BOLT12_NEXT_STOCK_ENDPOINT.to_string(),
+            ApiRequestErased::new(registration),
+        )
+        .await
+    }
+
+    async fn bolt12_reservation(
+        &self,
+        reservation: ReservationId,
+    ) -> FederationResult<Option<Reservation>> {
+        self.request_current_consensus(
+            BOLT12_RESERVATION_ENDPOINT.to_string(),
+            ApiRequestErased::new(reservation),
         )
         .await
     }

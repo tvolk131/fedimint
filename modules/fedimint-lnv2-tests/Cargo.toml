@@ -19,6 +19,10 @@ path = "bin/swap_tests.rs"
 name = "fedimint_lnv2_tests"
 path = "tests/tests.rs"
 
+[[test]]
+name = "fedimint_lnv2_bolt12_tests"
+path = "tests/bolt12.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 async-stream = { workspace = true }
@@ -35,6 +39,7 @@ fedimint-dummy-client = { workspace = true }
 fedimint-dummy-common = { workspace = true }
 fedimint-dummy-server = { workspace = true }
 fedimint-eventlog = { workspace = true }
+fedimint-gwv2-client = { workspace = true }
 fedimint-ln-common = { workspace = true }
 fedimint-lnurl = { workspace = true }
 fedimint-lnv2-client = { workspace = true }
@@ -45,7 +50,9 @@ fedimint-server = { workspace = true }
 fedimint-testing = { workspace = true }
 futures = { workspace = true }
 itertools = { workspace = true }
+lightning = { workspace = true }
 lightning-invoice = { workspace = true }
+rand = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

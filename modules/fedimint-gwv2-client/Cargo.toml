@@ -20,6 +20,7 @@ name = "fedimint_gwv2_client"
 path = "src/lib.rs"
 
 [dependencies]
+anyhow = { workspace = true }
 aquamarine = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
@@ -33,8 +34,11 @@ fedimint-eventlog = { workspace = true }
 fedimint-lightning = { workspace = true }
 fedimint-lnv2-common = { workspace = true }
 fedimint-logging = { workspace = true }
+frost-secp256k1-tr = { workspace = true }
 futures = { workspace = true }
+lightning = { workspace = true }
 lightning-invoice = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
 serde_millis = { workspace = true }
 thiserror = { workspace = true }

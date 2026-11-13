@@ -1034,6 +1034,21 @@ async fn register_at(fed: &mut Federation, now: u64) {
 }
 
 #[tokio::test]
+async fn outputs_are_rejected_before_the_consensus_clock_is_established() {
+    let mut fed = Federation::new();
+    let key = Keypair::new(SECP256K1, &mut OsRng);
+    let output = Bolt12Output::Register(Register::new(policy(&key, 100), &key));
+
+    let rejection = fed
+        .rejection(output.clone(), 0)
+        .await
+        .expect("time zero is rejected");
+
+    assert!(rejection.contains("consensus clock"));
+    assert!(fed.rejection(output, 1).await.is_none());
+}
+
+#[tokio::test]
 async fn outputs_are_rejected_when_the_feature_is_disabled() {
     let mut fed = Federation::new();
 

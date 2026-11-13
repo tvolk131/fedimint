@@ -3857,6 +3857,7 @@ dependencies = [
 name = "fedimint-gwv2-client"
 version = "0.13.0"
 dependencies = [
+ "anyhow",
  "aquamarine",
  "async-stream",
  "async-trait",
@@ -3871,8 +3872,11 @@ dependencies = [
  "fedimint-lnv2-common",
  "fedimint-logging",
  "fedimint-tpe",
+ "frost-secp256k1-tr",
  "futures",
+ "lightning",
  "lightning-invoice",
+ "rand 0.8.5",
  "serde",
  "serde_millis",
  "thiserror 2.0.21",
@@ -4181,6 +4185,7 @@ dependencies = [
  "fedimint-dummy-common",
  "fedimint-dummy-server",
  "fedimint-eventlog",
+ "fedimint-gwv2-client",
  "fedimint-ln-common",
  "fedimint-lnurl",
  "fedimint-lnv2-client",
@@ -4192,7 +4197,9 @@ dependencies = [
  "fedimint-tpe",
  "futures",
  "itertools 0.14.0",
+ "lightning",
  "lightning-invoice",
+ "rand 0.8.5",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
