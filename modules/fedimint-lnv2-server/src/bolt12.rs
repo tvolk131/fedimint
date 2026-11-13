@@ -5,6 +5,8 @@
 //! a transaction or consensus item is applied. See `docs/federated_bolt12.md`.
 
 mod api;
+pub mod keys;
+pub mod signer;
 
 use anyhow::{Context, Result, ensure};
 use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};

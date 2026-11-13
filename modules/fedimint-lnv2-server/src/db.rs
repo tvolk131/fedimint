@@ -51,6 +51,8 @@ pub enum DbKeyPrefix {
     Bolt12StreamIndex = 0x2d,
     Bolt12Stream = 0x2e,
     Bolt12ContractIndex = 0x2f,
+    Bolt12Nonce = 0x30,
+    Bolt12NonceCount = 0x31,
 }
 
 impl std::fmt::Display for DbKeyPrefix {
@@ -497,4 +499,25 @@ impl_db_record!(
     key = Bolt12ContractIndexKey,
     value = u64,
     db_prefix = DbKeyPrefix::Bolt12ContractIndex,
+);
+
+/// Whether the nonce of a signing attempt has been spent. Local to this
+/// guardian, not consensus state.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12NonceKey(pub ReservationId, pub [u8; 32]);
+
+impl_db_record!(
+    key = Bolt12NonceKey,
+    value = bool,
+    db_prefix = DbKeyPrefix::Bolt12Nonce,
+);
+
+/// Signing attempts this guardian has started for a reservation.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12NonceCountKey(pub ReservationId);
+
+impl_db_record!(
+    key = Bolt12NonceCountKey,
+    value = u16,
+    db_prefix = DbKeyPrefix::Bolt12NonceCount,
 );

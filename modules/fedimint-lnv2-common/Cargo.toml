@@ -15,12 +15,14 @@ name = "fedimint_lnv2_common"
 path = "src/lib.rs"
 
 [dependencies]
+anyhow = { workspace = true }
 async-trait = { workspace = true }
 bitcoin = { workspace = true }
 fedimint-connectors = { workspace = true }
 fedimint-core = { workspace = true }
 fedimint-ln-common = { workspace = true }
 group = { workspace = true }
+lightning = { workspace = true }
 lightning-invoice = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }

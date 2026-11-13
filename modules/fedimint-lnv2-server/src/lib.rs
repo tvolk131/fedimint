@@ -21,7 +21,7 @@ use fedimint_core::core::ModuleInstanceId;
 use fedimint_core::db::{
     Database, DatabaseTransaction, DatabaseVersion, IDatabaseTransactionOpsCoreTyped,
 };
-use fedimint_core::envs::{FM_ENABLE_MODULE_LNV2_ENV, is_env_var_set_opt};
+use fedimint_core::envs::{FM_ENABLE_MODULE_LNV2_ENV, is_env_var_set, is_env_var_set_opt};
 use fedimint_core::module::audit::Audit;
 use fedimint_core::module::{
     Amounts, ApiEndpoint, ApiError, ApiVersion, CoreConsensusVersion, InputMeta,
@@ -223,7 +223,9 @@ impl ModuleInit for LightningInit {
                 | DbKeyPrefix::Bolt12Contract
                 | DbKeyPrefix::Bolt12StreamIndex
                 | DbKeyPrefix::Bolt12Stream
-                | DbKeyPrefix::Bolt12ContractIndex => {}
+                | DbKeyPrefix::Bolt12ContractIndex
+                | DbKeyPrefix::Bolt12Nonce
+                | DbKeyPrefix::Bolt12NonceCount => {}
                 DbKeyPrefix::IncomingContractIndex => {
                     push_db_pair_items!(
                         dbtx,
@@ -254,10 +256,16 @@ impl ServerModuleInit for LightningInit {
     }
 
     fn get_documented_env_vars(&self) -> Vec<EnvVarDoc> {
-        vec![EnvVarDoc {
-            name: FM_ENABLE_MODULE_LNV2_ENV,
-            description: "Set to 0/false to disable the LNv2 Lightning module. Enabled by default.",
-        }]
+        vec![
+            EnvVarDoc {
+                name: FM_ENABLE_MODULE_LNV2_ENV,
+                description: "Set to 0/false to disable the LNv2 Lightning module. Enabled by default.",
+            },
+            EnvVarDoc {
+                name: bolt12::keys::FM_ENABLE_FEDERATED_BOLT12_ENV,
+                description: "Experimental: set while generating a new federation's configuration to enable federated BOLT12 receives. Requires at least four guardians.",
+            },
+        ]
     }
 
     async fn init(&self, args: &ServerModuleInitArgs<Self>) -> anyhow::Result<Self::Module> {
@@ -276,6 +284,7 @@ impl ServerModuleInit for LightningInit {
         Ok(Lightning {
             cfg: args.cfg().to_typed()?,
             our_peer_id: args.our_peer_id(),
+            bolt12_signer: tokio::sync::Mutex::default(),
             db: args.db().clone(),
             server_bitcoin_rpc_monitor: args.server_bitcoin_rpc_monitor(),
         })
@@ -287,6 +296,12 @@ impl ServerModuleInit for LightningInit {
         args: &ConfigGenModuleArgs,
     ) -> BTreeMap<PeerId, ServerModuleConfig> {
         let polynomial = dealer_polynomial(peers.to_num_peers());
+
+        // Fixtures use a trusted dealer for the invoice key as they do for
+        // every other key here.
+        let bolt12 = is_env_var_set(bolt12::keys::FM_ENABLE_FEDERATED_BOLT12_ENV).then(|| {
+            bolt12::keys::fixture(peers).expect("Guardian count supports federated BOLT12")
+        });
 
         let tpe_pks = peers
             .iter()
@@ -306,11 +321,11 @@ impl ServerModuleInit for LightningInit {
                             FeeConsensus::new(0).expect("Relative fee is within range")
                         },
                         network: args.network,
-                        bolt12: None,
+                        bolt12: bolt12.as_ref().map(|(public, _)| public.clone()),
                     },
                     private: LightningConfigPrivate {
                         sk: dealer_sk(&polynomial, *peer),
-                        bolt12: None,
+                        bolt12: bolt12.as_ref().map(|(_, private)| private[peer].clone()),
                     },
                 };
 
@@ -326,6 +341,12 @@ impl ServerModuleInit for LightningInit {
     ) -> anyhow::Result<ServerModuleConfig> {
         let (polynomial, sks) = peers.run_dkg_g1().await?;
 
+        let bolt12 = if is_env_var_set(bolt12::keys::FM_ENABLE_FEDERATED_BOLT12_ENV) {
+            Some(bolt12::keys::generate(peers).await?)
+        } else {
+            None
+        };
+
         let server = LightningConfig {
             consensus: LightningConfigConsensus {
                 tpe_agg_pk: tpe::AggregatePublicKey(polynomial[0].to_affine()),
@@ -340,11 +361,11 @@ impl ServerModuleInit for LightningInit {
                     FeeConsensus::new(0).expect("Relative fee is within range")
                 },
                 network: args.network,
-                bolt12: None,
+                bolt12: bolt12.as_ref().map(|(public, _)| public.clone()),
             },
             private: LightningConfigPrivate {
                 sk: SecretKeyShare(sks),
-                bolt12: None,
+                bolt12: bolt12.map(|(_, private)| private),
             },
         };
 
@@ -363,6 +384,8 @@ impl ServerModuleInit for LightningInit {
                     .context("Public key set has no key for our identity")?,
             "Preimge encryption secret key share does not match our public key share"
         );
+
+        bolt12::keys::validate(*identity, &config)?;
 
         Ok(())
     }
@@ -434,6 +457,7 @@ fn dealer_sk(polynomial: &[Scalar], peer: PeerId) -> SecretKeyShare {
 pub struct Lightning {
     cfg: LightningConfig,
     our_peer_id: PeerId,
+    bolt12_signer: tokio::sync::Mutex<bolt12::signer::Signer>,
     db: Database,
     server_bitcoin_rpc_monitor: ServerBitcoinRpcMonitor,
 }
@@ -847,6 +871,7 @@ impl ServerModule for Lightning {
         ];
 
         endpoints.extend(Self::bolt12_api_endpoints());
+        endpoints.extend(Self::bolt12_signing_endpoints());
 
         endpoints
     }

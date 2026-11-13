@@ -8,17 +8,18 @@ use fedimint_core::module::{
 };
 use fedimint_core::secp256k1::PublicKey;
 use fedimint_lnv2_common::bolt12::{
-    ReceiveContract, Registration, RegistrationId, Reservation, ReservationId, StockItem,
-    StreamedReceive,
+    NonceRequest, NonceResponse, ReceiveContract, Registration, RegistrationId, Reservation,
+    ReservationId, SignRequest, StockItem, StreamedReceive,
 };
 use fedimint_lnv2_common::endpoint_constants::{
     BOLT12_AWAIT_RECEIVES_ENDPOINT, BOLT12_CONTRACT_ENDPOINT, BOLT12_GATEWAY_APPROVED_ENDPOINT,
-    BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
+    BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_NONCE_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
     BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT, BOLT12_RESERVATION_ENDPOINT,
-    BOLT12_SET_GATEWAY_VOTE_ENDPOINT,
+    BOLT12_SET_GATEWAY_VOTE_ENDPOINT, BOLT12_SIGN_ENDPOINT,
 };
 use futures::StreamExt;
 
+use super::signer;
 use crate::Lightning;
 use crate::db::{
     Bolt12ContractKey, Bolt12GatewayDesiredVoteKey, Bolt12HandleKey, Bolt12RecipientKey,
@@ -161,6 +162,65 @@ impl Lightning {
                     dbtx.commit_tx().await;
 
                     Ok(())
+                }
+            },
+        ]
+    }
+
+    /// Invoice signing. Not consensus: each guardian answers for itself.
+    pub(crate) fn bolt12_signing_endpoints() -> Vec<ApiEndpoint<Self>> {
+        vec![
+            public_api_endpoint! {
+                BOLT12_NONCE_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |module: &Lightning, context, request: NonceRequest| -> NonceResponse {
+                    let db = context.db();
+                    let mut dbtx = db.begin_transaction_nc().await;
+                    let now = module.consensus_unix_time(&mut dbtx).await;
+
+                    let approval = signer::approve(&mut dbtx, &module.cfg, &request, now)
+                        .await
+                        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+                    module
+                        .bolt12_signer
+                        .lock()
+                        .await
+                        .prepare(&module.cfg, &db, (request.reservation, request.attempt), approval, now)
+                        .await
+                        .map_err(|e| ApiError::bad_request(e.to_string()))
+                }
+            },
+            public_api_endpoint! {
+                BOLT12_SIGN_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |module: &Lightning, context, request: SignRequest| -> Vec<u8> {
+                    let db = context.db();
+                    let mut dbtx = db.begin_transaction_nc().await;
+                    let now = module.consensus_unix_time(&mut dbtx).await;
+
+                    // Only the gateway that holds a live reservation may spend
+                    // the nonce we issued for it.
+                    let authorized = dbtx
+                        .get_value(&Bolt12ReservationKey(request.reservation))
+                        .await
+                        .is_some_and(|reservation| {
+                            reservation.expires_at() > now && request.verify(&reservation.gateway)
+                        });
+
+                    if !authorized {
+                        return Err(ApiError::bad_request(
+                            "Reservation is unknown, expired, funded or not yours".to_string(),
+                        ));
+                    }
+
+                    module
+                        .bolt12_signer
+                        .lock()
+                        .await
+                        .sign(&module.cfg, &db, &request)
+                        .await
+                        .map_err(|e| ApiError::bad_request(e.to_string()))
                 }
             },
         ]

@@ -3,6 +3,8 @@
 //! See `docs/federated_bolt12.md`. Consensus pins opaque invoice terms by hash
 //! and never parses BOLT12 messages; guardians validate them when signing.
 
+pub mod invoice;
+
 use std::collections::BTreeMap;
 
 use bitcoin::hashes::{Hash, sha256};
@@ -479,4 +481,102 @@ pub fn quorum(guardians: usize) -> usize {
 pub struct StreamedReceive {
     pub outpoint: OutPoint,
     pub contract: ReceiveContract,
+}
+
+/// Round one of invoice signing: ask a guardian to validate the terms of a
+/// reservation and commit to a fresh nonce.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NonceRequest {
+    pub reservation: ReservationId,
+    /// Chosen by the gateway; a retry after a failed attempt uses a new one.
+    pub attempt: [u8; 32],
+    pub invoice_request: Vec<u8>,
+    pub payment_path: Vec<u8>,
+    pub signature: Signature,
+}
+
+impl NonceRequest {
+    fn message(reservation: ReservationId, attempt: [u8; 32]) -> Message {
+        // The reservation already pins the request and path by hash.
+        message(("fedimint/bolt12/nonce-request/v1", reservation, attempt).consensus_hash())
+    }
+
+    pub fn new(
+        reservation: ReservationId,
+        attempt: [u8; 32],
+        invoice_request: Vec<u8>,
+        payment_path: Vec<u8>,
+        gateway_key: &Keypair,
+    ) -> Self {
+        Self {
+            reservation,
+            attempt,
+            invoice_request,
+            payment_path,
+            signature: gateway_key.sign_schnorr(Self::message(reservation, attempt)),
+        }
+    }
+
+    pub fn verify(&self, gateway: &PublicKey) -> bool {
+        verify(
+            Self::message(self.reservation, self.attempt),
+            &self.signature,
+            gateway,
+        )
+    }
+}
+
+/// A guardian's serialized FROST nonce commitment for one attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NonceResponse {
+    pub commitments: Vec<u8>,
+}
+
+/// Round two of invoice signing: the signing package assembled from a quorum
+/// of nonce commitments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignRequest {
+    pub reservation: ReservationId,
+    pub attempt: [u8; 32],
+    /// Serialized FROST signing package.
+    pub package: Vec<u8>,
+    pub signature: Signature,
+}
+
+impl SignRequest {
+    fn message(reservation: ReservationId, attempt: [u8; 32], package: &Vec<u8>) -> Message {
+        message(
+            (
+                "fedimint/bolt12/sign-request/v1",
+                reservation,
+                attempt,
+                package,
+            )
+                .consensus_hash(),
+        )
+    }
+
+    pub fn new(
+        reservation: ReservationId,
+        attempt: [u8; 32],
+        package: Vec<u8>,
+        gateway_key: &Keypair,
+    ) -> Self {
+        let signature = gateway_key.sign_schnorr(Self::message(reservation, attempt, &package));
+
+        Self {
+            reservation,
+            attempt,
+            package,
+            signature,
+        }
+    }
+
+    pub fn verify(&self, gateway: &PublicKey) -> bool {
+        verify(
+            Self::message(self.reservation, self.attempt, &self.package),
+            &self.signature,
+            gateway,
+        )
+    }
 }
