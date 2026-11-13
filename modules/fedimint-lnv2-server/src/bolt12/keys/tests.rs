@@ -10,7 +10,7 @@ use fedimint_server_core::config::PeerHandleOps;
 use frost_secp256k1_tr as frost;
 use tokio::sync::{Mutex, Notify};
 
-use super::{fixture, generate, signing_key};
+use super::{fixture, generate};
 
 /// The exchange round carrying encrypted round-two packages: transport keys,
 /// their echo, round one, its echo, then round two.
@@ -109,7 +109,10 @@ async fn distributed_generation_agrees_on_a_quorum_key_and_encrypts_secret_share
         let public = frost::keys::PublicKeyPackage::deserialize(&configs[0].0.public_package)?;
 
         assert_eq!(configs[0].0.transport_keys.len(), guardians);
-        assert!(signing_key(&configs[0].0).is_ok());
+        assert_eq!(
+            configs[0].0.signing_key.serialize().as_slice(),
+            public.verifying_key().serialize()?.as_slice()
+        );
 
         for (_, private) in &configs {
             let key = frost::keys::KeyPackage::deserialize(&private.key_package)?;

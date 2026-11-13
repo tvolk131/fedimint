@@ -186,7 +186,7 @@ item is burned against that gateway's allowance.
 
 1. Wallet: derive a per-offer key, collect onion-message ingress paths from one
    or more gateways, build the offer under the federation's FROST key with
-   metadata `prefix || federation id || module instance || handle`, register it,
+   metadata `prefix || federation id || handle`, register it,
    and upload stock. Preimages and encryption seeds are derived from the offer
    secret and the stock index, so a restored wallet can top up.
 2. Gateway, on an invoice request: resolve the handle, pick the lowest unused

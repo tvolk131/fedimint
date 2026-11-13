@@ -61,6 +61,8 @@ impl Federation {
                 fee_consensus: FeeConsensus::new(1_000).expect("fee is within range"),
                 network: fedimint_core::bitcoin::Network::Regtest,
                 bolt12: Some(Bolt12Config {
+                    signing_key: fedimint_core::secp256k1::Keypair::new(SECP256K1, &mut OsRng)
+                        .public_key(),
                     public_package: vec![],
                     transport_keys: BTreeMap::new(),
                     registration_fee: Bolt12Config::DEFAULT_REGISTRATION_FEE,

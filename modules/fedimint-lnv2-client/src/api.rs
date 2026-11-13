@@ -8,15 +8,23 @@ use fedimint_api_client::query::FilterMapThreshold;
 #[cfg(feature = "cli")]
 use fedimint_core::module::ApiAuth;
 use fedimint_core::module::ApiRequestErased;
+use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::task::{MaybeSend, MaybeSync};
 use fedimint_core::util::SafeUrl;
 use fedimint_core::{NumPeersExt, OutPoint, PeerId, apply, async_trait_maybe_send};
 use fedimint_lnv2_common::ContractId;
+use fedimint_lnv2_common::bolt12::{
+    ReceiveContract, Registration, RegistrationId, Reservation, ReservationId, StockItem,
+    StreamedReceive,
+};
 use fedimint_lnv2_common::contracts::IncomingContract;
 #[cfg(feature = "cli")]
 use fedimint_lnv2_common::endpoint_constants::{ADD_GATEWAY_ENDPOINT, REMOVE_GATEWAY_ENDPOINT};
 use fedimint_lnv2_common::endpoint_constants::{
     AWAIT_INCOMING_CONTRACT_ENDPOINT, AWAIT_INCOMING_CONTRACTS_ENDPOINT, AWAIT_PREIMAGE_ENDPOINT,
+    BOLT12_AWAIT_RECEIVES_ENDPOINT, BOLT12_CONTRACT_ENDPOINT, BOLT12_GATEWAY_APPROVED_ENDPOINT,
+    BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
+    BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT, BOLT12_RESERVATION_ENDPOINT,
     CONSENSUS_BLOCK_COUNT_ENDPOINT, GATEWAYS_ENDPOINT,
 };
 use rand::seq::SliceRandom;
@@ -36,6 +44,38 @@ pub trait LightningFederationApi {
     async fn await_incoming_contracts(&self, start: u64, n: usize) -> (Vec<IncomingContract>, u64);
 
     async fn gateways(&self) -> FederationResult<Vec<SafeUrl>>;
+
+    async fn bolt12_registration_by_handle(
+        &self,
+        handle: [u8; 32],
+    ) -> FederationResult<Option<(RegistrationId, Registration)>>;
+
+    async fn bolt12_registration_by_recipient(
+        &self,
+        claim_pk: PublicKey,
+    ) -> FederationResult<Option<(RegistrationId, Registration)>>;
+
+    /// The lowest-indexed unused stock item of a registration.
+    async fn bolt12_next_stock(
+        &self,
+        registration: RegistrationId,
+    ) -> FederationResult<Option<(u64, StockItem)>>;
+
+    /// An unfunded reservation.
+    async fn bolt12_reservation(
+        &self,
+        reservation: ReservationId,
+    ) -> FederationResult<Option<Reservation>>;
+
+    /// A funded receive that has not been claimed or refunded yet.
+    async fn bolt12_contract(
+        &self,
+        outpoint: OutPoint,
+    ) -> FederationResult<Option<ReceiveContract>>;
+
+    async fn await_bolt12_receives(&self, start: u64, n: usize) -> (Vec<StreamedReceive>, u64);
+
+    async fn bolt12_gateway_approved(&self, gateway: PublicKey) -> FederationResult<bool>;
 
     async fn gateways_from_peer(&self, peer: PeerId) -> ServerResult<Vec<SafeUrl>>;
 
@@ -83,6 +123,77 @@ where
         self.request_current_consensus_retry(
             AWAIT_INCOMING_CONTRACTS_ENDPOINT.to_string(),
             ApiRequestErased::new((start, n)),
+        )
+        .await
+    }
+
+    async fn bolt12_registration_by_handle(
+        &self,
+        handle: [u8; 32],
+    ) -> FederationResult<Option<(RegistrationId, Registration)>> {
+        self.request_current_consensus(
+            BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT.to_string(),
+            ApiRequestErased::new(handle),
+        )
+        .await
+    }
+
+    async fn bolt12_registration_by_recipient(
+        &self,
+        claim_pk: PublicKey,
+    ) -> FederationResult<Option<(RegistrationId, Registration)>> {
+        self.request_current_consensus(
+            BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT.to_string(),
+            ApiRequestErased::new(claim_pk),
+        )
+        .await
+    }
+
+    async fn bolt12_next_stock(
+        &self,
+        registration: RegistrationId,
+    ) -> FederationResult<Option<(u64, StockItem)>> {
+        self.request_current_consensus(
+            BOLT12_NEXT_STOCK_ENDPOINT.to_string(),
+            ApiRequestErased::new(registration),
+        )
+        .await
+    }
+
+    async fn bolt12_reservation(
+        &self,
+        reservation: ReservationId,
+    ) -> FederationResult<Option<Reservation>> {
+        self.request_current_consensus(
+            BOLT12_RESERVATION_ENDPOINT.to_string(),
+            ApiRequestErased::new(reservation),
+        )
+        .await
+    }
+
+    async fn bolt12_contract(
+        &self,
+        outpoint: OutPoint,
+    ) -> FederationResult<Option<ReceiveContract>> {
+        self.request_current_consensus(
+            BOLT12_CONTRACT_ENDPOINT.to_string(),
+            ApiRequestErased::new(outpoint),
+        )
+        .await
+    }
+
+    async fn await_bolt12_receives(&self, start: u64, n: usize) -> (Vec<StreamedReceive>, u64) {
+        self.request_current_consensus_retry(
+            BOLT12_AWAIT_RECEIVES_ENDPOINT.to_string(),
+            ApiRequestErased::new((start, n)),
+        )
+        .await
+    }
+
+    async fn bolt12_gateway_approved(&self, gateway: PublicKey) -> FederationResult<bool> {
+        self.request_current_consensus(
+            BOLT12_GATEWAY_APPROVED_ENDPOINT.to_string(),
+            ApiRequestErased::new(gateway),
         )
         .await
     }

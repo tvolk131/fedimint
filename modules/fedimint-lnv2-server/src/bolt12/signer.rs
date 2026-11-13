@@ -21,7 +21,6 @@ use fedimint_lnv2_common::config::LightningConfig;
 use frost_secp256k1_tr as frost;
 use rand::rngs::OsRng;
 
-use super::keys::signing_key;
 use crate::db::{Bolt12NonceCountKey, Bolt12NonceKey, Bolt12RegistrationKey, Bolt12ReservationKey};
 
 /// Nonces held in memory at once, across all reservations.
@@ -90,7 +89,7 @@ pub async fn approve(
 
     let invoice = unsigned_invoice(
         Issuer {
-            signing_key: signing_key(bolt12)?,
+            signing_key: bolt12.signing_key,
             network: cfg.consensus.network,
         },
         &registration.policy,

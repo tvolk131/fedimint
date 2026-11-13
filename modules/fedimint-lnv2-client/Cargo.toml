@@ -19,6 +19,7 @@ name = "fedimint_lnv2_client"
 path = "src/lib.rs"
 
 [dependencies]
+anyhow = { workspace = true }
 aquamarine = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
@@ -35,6 +36,7 @@ fedimint-lnv2-common = { workspace = true }
 fedimint-logging = { workspace = true }
 futures = { workspace = true }
 itertools = { workspace = true }
+lightning = { workspace = true }
 lightning-invoice = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }

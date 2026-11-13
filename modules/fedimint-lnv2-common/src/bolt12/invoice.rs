@@ -13,7 +13,6 @@ use bitcoin::hashes::{Hash, sha256};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::secp256k1::schnorr::Signature;
 use fedimint_core::config::FederationId;
-use fedimint_core::core::ModuleInstanceId;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::registry::ModuleDecoderRegistry;
 use lightning::blinded_path::payment::{BlindedPayInfo, BlindedPaymentPath};
@@ -33,25 +32,20 @@ const ROUTING_PREFIX: &[u8] = b"fedimint/bolt12/route/v1";
 
 /// Offer metadata that lets any gateway connected to the federation find the
 /// registration an invoice request is for.
-pub fn routing_metadata(
-    federation: FederationId,
-    module: ModuleInstanceId,
-    handle: [u8; 32],
-) -> Vec<u8> {
+pub fn routing_metadata(federation: FederationId, handle: [u8; 32]) -> Vec<u8> {
     let mut bytes = ROUTING_PREFIX.to_vec();
 
     bytes.extend(federation.0.to_byte_array());
-    bytes.extend(module.to_be_bytes());
     bytes.extend(handle);
     bytes
 }
 
 /// Whether offer metadata was produced by [`routing_metadata`].
 pub fn is_routing_metadata(bytes: &[u8]) -> bool {
-    bytes.len() == ROUTING_PREFIX.len() + 66 && bytes.starts_with(ROUTING_PREFIX)
+    bytes.len() == ROUTING_PREFIX.len() + 64 && bytes.starts_with(ROUTING_PREFIX)
 }
 
-pub fn parse_routing_metadata(bytes: &[u8]) -> Result<(FederationId, ModuleInstanceId, [u8; 32])> {
+pub fn parse_routing_metadata(bytes: &[u8]) -> Result<(FederationId, [u8; 32])> {
     ensure!(
         is_routing_metadata(bytes),
         "not federated BOLT12 routing metadata"
@@ -61,8 +55,7 @@ pub fn parse_routing_metadata(bytes: &[u8]) -> Result<(FederationId, ModuleInsta
 
     Ok((
         FederationId(sha256::Hash::from_byte_array(bytes[..32].try_into()?)),
-        ModuleInstanceId::from_be_bytes(bytes[32..34].try_into()?),
-        bytes[34..].try_into()?,
+        bytes[32..].try_into()?,
     ))
 }
 

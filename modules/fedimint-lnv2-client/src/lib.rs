@@ -6,7 +6,8 @@
 
 pub use fedimint_lnv2_common as common;
 
-mod api;
+pub mod api;
+pub mod bolt12;
 #[cfg(feature = "cli")]
 mod cli;
 pub mod db;
@@ -86,6 +87,8 @@ pub enum LightningOperationMeta {
     Send(SendOperationMeta),
     Receive(ReceiveOperationMeta),
     LnurlReceive(LnurlReceiveOperationMeta),
+    Bolt12Setup(bolt12::Bolt12SetupOperationMeta),
+    Bolt12Receive(bolt12::Bolt12ReceiveOperationMeta),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,6 +334,8 @@ pub struct LightningClientModule {
     module_api: DynModuleApi,
     keypair: Keypair,
     lnurl_keypair: Keypair,
+    /// Root of the per-offer secrets for federated BOLT12 receives.
+    bolt12_secret: DerivableSecret,
     gateway_conn: Arc<dyn GatewayConnection + Send + Sync>,
     #[allow(unused)] // The field is only used by the cli feature
     admin_auth: Option<ApiAuth>,
@@ -410,15 +415,48 @@ impl LightningClientModule {
             lnurl_keypair: module_root_secret
                 .child_key(ChildId(1))
                 .to_secp_key(SECP256K1),
+            bolt12_secret: module_root_secret.child_key(ChildId(2)),
             gateway_conn,
             admin_auth,
         };
 
         module.spawn_receive_lnurl_task(custom_meta_fn, task_group, client_span);
 
+        if module.cfg.bolt12.is_some() {
+            module.spawn_receive_bolt12_task(task_group, client_span);
+        }
+
         module.spawn_gateway_map_update_task(task_group, client_span);
 
         module
+    }
+
+    fn spawn_receive_bolt12_task(&self, task_group: &TaskGroup, client_span: &tracing::Span) {
+        let module = self.clone();
+        let api = self.module_api.clone();
+
+        task_group.spawn_cancellable_with_span(
+            client_span.clone(),
+            "receive_bolt12_task",
+            async move {
+                api.wait_for_initialized_connections().await;
+
+                // Best effort: a wallet that never lost its database has
+                // nothing to recover, and the receive loop below watches a gap
+                // of unused offer keys either way.
+                if let Err(err) = module.recover_bolt12_offers().await {
+                    warn!(
+                        target: LOG_CLIENT_MODULE_LNV2,
+                        err = %err.fmt_compact(),
+                        "Could not look for previously registered BOLT12 offers"
+                    );
+                }
+
+                loop {
+                    module.receive_bolt12().await;
+                }
+            },
+        );
     }
 
     fn spawn_gateway_map_update_task(&self, task_group: &TaskGroup, client_span: &tracing::Span) {
@@ -1787,6 +1825,7 @@ pub enum SpendableAmountError {
 pub enum LightningClientStateMachines {
     Send(SendStateMachine),
     Receive(ReceiveStateMachine),
+    Bolt12Receive(bolt12::Bolt12ReceiveStateMachine),
 }
 
 impl IntoDynInstance for LightningClientStateMachines {
@@ -1818,6 +1857,12 @@ impl State for LightningClientStateMachines {
                     LightningClientStateMachines::Receive
                 )
             }
+            LightningClientStateMachines::Bolt12Receive(state) => {
+                sm_enum_variant_translation!(
+                    state.transitions(context, global_context),
+                    LightningClientStateMachines::Bolt12Receive
+                )
+            }
         }
     }
 
@@ -1825,6 +1870,7 @@ impl State for LightningClientStateMachines {
         match self {
             LightningClientStateMachines::Send(state) => state.operation_id(),
             LightningClientStateMachines::Receive(state) => state.operation_id(),
+            LightningClientStateMachines::Bolt12Receive(state) => state.operation_id(),
         }
     }
 }

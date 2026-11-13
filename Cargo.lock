@@ -4083,6 +4083,7 @@ dependencies = [
 name = "fedimint-lnv2-client"
 version = "0.13.0"
 dependencies = [
+ "anyhow",
  "aquamarine",
  "async-stream",
  "async-trait",
@@ -4100,6 +4101,7 @@ dependencies = [
  "fedimint-tpe",
  "futures",
  "itertools 0.14.0",
+ "lightning",
  "lightning-invoice",
  "rand 0.8.5",
  "serde",

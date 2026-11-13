@@ -409,7 +409,9 @@ pub enum Bolt12Output {
 /// Fees and keys of the experimental BOLT12 receive path.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
 pub struct Bolt12Config {
-    /// Serialized FROST public key package of the invoice signing key.
+    /// The key offers are issued under and invoices are signed with.
+    pub signing_key: PublicKey,
+    /// Serialized FROST public key package behind `signing_key`.
     pub public_package: Vec<u8>,
     /// Guardian identities for private guardian-to-guardian channels.
     pub transport_keys: BTreeMap<PeerId, PublicKey>,

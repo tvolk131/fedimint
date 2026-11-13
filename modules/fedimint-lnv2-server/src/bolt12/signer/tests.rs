@@ -37,7 +37,7 @@ use lightning::util::ser::Writeable;
 use rand::rngs::OsRng;
 
 use super::{Approval, MAX_ATTEMPTS, Signer, approve};
-use crate::bolt12::keys::{self, signing_key};
+use crate::bolt12::keys;
 use crate::db::{Bolt12RegistrationKey, Bolt12ReservationKey};
 
 const NOW: u64 = 1_700_000_000;
@@ -158,7 +158,7 @@ impl Scenario {
             .as_ref()
             .expect("fixture enables BOLT12");
 
-        let offer = offer(signing_key(bolt12)?);
+        let offer = offer(bolt12.signing_key);
         let request = invoice_request(&offer, AMOUNT_MSATS);
         let path = payment_path(&offer, &request);
 
@@ -331,7 +331,7 @@ async fn a_quorum_signs_an_invoice_that_lightning_software_accepts() -> Result<(
     // LDK verifies it against the offer's issuer key.
     let unsigned = unsigned_invoice(
         Issuer {
-            signing_key: signing_key(bolt12)?,
+            signing_key: bolt12.signing_key,
             network: Network::Regtest,
         },
         &scenario.policy,
@@ -345,7 +345,7 @@ async fn a_quorum_signs_an_invoice_that_lightning_software_accepts() -> Result<(
 
     assert_eq!(invoice.payment_hash().0, scenario.reservation.payment_hash);
     assert_eq!(invoice.amount_msats(), AMOUNT_MSATS);
-    assert_eq!(invoice.signing_pubkey(), signing_key(bolt12)?);
+    assert_eq!(invoice.signing_pubkey(), bolt12.signing_key);
     assert_eq!(invoice.created_at().as_secs(), NOW);
     assert_eq!(invoice.relative_expiry().as_secs(), INVOICE_LIFETIME);
 
@@ -396,7 +396,7 @@ async fn guardians_refuse_terms_that_differ_from_consensus() -> Result<()> {
         .bolt12
         .as_ref()
         .expect("fixture enables BOLT12");
-    let issuer = signing_key(bolt12)?;
+    let issuer = bolt12.signing_key;
     let offer = offer(issuer);
     let other_request = invoice_request(&offer, AMOUNT_MSATS);
     let other_path = encode_payment_path(&payment_path(&offer, &other_request))?;
@@ -476,7 +476,7 @@ async fn guardians_refuse_invoices_the_recipient_did_not_register() -> Result<()
         .bolt12
         .as_ref()
         .expect("fixture enables BOLT12");
-    let issuer = signing_key(bolt12)?;
+    let issuer = bolt12.signing_key;
 
     // Unaltered terms pass through the helper.
     assert_eq!(approve_altered(&scenario, |_, _, _| Ok(())).await?, None);

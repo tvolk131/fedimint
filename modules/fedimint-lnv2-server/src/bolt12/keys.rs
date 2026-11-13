@@ -50,19 +50,13 @@ fn config(
     transport_keys: BTreeMap<PeerId, PublicKey>,
 ) -> Result<Bolt12Config> {
     Ok(Bolt12Config {
+        signing_key: PublicKey::from_slice(&public.verifying_key().serialize()?)?,
         public_package: public.serialize()?,
         transport_keys,
         registration_fee: Bolt12Config::DEFAULT_REGISTRATION_FEE,
         stock_item_fee: Bolt12Config::DEFAULT_STOCK_ITEM_FEE,
         receive_fee: Bolt12Config::DEFAULT_RECEIVE_FEE,
     })
-}
-
-/// The federation's invoice signing key as it appears in offers and invoices.
-pub fn signing_key(config: &Bolt12Config) -> Result<PublicKey> {
-    let public = frost::keys::PublicKeyPackage::deserialize(&config.public_package)?;
-
-    Ok(PublicKey::from_slice(&public.verifying_key().serialize()?)?)
 }
 
 /// Trusted-dealer keys for test fixtures. Production setup uses [`generate`].
@@ -331,6 +325,10 @@ pub fn validate(identity: PeerId, config: &LightningConfig) -> Result<()> {
         );
     }
 
+    ensure!(
+        public.signing_key == PublicKey::from_slice(&package.verifying_key().serialize()?)?,
+        "BOLT12 signing key does not match its key package"
+    );
     ensure!(
         key.verifying_key() == package.verifying_key(),
         "BOLT12 signing share is for another key"
