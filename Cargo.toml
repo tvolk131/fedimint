@@ -4,6 +4,7 @@ members = [
     "crypto/aead",
     "crypto/derive-secret",
     "crypto/hkdf",
+    "crypto/mpc",
     "crypto/tbs",
     "crypto/tpe",
     "devimint",
@@ -220,6 +221,7 @@ fedimint-mint-server = { path = "./modules/fedimint-mint-server", version = "=0.
 fedimint-mintv2-client = { path = "./modules/fedimint-mintv2-client", version = "=0.13.0" }
 fedimint-mintv2-common = { path = "./modules/fedimint-mintv2-common", version = "=0.13.0" }
 fedimint-mintv2-server = { path = "./modules/fedimint-mintv2-server", version = "=0.13.0" }
+fedimint-mpc = { path = "./crypto/mpc", version = "=0.13.0" }
 fedimint-portalloc = { path = "utils/portalloc", version = "=0.13.0" }
 fedimint-rocksdb = { path = "./fedimint-rocksdb", version = "=0.13.0" }
 fedimint-server = { path = "./fedimint-server", version = "=0.13.0" }
@@ -381,8 +383,10 @@ aleph-bft-types = { opt-level = 3 }
 bitcoin_hashes = { opt-level = 3 }
 bls12_381 = { opt-level = 3 }
 byteorder = { opt-level = 3 }
+fedimint-mpc = { opt-level = 3 }
 fedimint-threshold-crypto = { opt-level = 3 }
 ff = { opt-level = 3 }
+gf256 = { opt-level = 3 }
 group = { opt-level = 3 }
 hashbrown = { opt-level = 3 }
 libc = { opt-level = 3 }

@@ -1,0 +1,23 @@
+[package]
+authors = { workspace = true }
+description = "Experimental honest-majority MPC that generates payment hashes nobody knows the preimage of"
+edition = { workspace = true }
+license = { workspace = true }
+name = "fedimint-mpc"
+version = { workspace = true }
+
+[dependencies]
+anyhow = { workspace = true }
+gf256 = { version = "=0.3.1", features = ["no-tables"] }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+sha2 = "0.10"
+tokio = { workspace = true, features = ["sync"] }
+zeroize = "1"
+
+[dev-dependencies]
+fedimint-core = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+
+[lints]
+workspace = true
