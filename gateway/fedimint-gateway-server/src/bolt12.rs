@@ -3,7 +3,8 @@
 //!
 //! See `docs/federated_bolt12.md` for the protocol.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, ensure};
@@ -37,6 +38,34 @@ const MAX_CONCURRENT_REQUESTS: usize = 16;
 /// How long the gateway works on one invoice request. Payers give up on an
 /// unanswered request after about this long.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Invoice requests being answered, by the hash of their bytes. Payers resend
+/// a request they have no answer to yet; a resend that overlapped the first
+/// attempt would reserve a second stock item for the same payment.
+#[derive(Default)]
+struct InProgress(Mutex<HashSet<sha256::Hash>>);
+
+impl InProgress {
+    /// Claim `request`, or `None` if it is already being answered. The claim
+    /// ends when the returned guard drops.
+    fn claim(self: &Arc<Self>, request: &InvoiceRequest) -> Option<InProgressGuard> {
+        let key = sha256::Hash::hash(&request.encode());
+
+        self.0
+            .lock()
+            .expect("not poisoned")
+            .insert(key)
+            .then(|| InProgressGuard(self.clone(), key))
+    }
+}
+
+struct InProgressGuard(Arc<InProgress>, sha256::Hash);
+
+impl Drop for InProgressGuard {
+    fn drop(&mut self) {
+        self.0.0.lock().expect("not poisoned").remove(&self.1);
+    }
+}
 
 fn is_federated(request: &InvoiceRequest) -> bool {
     request
@@ -83,7 +112,7 @@ impl Gateway {
 
     /// Answer federated invoice requests the Lightning node receives until
     /// `task_group` shuts down. Does nothing if the node cannot serve them.
-    pub(crate) fn spawn_bolt12_request_handler(
+    pub fn spawn_bolt12_request_handler(
         &self,
         task_group: &TaskGroup,
         lnrpc: Arc<dyn ILnRpcClient>,
@@ -103,8 +132,16 @@ impl Gateway {
 
         task_group.spawn_cancellable("bolt12 invoice requests", async move {
             let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
+            let in_progress = Arc::new(InProgress::default());
 
             while let Some(request) = requests.recv().await {
+                // The first attempt answers over its own reply path, which
+                // reaches the same payer.
+                let Some(claim) = in_progress.claim(&request.invoice_request) else {
+                    debug!(target: LOG_GATEWAY, "Dropping a resent BOLT12 invoice request that is still being answered");
+                    continue;
+                };
+
                 let Ok(permit) = permits.clone().try_acquire_owned() else {
                     debug!(target: LOG_GATEWAY, "Dropping a BOLT12 invoice request: too many in progress");
                     continue;
@@ -115,6 +152,7 @@ impl Gateway {
 
                 request_tasks.spawn_cancellable_silent("bolt12 invoice request", async move {
                     let _permit = permit;
+                    let _claim = claim;
 
                     match timeout(REQUEST_TIMEOUT, gateway.answer_bolt12_request(request, lnrpc))
                         .await

@@ -214,11 +214,18 @@ item is burned against that gateway's allowance.
 - A held payment is matched against every connected federation's issued
   BOLT12 invoices by payment hash, after LNv2 and before LNv1. A payment whose
   amount differs from the invoice is failed back unfunded.
+- Payment paths ask payers for a 144-block final CLTV delta. A blinded path's
+  delta lives in its payinfo and cannot be enforced by the receiving node, so
+  the gateway funds a claim only if the held HTLC leaves at least 36 blocks
+  before its claim deadline; otherwise it fails the payment back unfunded.
 - Only the LDK backend serves these offers. It needs the `fedimint-ldk-node`
   patch on branch `fedimint-federated-bolt12` of `tvolk131/ldk-node`, which
   routes externally issued invoice requests to the gateway and registers
-  payment hashes whose preimage the node does not know, with a 144-block final
-  CLTV delta. Other backends report the feature as unsupported.
+  payment hashes whose preimage the node does not know. Other backends report
+  the feature as unsupported.
+- Payment paths are one hop, introduced by the gateway's node. Payers running
+  `lightning` 0.2.7 or older ignore a one-hop path's CLTV delta and their HTLCs
+  fall short of the margin; 0.2.8 fixed this.
 
 ## Fees and minimum amounts
 
@@ -241,5 +248,7 @@ scope.
 
 - MPC pool: one-hash direct-share circuit, committee generation with an
   honest-majority parameterisation, blame-and-exclude, pool-wide limits.
+- Payment paths through the gateway's channel peers, which older payers
+  handle correctly and which hide the gateway node behind its peers.
 - Open (non-approved) gateways backed by a recipient deposit.
 - Enabling the feature on an existing federation.

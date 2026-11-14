@@ -256,6 +256,21 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
     );
     assert_eq!(gateway_client.get_balance_for_btc().await?, gateway_balance);
 
+    // So is one that leaves too little time before its claim deadline to
+    // settle safely.
+    let short_deadline = InterceptPaymentRequest {
+        expiry: 10,
+        ..held_payment(&invoice, INVOICE_AMOUNT.msats)
+    };
+
+    assert_eq!(
+        gateway
+            .handle_lightning_payment(short_deadline, &lightning_context)
+            .await,
+        "bolt12"
+    );
+    assert_eq!(gateway_client.get_balance_for_btc().await?, gateway_balance);
+
     // The exact payment funds the recipient's claim, which the online wallet
     // picks up from the receive stream.
     assert_eq!(

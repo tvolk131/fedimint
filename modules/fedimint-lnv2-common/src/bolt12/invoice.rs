@@ -267,3 +267,6 @@ pub fn sign(invoice: UnsignedBolt12Invoice, signature: Signature) -> Result<Bolt
         .sign(|_: &UnsignedBolt12Invoice| Ok::<_, ()>(signature))
         .map_err(|e| anyhow::anyhow!("invalid invoice signature: {e:?}"))
 }
+
+#[cfg(test)]
+mod tests;

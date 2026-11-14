@@ -31,6 +31,10 @@ path = "tests/tests.rs"
 name = "gatewayd-bolt12-tests"
 path = "tests/bolt12.rs"
 
+[[test]]
+name = "gatewayd-live-bolt12-tests"
+path = "tests/live_bolt12.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 aquamarine = { workspace = true }
@@ -105,6 +109,7 @@ tikv-jemallocator = { workspace = true }
 
 [dev-dependencies]
 assert_matches = { workspace = true }
+bitcoincore-rpc = { workspace = true }
 fedimint-dummy-client = { workspace = true }
 fedimint-dummy-common = { workspace = true }
 fedimint-dummy-server = { workspace = true }
@@ -115,6 +120,7 @@ fedimint-testing-core = { workspace = true }
 fedimint-unknown-common = { workspace = true }
 fedimint-unknown-server = { workspace = true }
 itertools = { workspace = true }
+ldk-node = { workspace = true }
 tempfile = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 tpe = { workspace = true }

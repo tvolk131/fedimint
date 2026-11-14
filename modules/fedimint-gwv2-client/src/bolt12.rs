@@ -39,12 +39,23 @@ use crate::api::GatewayFederationApi;
 use crate::complete_sm::IncomingCircuitKey;
 use crate::{
     GatewayClientModuleV2, GatewayClientStateMachinesV2, GatewayOperationMetaV2,
-    GatewayOperationRoleV2, IncomingRelayPlan, LNV2_CLAIM_DEADLINE_MARGIN, RelayIncomingHtlcError,
+    GatewayOperationRoleV2, IncomingRelayPlan, RelayIncomingHtlcError,
     incoming_circuit_operation_id, incoming_relay_plan, operation_creation_failed_permanently,
 };
 
 /// How often to pick another stock item after losing a race for one.
 const RESERVE_ATTEMPTS: usize = 3;
+
+/// Blocks a held BOLT12 payment must leave before its claim deadline for the
+/// gateway to fund the recipient's claim.
+///
+/// Invoice payment paths ask for 144 blocks, but a blinded path's delta is
+/// only advisory: a payer may send an HTLC that expires much sooner, and once
+/// funded the claim cannot be taken back. The node's claim deadline already
+/// sits well inside the HTLC's expiry (a correctly built payment left about 80
+/// blocks on regtest), and settling takes seconds, so about six hours is ample
+/// while still refusing HTLCs too short to settle safely.
+pub const BOLT12_CLAIM_DEADLINE_MARGIN: u32 = 36;
 
 #[repr(u8)]
 enum DbKeyPrefix {
@@ -327,7 +338,7 @@ impl GatewayClientModuleV2 {
                 });
             }
 
-            if blocks_to_claim_deadline < LNV2_CLAIM_DEADLINE_MARGIN {
+            if blocks_to_claim_deadline < BOLT12_CLAIM_DEADLINE_MARGIN {
                 return Err(RelayIncomingHtlcError::ClaimDeadlineTooClose {
                     blocks_to_claim_deadline,
                 });
