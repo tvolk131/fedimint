@@ -1,11 +1,13 @@
 //! Private channels between the committee members of a generation run,
 //! carried over the guardians' module API.
 //!
-//! Each message is split into chunks, and each chunk is encrypted and
+//! Each message is signed by its sender, so a recipient can later prove what
+//! it was sent, then split into chunks, and each chunk is encrypted and
 //! authenticated with a key derived from the two guardians' transport keys and
 //! bound to the run, the direction, the round and the chunk. Senders retry
 //! until the recipient accepts, so a message is delivered once the recipient
-//! has reached its round.
+//! has reached its round. Recipients keep every message with its signature as
+//! evidence in case the run fails.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -16,10 +18,12 @@ use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use fedimint_api_client::api::{DynModuleApi, FederationApiExt as _};
 use fedimint_core::PeerId;
+use fedimint_core::bitcoin::hashes::{Hash as _, sha256};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::ApiRequestErased;
 use fedimint_core::module::registry::ModuleRegistry;
-use fedimint_core::secp256k1::{PublicKey, SecretKey};
+use fedimint_core::secp256k1::schnorr::Signature;
+use fedimint_core::secp256k1::{Keypair, Message, PublicKey, SECP256K1, SecretKey};
 use fedimint_core::task::sleep;
 use fedimint_lnv2_common::endpoint_constants::BOLT12_MPC_ENDPOINT;
 use futures::future::{join_all, try_join_all};
@@ -27,6 +31,48 @@ use mpc::engine::Transport;
 use tokio::sync::Notify;
 
 use super::keys::transport_key;
+use crate::db::SignedMessage;
+
+/// Bytes of the signature appended to each message.
+const SIGNATURE_LEN: usize = 64;
+
+/// What a member signs for each message it sends.
+pub fn message_digest(
+    run: u64,
+    sender: PeerId,
+    recipient: PeerId,
+    round: u64,
+    message: &[u8],
+) -> Message {
+    let hash: sha256::Hash = (
+        "fedimint/bolt12/mpc-message/v1",
+        run,
+        sender,
+        recipient,
+        round,
+        sha256::Hash::hash(message),
+    )
+        .consensus_hash();
+
+    Message::from_digest(hash.to_byte_array())
+}
+
+/// Whether `signed` is `sender`'s message to `recipient` in `round`.
+pub fn verify_message(
+    run: u64,
+    sender: (PeerId, &PublicKey),
+    recipient: PeerId,
+    round: u64,
+    signed: &SignedMessage,
+) -> bool {
+    SECP256K1
+        .verify_schnorr(
+            &signed.signature,
+            &message_digest(run, sender.0, recipient, round, &signed.message),
+            &sender.1.x_only_public_key().0,
+        )
+        .is_ok()
+}
 
 /// Plaintext bytes per chunk.
 pub const CHUNK: usize = 256 * 1024;
@@ -36,7 +82,7 @@ const MAX_MESSAGE: usize = 3 * 8 * mpc::MAX_TRIPLES;
 
 /// The most chunks one message may have.
 #[allow(clippy::cast_possible_truncation)] // A small constant.
-const MAX_CHUNKS: u32 = MAX_MESSAGE.div_ceil(CHUNK) as u32;
+const MAX_CHUNKS: u32 = (MAX_MESSAGE + SIGNATURE_LEN).div_ceil(CHUNK) as u32;
 
 /// The longest hex-encoded packet the endpoint accepts.
 pub const MAX_PACKET_HEX: usize = 2 * (CHUNK + 1024);
@@ -95,7 +141,12 @@ pub struct Channels {
     committee: Vec<PeerId>,
     /// Per peer: the key for what we send and the key for what we receive.
     keys: BTreeMap<PeerId, ([u8; 32], [u8; 32])>,
+    signing_key: Keypair,
+    public_keys: BTreeMap<PeerId, PublicKey>,
     state: Mutex<State>,
+    /// Every message received, with its signature, by round and committee
+    /// position.
+    transcript: Mutex<Vec<Vec<Option<SignedMessage>>>>,
     arrived: Notify,
 }
 
@@ -109,6 +160,7 @@ impl Channels {
     ) -> Result<Arc<Self>> {
         let mut keys = BTreeMap::new();
         let mut inboxes = BTreeMap::new();
+        let mut public_keys = BTreeMap::new();
 
         for peer in committee.iter().filter(|peer| **peer != me) {
             let public = transport_keys
@@ -123,6 +175,7 @@ impl Channels {
                 ),
             );
             inboxes.insert(*peer, Inbox::default());
+            public_keys.insert(*peer, *public);
         }
 
         Ok(Arc::new(Self {
@@ -130,13 +183,61 @@ impl Channels {
             me,
             committee,
             keys,
+            signing_key: Keypair::from_secret_key(SECP256K1, secret),
+            public_keys,
             state: Mutex::new(State { round: 0, inboxes }),
+            transcript: Mutex::new(vec![]),
             arrived: Notify::new(),
         }))
     }
 
     pub fn run(&self) -> u64 {
         self.run
+    }
+
+    /// Everything received so far, with signatures, by round and position.
+    pub fn transcript(&self) -> Vec<Vec<Option<SignedMessage>>> {
+        self.transcript.lock().expect("not poisoned").clone()
+    }
+
+    /// Check the sender's signature on a completed message and record it.
+    fn accept(&self, sender: PeerId, round: u64, mut payload: Vec<u8>) -> Result<Vec<u8>> {
+        ensure!(payload.len() >= SIGNATURE_LEN, "The message is unsigned");
+
+        let signature = Signature::from_slice(&payload.split_off(payload.len() - SIGNATURE_LEN))?;
+
+        let signed = SignedMessage {
+            message: payload,
+            signature,
+        };
+
+        ensure!(
+            verify_message(
+                self.run,
+                (sender, &self.public_keys[&sender]),
+                self.me,
+                round,
+                &signed
+            ),
+            "The message signature is invalid"
+        );
+
+        let position = self
+            .committee
+            .iter()
+            .position(|member| *member == sender)
+            .expect("only committee peers have inboxes");
+
+        let mut transcript = self.transcript.lock().expect("not poisoned");
+        let round_index = usize::try_from(round)?;
+
+        while transcript.len() <= round_index {
+            transcript.push(vec![None; self.committee.len()]);
+        }
+
+        transcript[round_index][position] = Some(signed.clone());
+
+        Ok(signed.message)
     }
 
     /// Accept a packet a peer delivered. An error tells the sender to retry
@@ -206,7 +307,7 @@ impl Channels {
         chunks[packet.chunk as usize] = Some(plaintext);
 
         if chunks.iter().all(Option::is_some) {
-            let message = inbox
+            let payload = inbox
                 .partial
                 .remove(&packet.round)
                 .expect("just inserted")
@@ -215,7 +316,14 @@ impl Channels {
                 .flatten()
                 .collect();
 
-            inbox.complete.insert(packet.round, message);
+            let message = self.accept(packet.sender, packet.round, payload)?;
+
+            state
+                .inboxes
+                .get_mut(&packet.sender)
+                .expect("every peer has an inbox")
+                .complete
+                .insert(packet.round, message);
 
             drop(state);
 
@@ -267,11 +375,16 @@ impl Channels {
         let (key, _) = self.keys.get(&recipient).context("Not a committee peer")?;
         let cipher = ChaCha20Poly1305::new(key.into());
 
-        let chunks: Vec<&[u8]> = if message.is_empty() {
-            vec![&[]]
-        } else {
-            message.chunks(CHUNK).collect()
-        };
+        let signature = SECP256K1.sign_schnorr(
+            &message_digest(self.run, self.me, recipient, round, message),
+            &self.signing_key,
+        );
+
+        let mut payload = message.to_vec();
+
+        payload.extend_from_slice(signature.as_ref());
+
+        let chunks: Vec<&[u8]> = payload.chunks(CHUNK).collect();
 
         let count = u32::try_from(chunks.len()).expect("bounded by MAX_MESSAGE");
         let aad = aad(self.run, self.me, recipient, round, count);

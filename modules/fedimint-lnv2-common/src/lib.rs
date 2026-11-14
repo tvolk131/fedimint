@@ -160,6 +160,16 @@ pub enum LightningConsensusItem {
     Bolt12PoolAbandon {
         run: u64,
     },
+    /// A member's commitment to its evidence from abandoned run `run`.
+    Bolt12PoolEvidence {
+        run: u64,
+        digest: bitcoin::hashes::sha256::Hash,
+    },
+    /// A guardian's finding about abandoned run `run`.
+    Bolt12PoolVerdict {
+        run: u64,
+        verdict: bolt12::PoolVerdict,
+    },
     #[encodable_default]
     Default {
         variant: u64,
@@ -187,6 +197,12 @@ impl std::fmt::Display for LightningConsensusItem {
             }
             LightningConsensusItem::Bolt12PoolAbandon { run } => {
                 write!(f, "LNv2 BOLT12 Pool Abandon {run}")
+            }
+            LightningConsensusItem::Bolt12PoolEvidence { run, .. } => {
+                write!(f, "LNv2 BOLT12 Pool Evidence {run}")
+            }
+            LightningConsensusItem::Bolt12PoolVerdict { run, .. } => {
+                write!(f, "LNv2 BOLT12 Pool Verdict {run}")
             }
             LightningConsensusItem::Default { variant, bytes } => write!(
                 f,

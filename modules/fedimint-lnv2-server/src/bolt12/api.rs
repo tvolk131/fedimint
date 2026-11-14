@@ -3,6 +3,7 @@
 
 use fedimint_core::OutPoint;
 use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
+use fedimint_core::encoding::Encodable as _;
 use fedimint_core::module::{
     ApiEndpoint, ApiError, ApiVersion, admin_api_endpoint, public_api_endpoint,
 };
@@ -13,15 +14,15 @@ use fedimint_lnv2_common::bolt12::{
 };
 use fedimint_lnv2_common::endpoint_constants::{
     BOLT12_AWAIT_RECEIVES_ENDPOINT, BOLT12_CONTRACT_ENDPOINT, BOLT12_DECRYPTION_SHARES_ENDPOINT,
-    BOLT12_GATEWAY_APPROVED_ENDPOINT, BOLT12_MPC_ENDPOINT, BOLT12_NEXT_POOL_ENDPOINT,
-    BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_NONCE_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
-    BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT, BOLT12_RESERVATION_ENDPOINT,
-    BOLT12_SET_GATEWAY_VOTE_ENDPOINT, BOLT12_SIGN_ENDPOINT,
+    BOLT12_GATEWAY_APPROVED_ENDPOINT, BOLT12_MPC_ENDPOINT, BOLT12_MPC_EVIDENCE_ENDPOINT,
+    BOLT12_NEXT_POOL_ENDPOINT, BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_NONCE_ENDPOINT,
+    BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT, BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT,
+    BOLT12_RESERVATION_ENDPOINT, BOLT12_SET_GATEWAY_VOTE_ENDPOINT, BOLT12_SIGN_ENDPOINT,
 };
 use futures::StreamExt;
 use tpe::DecryptionKeyShare;
 
-use super::{signer, transport};
+use super::{signer, transport, worker};
 use crate::Lightning;
 use crate::db::{
     Bolt12ContractKey, Bolt12DecryptionSharesKey, Bolt12GatewayDesiredVoteKey, Bolt12HandleKey,
@@ -213,6 +214,16 @@ impl Lightning {
 
                     transport::decode_packet(&packet)
                         .and_then(|packet| worker.receive(&packet))
+                        .map_err(|e| ApiError::bad_request(e.to_string()))
+                }
+            },
+            public_api_endpoint! {
+                BOLT12_MPC_EVIDENCE_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |_module: &Lightning, context, params: (u64, u64)| -> String {
+                    worker::serve_evidence(&context.db(), params.0, params.1)
+                        .await
+                        .map(|page| page.consensus_encode_to_hex())
                         .map_err(|e| ApiError::bad_request(e.to_string()))
                 }
             },

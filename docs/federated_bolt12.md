@@ -67,6 +67,10 @@ All state is in indexed tables; nothing is stored as one aggregate value.
 | Generation run | singleton | `PoolRun` |
 | Run counter | singleton | `u64` |
 | Run submission | `(run, PeerId)` | `Vec<PoolShare>` |
+| Abandoned run | `run` | `AbandonedRun` (committee, submitters, evidence commitments) |
+| Verdict | `(run, PeerId)` | `PoolVerdict` |
+| Guardian blame | `PeerId` | `Blame { offences, until_run }` |
+| Pair dispute | `(PeerId, PeerId)` | `Blame { offences, until_run }` |
 
 ```text
 Registration {
@@ -164,8 +168,9 @@ Consensus items:
 - `Bolt12GatewayVote { gateway, approve }`. Each guardian's latest vote is
   stored; a gateway is approved while at least `q` guardians vote to approve.
   Guardians set their vote through an authenticated admin endpoint.
-- `Bolt12PoolStart { run }`, `Bolt12PoolShares { run, shares }` and
-  `Bolt12PoolAbandon { run }`; see Generation.
+- `Bolt12PoolStart { run }`, `Bolt12PoolShares { run, shares }`,
+  `Bolt12PoolAbandon { run }`, `Bolt12PoolEvidence { run, digest }` and
+  `Bolt12PoolVerdict { run, verdict }`; see Generation and Blame.
 
 ## Limits
 
@@ -234,10 +239,10 @@ The pool is enabled when `pool_target > 0`. Each guardian proposes
 counter's value), recording its committee, `pool_batch` and the consensus
 time.
 
-- **Committee.** `2f + 1` guardians: the guardians in `PeerId` order, starting
-  at offset `run mod n` and wrapping. A member's position in this list is its
-  party index in the MPC. Rotation means an offline guardian stalls at most
-  the runs it is a member of.
+- **Committee.** `2f + 1` guardians taken in `PeerId` order starting at
+  offset `run mod n` and wrapping, skipping blamed guardians and never seating
+  both guardians of a disputed pair (see Blame). A member's position in the
+  committee is its party index in the MPC.
 - **MPC** (`fedimint-mpc`). Degree-`f` Shamir sharing over GF(2^64) among the
   committee, which is honest-majority with abort because at most `f` members
   are malicious. Each member's contributions are XORed into `r`; the circuit
@@ -245,9 +250,12 @@ time.
   `f + 1`) masked under a key only that member supplied. Malicious members can
   make a run abort but not change its output or learn `r`.
 - **Transport.** Members exchange messages through the module API endpoint
-  `bolt12_mpc`, chunked and encrypted with ChaCha20-Poly1305 under a key from
-  the two guardians' transport keys, bound to run, direction, round and chunk.
-  Senders retry until the recipient reaches the round.
+  `bolt12_mpc`. Each message is Schnorr-signed by its sender under its
+  transport key, bound to run, sender, recipient and round, then chunked and
+  encrypted with ChaCha20-Poly1305 under a key from the two guardians'
+  transport keys, bound to run, direction, round and chunk. Senders retry
+  until the recipient reaches the round. Recipients keep every message with
+  its signature.
 - **Durability.** Before sending anything, a member records the run and the
   seed all its randomness comes from. A restarted member does not rejoin; the
   run times out instead.
@@ -261,14 +269,54 @@ time.
   Hashes already seen are skipped. The run and its submissions are deleted.
 - **Timeout.** Once the consensus time passes `started_at +
   POOL_RUN_TIMEOUT` (900 s), guardians propose `Bolt12PoolAbandon { run }`,
-  which deletes the run and its submissions. Results of an abandoned run are
-  never used, so no share of a later-published preimage ever leaves a member.
+  which deletes the run and its submissions and records it for judging.
+  Results of an abandoned run are never used, so no share of a
+  later-published preimage ever leaves a member.
 - **Release.** Funding a pool receive stores each guardian's decryption share
   for every member's ciphertext. The gateway and the recipient aggregate a
   threshold of these per ciphertext, decrypt the `2f + 1` shares and
   reconstruct `r` by trying subsets of `f + 1` until one hashes to the payment
   hash. At least `f + 1` shares come from honest members, so this succeeds
   whatever the others sealed.
+
+### Blame
+
+A run fails when a member deviates, stays silent, or finishes without
+submitting. Every message a member sends is a deterministic function of its
+seed and the messages it received, so once a run is abandoned and its
+results can never be used, the run can be replayed.
+
+1. **Evidence.** When its part in a run ends, a member stores the signed
+   messages it received. If consensus abandons the run, the member proposes
+   `Bolt12PoolEvidence { run, digest }`, committing to its seed and those
+   messages, within `EVIDENCE_WINDOW` (300 s), and serves them through the
+   `bolt12_mpc_evidence` endpoint, which refuses to reveal anything about a
+   run that has not been abandoned.
+2. **Judging.** After the window, every guardian fetches the committed
+   evidence, discards messages whose sender's signature does not verify,
+   replays each member, and compares what each member should have sent with
+   what the others hold under its signature. In this order it finds:
+   members that committed no evidence or whose evidence cannot be fetched or
+   does not match; members whose signed messages differ from their replay,
+   or who hold back received messages that their later signed messages prove
+   they had; members whose replay completes but who did not submit. Only if
+   nobody is at fault does it report disputes: for the earliest round in
+   which a member lacks a message, the pair of that member and the missing
+   sender. One of them is at fault, but not provably which.
+3. **Verdicts.** Each guardian proposes `Bolt12PoolVerdict { run, verdict }`.
+   Once a quorum has voted, every culprit and every pair named by at least
+   `f + 1` verdicts is blamed: honest guardians replay the same evidence to
+   the same verdict, and `f` malicious guardians cannot reach `f + 1`
+   alone. No new run starts while a run is being judged, up to
+   `JUDGE_TIMEOUT` (1800 s), after which it is dropped unjudged.
+4. **Exclusion.** A blamed guardian sits out the next 8 runs, a disputed pair
+   never shares a committee for 8 runs, and each repeat doubles that, up to
+   64. Completing a run clears its members' blame and their mutual disputes.
+   Honest guardians are never blamed and never dispute each other, and there
+   are at least `2f + 1` of them, so a committee without blamed guardians or
+   disputed pairs exists unless honest guardians failed. If it does not, the
+   committee ignores disputes, and if it must, seats the blamed guardians
+   released soonest: a committee never has fewer than `2f + 1` members.
 
 Reasoning recorded for review: openings check that all `2f + 1` shares lie on
 one degree-`f` polynomial, which the `f + 1` honest shares fix, so no digest
@@ -328,9 +376,8 @@ scope.
 
 ## Deferred
 
-- Blame-and-exclude for generation runs: replaying an aborted run from the
-  members' revealed seeds and signed messages, and keeping blamed guardians
-  off committees for a number of runs that doubles on repeat offences.
+- An end-to-end test of blame against a misbehaving guardian; blame is
+  covered by unit tests of the judge and of the consensus rules.
 - Taking share coefficients and masks from the MPC's own shared randomness
   instead of bit-checked inputs, which would make runs cheaper.
 - Payment paths through the gateway's channel peers, which older payers

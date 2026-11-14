@@ -44,6 +44,17 @@ pub const MAX_POOL_TARGET: u64 = 256;
 /// Seconds of consensus time a generation run may take before it is
 /// abandoned.
 pub const POOL_RUN_TIMEOUT: u64 = 900;
+/// Seconds of consensus time after a run is abandoned in which its members
+/// commit to their evidence.
+pub const EVIDENCE_WINDOW: u64 = 300;
+/// Seconds of consensus time after a run is abandoned after which it is no
+/// longer judged.
+pub const JUDGE_TIMEOUT: u64 = 1800;
+/// Runs a guardian or a disputed pair sits out after a first offence. Each
+/// repeat doubles it, up to `MAX_BLAME_RUNS`, until the guardian (or both
+/// guardians of the pair) completes a run.
+pub const BLAME_RUNS: u64 = 8;
+pub const MAX_BLAME_RUNS: u64 = 64;
 
 #[derive(
     Debug,
@@ -249,6 +260,69 @@ pub struct PoolItem {
 pub struct PoolShare {
     pub payment_hash: [u8; 32],
     pub ciphertext: CipherText,
+}
+
+/// A generation run that was abandoned and is being judged.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
+pub struct AbandonedRun {
+    pub run: PoolRun,
+    pub abandoned_at: u64,
+    /// Members that submitted shares before the run was abandoned.
+    pub submitted: Vec<PeerId>,
+    /// Each member's commitment to its evidence.
+    pub evidence: BTreeMap<PeerId, sha256::Hash>,
+}
+
+impl AbandonedRun {
+    /// Whether members may still commit to evidence at `now`.
+    pub fn collecting_evidence(&self, now: u64) -> bool {
+        now < self.abandoned_at.saturating_add(EVIDENCE_WINDOW)
+    }
+
+    /// Whether the run may no longer be judged at `now`.
+    pub fn is_stale(&self, now: u64) -> bool {
+        now >= self.abandoned_at.saturating_add(JUDGE_TIMEOUT)
+    }
+}
+
+/// A guardian's finding about an abandoned run.
+#[derive(
+    Debug, Clone, Default, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable,
+)]
+pub struct PoolVerdict {
+    /// Members to keep off committees.
+    pub culprits: Vec<PeerId>,
+    /// Pairs, lower first, that should not share a committee.
+    pub disputes: Vec<(PeerId, PeerId)>,
+}
+
+/// How long a guardian, or a pair of guardians, is kept off committees.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
+pub struct Blame {
+    /// Offences since the last completed run.
+    pub offences: u32,
+    /// The first run the blame no longer applies to.
+    pub until_run: u64,
+}
+
+impl Blame {
+    /// The blame after another offence found while starting run `next_run`.
+    pub fn repeat(previous: Option<&Blame>, next_run: u64) -> Self {
+        let offences = previous.map_or(1, |blame| blame.offences.saturating_add(1));
+        let runs = BLAME_RUNS
+            .checked_shl(offences - 1)
+            .unwrap_or(MAX_BLAME_RUNS)
+            .min(MAX_BLAME_RUNS);
+
+        Self {
+            offences,
+            until_run: next_run.saturating_add(runs),
+        }
+    }
+
+    pub fn applies_to(&self, run: u64) -> bool {
+        run < self.until_run
+    }
 }
 
 /// A generation run the federation has started.

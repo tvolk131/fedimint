@@ -6,8 +6,8 @@ use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::util::SafeUrl;
 use fedimint_core::{OutPoint, PeerId, impl_db_lookup, impl_db_record};
 use fedimint_lnv2_common::bolt12::{
-    Pending, PoolItem, PoolRun, PoolShare, ReceiveContract, Registration, RegistrationId,
-    Reservation, ReservationId, StockItem, StreamedReceive,
+    AbandonedRun, Blame, Pending, PoolItem, PoolRun, PoolShare, PoolVerdict, ReceiveContract,
+    Registration, RegistrationId, Reservation, ReservationId, StockItem, StreamedReceive,
 };
 use fedimint_lnv2_common::contracts::{IncomingContract, OutgoingContract};
 use fedimint_lnv2_common::{ContractId, LightningInputV0, LightningOutputV0};
@@ -61,6 +61,12 @@ pub enum DbKeyPrefix {
     Bolt12PoolRunCount = 0x37,
     Bolt12PoolSubmission = 0x38,
     Bolt12PoolLocalRun = 0x39,
+    Bolt12PoolAbandoned = 0x3a,
+    Bolt12PoolVerdict = 0x3b,
+    Bolt12Blame = 0x3c,
+    Bolt12Dispute = 0x3d,
+    Bolt12PoolTranscript = 0x3e,
+    Bolt12PoolLocalVerdict = 0x3f,
 }
 
 impl std::fmt::Display for DbKeyPrefix {
@@ -622,6 +628,8 @@ pub struct LocalRun {
     pub seed: [u8; 32],
     /// The encrypted shares to submit once the run succeeded.
     pub submission: Option<Vec<PoolShare>>,
+    /// Commitment to this guardian's evidence, once its part has ended.
+    pub evidence: Option<fedimint_core::bitcoin::hashes::sha256::Hash>,
 }
 
 /// Written before this guardian sends anything in a run, so a restarted
@@ -640,4 +648,112 @@ impl_db_record!(
 impl_db_lookup!(
     key = Bolt12PoolLocalRunKey,
     query_prefix = Bolt12PoolLocalRunPrefix
+);
+
+/// Abandoned runs being judged.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolAbandonedKey(pub u64);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolAbandonedPrefix;
+
+impl_db_record!(
+    key = Bolt12PoolAbandonedKey,
+    value = AbandonedRun,
+    db_prefix = DbKeyPrefix::Bolt12PoolAbandoned,
+);
+impl_db_lookup!(
+    key = Bolt12PoolAbandonedKey,
+    query_prefix = Bolt12PoolAbandonedPrefix
+);
+
+/// Guardians' verdicts on an abandoned run.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolVerdictKey(pub u64, pub PeerId);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolVerdictRunPrefix(pub u64);
+
+impl_db_record!(
+    key = Bolt12PoolVerdictKey,
+    value = PoolVerdict,
+    db_prefix = DbKeyPrefix::Bolt12PoolVerdict,
+);
+impl_db_lookup!(
+    key = Bolt12PoolVerdictKey,
+    query_prefix = Bolt12PoolVerdictRunPrefix
+);
+
+/// Guardians kept off committees.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12BlameKey(pub PeerId);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12BlamePrefix;
+
+impl_db_record!(
+    key = Bolt12BlameKey,
+    value = Blame,
+    db_prefix = DbKeyPrefix::Bolt12Blame,
+);
+impl_db_lookup!(key = Bolt12BlameKey, query_prefix = Bolt12BlamePrefix);
+
+/// Pairs of guardians, lower first, kept off the same committee.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12DisputeKey(pub PeerId, pub PeerId);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12DisputePrefix;
+
+impl_db_record!(
+    key = Bolt12DisputeKey,
+    value = Blame,
+    db_prefix = DbKeyPrefix::Bolt12Dispute,
+);
+impl_db_lookup!(key = Bolt12DisputeKey, query_prefix = Bolt12DisputePrefix);
+
+/// A message received in a run, with its sender's signature.
+#[derive(Debug, Clone, Eq, PartialEq, Encodable, Decodable)]
+pub struct SignedMessage {
+    pub message: Vec<u8>,
+    pub signature: fedimint_core::secp256k1::schnorr::Signature,
+}
+
+/// What this guardian received in one round of a run, by committee position.
+/// Local; kept as evidence until the run is over.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolTranscriptKey(pub u64, pub u64);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolTranscriptRunPrefix(pub u64);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolTranscriptPrefix;
+
+impl_db_record!(
+    key = Bolt12PoolTranscriptKey,
+    value = Vec<Option<SignedMessage>>,
+    db_prefix = DbKeyPrefix::Bolt12PoolTranscript,
+);
+impl_db_lookup!(
+    key = Bolt12PoolTranscriptKey,
+    query_prefix = Bolt12PoolTranscriptRunPrefix,
+    query_prefix = Bolt12PoolTranscriptPrefix
+);
+
+/// This guardian's finding about an abandoned run, until consensus has it.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolLocalVerdictKey(pub u64);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolLocalVerdictPrefix;
+
+impl_db_record!(
+    key = Bolt12PoolLocalVerdictKey,
+    value = PoolVerdict,
+    db_prefix = DbKeyPrefix::Bolt12PoolLocalVerdict,
+);
+impl_db_lookup!(
+    key = Bolt12PoolLocalVerdictKey,
+    query_prefix = Bolt12PoolLocalVerdictPrefix
 );

@@ -6,6 +6,7 @@ pub mod direct;
 pub mod engine;
 pub mod field;
 pub mod memory;
+pub mod replay;
 
 /// The most parties a run may have. Evaluation points are the party indices
 /// plus one, so every pairwise difference stays below 32.

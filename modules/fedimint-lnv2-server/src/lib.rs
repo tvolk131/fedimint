@@ -234,7 +234,13 @@ impl ModuleInit for LightningInit {
                 | DbKeyPrefix::Bolt12PoolRun
                 | DbKeyPrefix::Bolt12PoolRunCount
                 | DbKeyPrefix::Bolt12PoolSubmission
-                | DbKeyPrefix::Bolt12PoolLocalRun => {}
+                | DbKeyPrefix::Bolt12PoolLocalRun
+                | DbKeyPrefix::Bolt12PoolAbandoned
+                | DbKeyPrefix::Bolt12PoolVerdict
+                | DbKeyPrefix::Bolt12Blame
+                | DbKeyPrefix::Bolt12Dispute
+                | DbKeyPrefix::Bolt12PoolTranscript
+                | DbKeyPrefix::Bolt12PoolLocalVerdict => {}
                 DbKeyPrefix::IncomingContractIndex => {
                     push_db_pair_items!(
                         dbtx,
@@ -585,6 +591,16 @@ impl ServerModule for Lightning {
                 let now = self.consensus_unix_time(dbtx).await;
 
                 bolt12::pool::process_abandon(dbtx, &self.cfg, run, now).await
+            }
+            LightningConsensusItem::Bolt12PoolEvidence { run, digest } => {
+                let now = self.consensus_unix_time(dbtx).await;
+
+                bolt12::pool::process_evidence(dbtx, &self.cfg, peer, run, digest, now).await
+            }
+            LightningConsensusItem::Bolt12PoolVerdict { run, verdict } => {
+                let now = self.consensus_unix_time(dbtx).await;
+
+                bolt12::pool::process_verdict(dbtx, &self.cfg, peer, run, verdict, now).await
             }
             LightningConsensusItem::Default { variant, .. } => Err(anyhow!(
                 "Received lnv2 consensus item with unknown variant {variant}"

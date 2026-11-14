@@ -9,15 +9,18 @@ use fedimint_core::db::IDatabaseTransactionOpsCoreTyped;
 use fedimint_core::secp256k1::{Keypair, SECP256K1};
 use fedimint_core::{Amount, PeerId};
 use fedimint_lnv2_common::bolt12::{
-    Bolt12Output, POOL_RUN_TIMEOUT, PoolShare, Register, Reserve, Sealed, Source,
-    pool_share_binding, terms_hash,
+    Blame, Bolt12Output, EVIDENCE_WINDOW, JUDGE_TIMEOUT, POOL_RUN_TIMEOUT, PoolShare, PoolVerdict,
+    Register, Reserve, Sealed, Source, pool_share_binding, terms_hash,
 };
 use mpc::field::{F, point};
 use rand::rngs::OsRng;
 
 use super::{Federation, NOW, Offer, gateway, policy, register};
 use crate::bolt12::pool::{self, pool_len};
-use crate::db::{Bolt12PoolRunKey, Bolt12ReservationKey};
+use crate::db::{
+    Bolt12BlameKey, Bolt12DisputeKey, Bolt12PoolAbandonedKey, Bolt12PoolRunKey,
+    Bolt12ReservationKey,
+};
 
 /// Preimages dealt as threshold-two shares to a three-member committee, and
 /// each member's submission.
@@ -132,6 +135,84 @@ impl Federation {
         dbtx.commit_tx().await;
 
         Ok(())
+    }
+
+    async fn evidence(&self, peer: u16, run: u64, now: u64) -> Result<()> {
+        let mut dbtx = self.db.begin_transaction().await;
+
+        pool::process_evidence(
+            &mut dbtx.to_ref_nc(),
+            &self.cfg,
+            PeerId::from(peer),
+            run,
+            sha256::Hash::hash(&peer.to_be_bytes()),
+            now,
+        )
+        .await?;
+
+        dbtx.commit_tx().await;
+
+        Ok(())
+    }
+
+    async fn verdict(&self, peer: u16, run: u64, verdict: PoolVerdict, now: u64) -> Result<()> {
+        let mut dbtx = self.db.begin_transaction().await;
+
+        pool::process_verdict(
+            &mut dbtx.to_ref_nc(),
+            &self.cfg,
+            PeerId::from(peer),
+            run,
+            verdict,
+            now,
+        )
+        .await?;
+
+        dbtx.commit_tx().await;
+
+        Ok(())
+    }
+
+    async fn blame(&self, peer: u16) -> Option<Blame> {
+        self.db
+            .begin_transaction_nc()
+            .await
+            .get_value(&Bolt12BlameKey(PeerId::from(peer)))
+            .await
+    }
+
+    async fn dispute(&self, a: u16, b: u16) -> Option<Blame> {
+        self.db
+            .begin_transaction_nc()
+            .await
+            .get_value(&Bolt12DisputeKey(PeerId::from(a), PeerId::from(b)))
+            .await
+    }
+
+    async fn is_judging(&self, run: u64) -> bool {
+        self.db
+            .begin_transaction_nc()
+            .await
+            .get_value(&Bolt12PoolAbandonedKey(run))
+            .await
+            .is_some()
+    }
+
+    /// Start `run` and let it time out.
+    async fn abandon_run(&self, run: u64, now: u64) {
+        self.start(run, now).await.expect("run is due");
+        self.abandon(run, now + POOL_RUN_TIMEOUT)
+            .await
+            .expect("run is overdue");
+    }
+
+    /// Have guardians 0 to 2 return `verdict` on `run`, abandoned at `at`.
+    async fn judge(&self, run: u64, at: u64, verdict: &PoolVerdict) {
+        for peer in 0..3 {
+            self.verdict(peer, run, verdict.clone(), at + EVIDENCE_WINDOW)
+                .await
+                .expect("verdict is valid");
+        }
     }
 
     async fn pool_len(&self) -> u64 {
@@ -561,7 +642,11 @@ async fn overdue_runs_are_abandoned_and_the_committee_rotates() -> Result<()> {
     );
     assert_eq!(fed.pool_len().await, 0);
 
-    fed.start(1, NOW + POOL_RUN_TIMEOUT).await?;
+    // Once the abandoned run is judged, here blaming nobody, the next one
+    // starts with the next committee.
+    fed.judge(0, NOW + POOL_RUN_TIMEOUT, &culprits(&[])).await;
+    fed.start(1, NOW + POOL_RUN_TIMEOUT + EVIDENCE_WINDOW)
+        .await?;
 
     assert_eq!(fed.committee().await, Some(peers(&[1, 2, 3])));
 
@@ -591,10 +676,321 @@ async fn runs_stop_at_the_target_and_need_the_clock() -> Result<()> {
     assert!(
         pool::run_to_start(
             &mut fed.db.begin_transaction_nc().await.to_ref_nc(),
-            &fed.cfg
+            &fed.cfg,
+            NOW
         )
         .await
         .is_none()
+    );
+
+    Ok(())
+}
+
+fn culprits(peers: &[u16]) -> PoolVerdict {
+    PoolVerdict {
+        culprits: peers.iter().copied().map(PeerId::from).collect(),
+        disputes: vec![],
+    }
+}
+
+#[tokio::test]
+async fn abandoned_runs_are_judged_before_the_next_run() -> Result<()> {
+    let fed = Federation::new();
+    let abandoned_at = NOW + POOL_RUN_TIMEOUT;
+
+    fed.abandon_run(0, NOW).await;
+
+    assert!(fed.is_judging(0).await);
+
+    // No run starts while one is being judged.
+    assert!(fed.start(1, abandoned_at).await.is_err());
+
+    // Members commit to evidence once, within the window.
+    fed.evidence(0, 0, abandoned_at + 10).await?;
+
+    assert!(fed.evidence(0, 0, abandoned_at + 20).await.is_err());
+    assert!(fed.evidence(3, 0, abandoned_at + 20).await.is_err());
+    assert!(
+        fed.evidence(1, 0, abandoned_at + EVIDENCE_WINDOW)
+            .await
+            .is_err()
+    );
+
+    // Verdicts come after the window, name members only, in order, once.
+    let at = abandoned_at + EVIDENCE_WINDOW;
+
+    assert!(
+        fed.verdict(0, 0, culprits(&[2]), abandoned_at + 10)
+            .await
+            .is_err()
+    );
+    assert!(fed.verdict(0, 0, culprits(&[3]), at).await.is_err());
+    assert!(fed.verdict(0, 0, culprits(&[2, 1]), at).await.is_err());
+
+    fed.verdict(0, 0, culprits(&[2]), at).await?;
+
+    assert!(fed.verdict(0, 0, culprits(&[2]), at).await.is_err());
+
+    fed.verdict(1, 0, culprits(&[2]), at).await?;
+
+    assert!(fed.is_judging(0).await);
+
+    // A quorum of verdicts settles it.
+    fed.verdict(3, 0, culprits(&[]), at).await?;
+
+    assert!(!fed.is_judging(0).await);
+    assert_eq!(
+        fed.blame(2).await,
+        Some(Blame {
+            offences: 1,
+            until_run: 1 + 8,
+        })
+    );
+
+    // The next committee rotates past the blamed guardian.
+    fed.start(1, at).await?;
+
+    assert_eq!(fed.committee().await, Some(peers(&[1, 3, 0])));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn blame_needs_f_plus_one_verdicts() -> Result<()> {
+    let fed = Federation::new();
+    let at = NOW + POOL_RUN_TIMEOUT + EVIDENCE_WINDOW;
+
+    fed.abandon_run(0, NOW).await;
+
+    fed.verdict(0, 0, culprits(&[1]), at).await?;
+    fed.verdict(1, 0, culprits(&[]), at).await?;
+    fed.verdict(2, 0, culprits(&[]), at).await?;
+
+    assert!(!fed.is_judging(0).await);
+    assert_eq!(fed.blame(1).await, None);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn disputed_pairs_never_share_a_committee() -> Result<()> {
+    let fed = Federation::new();
+    let at = NOW + POOL_RUN_TIMEOUT + EVIDENCE_WINDOW;
+
+    fed.abandon_run(0, NOW).await;
+    fed.judge(
+        0,
+        NOW + POOL_RUN_TIMEOUT,
+        &PoolVerdict {
+            culprits: vec![],
+            disputes: vec![(PeerId::from(1), PeerId::from(2))],
+        },
+    )
+    .await;
+
+    assert!(fed.dispute(1, 2).await.is_some());
+
+    // Rotation would seat 1, 2 and 3; the first undisputed choice is 1, 3, 0.
+    fed.start(1, at).await?;
+
+    assert_eq!(fed.committee().await, Some(peers(&[1, 3, 0])));
+
+    // A completed run clears records among its members only; guardian 2
+    // sat it out, so the dispute stands.
+    let committee = fed.committee().await.expect("run started");
+    let dealt = deal(&fed, 1, &committee, 2);
+
+    for (peer, shares) in &dealt.submissions {
+        fed.submit(*peer, 1, shares.clone()).await?;
+    }
+
+    assert!(fed.dispute(1, 2).await.is_some());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn repeat_offences_double_and_a_completed_run_clears_them() -> Result<()> {
+    let fed = Federation::new();
+
+    // Penalties start at eight runs and double per offence, up to 64.
+    let first = Blame::repeat(None, 5);
+    let second = Blame::repeat(Some(&first), 5);
+
+    assert_eq!((first.offences, first.until_run), (1, 13));
+    assert_eq!((second.offences, second.until_run), (2, 21));
+    assert_eq!(
+        Blame::repeat(
+            Some(&Blame {
+                offences: 10,
+                until_run: 0
+            }),
+            5
+        )
+        .until_run,
+        69
+    );
+
+    // Guardian 2's blame has run out by run 0; completing a run clears its
+    // record, so a later offence starts from eight runs again.
+    let mut dbtx = fed.db.begin_transaction().await;
+
+    dbtx.insert_entry(&Bolt12BlameKey(PeerId::from(2)), &second)
+        .await;
+    dbtx.insert_entry(
+        &Bolt12BlameKey(PeerId::from(2)),
+        &Blame {
+            offences: 2,
+            until_run: 0,
+        },
+    )
+    .await;
+    dbtx.commit_tx().await;
+
+    fed.fill(0).await;
+
+    assert_eq!(fed.committee().await, None);
+    assert_eq!(fed.blame(2).await, None);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn committees_never_shrink_below_2f_plus_1() -> Result<()> {
+    let fed = Federation::new();
+    let at = NOW + POOL_RUN_TIMEOUT + EVIDENCE_WINDOW;
+
+    fed.abandon_run(0, NOW).await;
+    fed.judge(0, NOW + POOL_RUN_TIMEOUT, &culprits(&[1, 2]))
+        .await;
+
+    // Two of four guardians are blamed, one more than a committee can do
+    // without; the guardian released soonest is seated again.
+    fed.start(1, at).await?;
+
+    let committee = fed.committee().await.expect("run started");
+
+    assert_eq!(committee.len(), 3);
+    assert!(committee.contains(&PeerId::from(3)) && committee.contains(&PeerId::from(0)));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn unjudged_runs_go_stale_and_stop_blocking() -> Result<()> {
+    let fed = Federation::new();
+    let abandoned_at = NOW + POOL_RUN_TIMEOUT;
+
+    fed.abandon_run(0, NOW).await;
+
+    assert!(
+        fed.start(1, abandoned_at + JUDGE_TIMEOUT - 1)
+            .await
+            .is_err()
+    );
+
+    fed.start(1, abandoned_at + JUDGE_TIMEOUT).await?;
+
+    assert!(!fed.is_judging(0).await);
+    assert!(
+        fed.verdict(0, 0, culprits(&[]), abandoned_at + JUDGE_TIMEOUT)
+            .await
+            .is_err()
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn evidence_is_revealed_only_for_abandoned_runs_and_only_signed_messages_count() -> Result<()>
+{
+    use fedimint_core::secp256k1::SecretKey;
+
+    use crate::bolt12::transport::message_digest;
+    use crate::bolt12::worker::{evidence_digest, serve_evidence, signed_messages};
+    use crate::db::{Bolt12PoolLocalRunKey, Bolt12PoolTranscriptKey, LocalRun, SignedMessage};
+
+    let mut fed = Federation::new();
+    let secrets: Vec<SecretKey> = (0..4).map(|_| SecretKey::new(&mut OsRng)).collect();
+
+    fed.cfg
+        .consensus
+        .bolt12
+        .as_mut()
+        .expect("enabled")
+        .transport_keys = (0..4u16)
+        .map(|peer| {
+            (
+                PeerId::from(peer),
+                secrets[usize::from(peer)].public_key(SECP256K1),
+            )
+        })
+        .collect();
+
+    fed.start(0, NOW).await?;
+
+    let run = fed
+        .db
+        .begin_transaction_nc()
+        .await
+        .get_value(&Bolt12PoolRunKey)
+        .await
+        .expect("run started");
+
+    let sign = |sender: u16, recipient: u16, round: u64, message: &[u8]| SignedMessage {
+        message: message.to_vec(),
+        signature: SECP256K1.sign_schnorr(
+            &message_digest(
+                0,
+                PeerId::from(sender),
+                PeerId::from(recipient),
+                round,
+                message,
+            ),
+            &Keypair::from_secret_key(SECP256K1, &secrets[usize::from(sender)]),
+        ),
+    };
+
+    // What member 0 received: a good message from 1, and one from 2 signed
+    // for another recipient.
+    let rounds = vec![vec![
+        None,
+        Some(sign(1, 0, 0, b"from one")),
+        Some(sign(2, 1, 0, b"from two")),
+    ]];
+
+    assert_eq!(
+        signed_messages(&fed.cfg, &run, PeerId::from(0), &rounds)?,
+        vec![vec![None, Some(b"from one".to_vec()), None]]
+    );
+
+    let mut dbtx = fed.db.begin_transaction().await;
+
+    dbtx.insert_entry(
+        &Bolt12PoolLocalRunKey(0),
+        &LocalRun {
+            seed: [7; 32],
+            submission: None,
+            evidence: Some(evidence_digest(&[7; 32], &rounds)),
+        },
+    )
+    .await;
+    dbtx.insert_entry(&Bolt12PoolTranscriptKey(0, 0), &rounds[0])
+        .await;
+    dbtx.commit_tx().await;
+
+    // While the run could still finish, the seed stays secret.
+    assert!(serve_evidence(&fed.db, 0, 0).await.is_err());
+
+    fed.abandon(0, NOW + POOL_RUN_TIMEOUT).await?;
+
+    let page = serve_evidence(&fed.db, 0, 0).await?;
+
+    assert_eq!(page.seed, [7; 32]);
+    assert!(!page.more);
+    assert_eq!(
+        evidence_digest(&page.seed, &page.rounds),
+        evidence_digest(&[7; 32], &rounds)
     );
 
     Ok(())
