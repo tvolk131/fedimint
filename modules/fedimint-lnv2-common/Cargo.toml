@@ -24,6 +24,7 @@ fedimint-ln-common = { workspace = true }
 group = { workspace = true }
 lightning = { workspace = true }
 lightning-invoice = { workspace = true }
+mpc = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

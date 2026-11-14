@@ -23,8 +23,8 @@ use fedimint_core::{Amount, runtime};
 use fedimint_derive_secret::{ChildId, DerivableSecret};
 use fedimint_lnv2_common::bolt12::invoice::{offer_hash, routing_metadata};
 use fedimint_lnv2_common::bolt12::{
-    AddStock, Bolt12Output, MAX_STOCK, MAX_STOCK_BATCH, ReceivePolicy, Register, Registration,
-    RegistrationId, Source, StockItem, StreamedReceive,
+    AddStock, Bolt12Output, Bolt12Unlock, MAX_STOCK, MAX_STOCK_BATCH, ReceivePolicy, Register,
+    Registration, RegistrationId, Source, StockItem, StreamedReceive,
 };
 use fedimint_lnv2_common::gateway_api::{Bolt12Ingress, PaymentFee};
 use fedimint_lnv2_common::{LightningCommonInit, LightningOutput, LightningOutputV0};
@@ -33,7 +33,7 @@ use futures::StreamExt;
 use lightning::blinded_path::message::BlindedMessagePath;
 use lightning::offers::offer::{Offer, OfferBuilder};
 use serde::{Deserialize, Serialize};
-use tpe::{AggregateDecryptionKey, derive_agg_dk};
+use tpe::{aggregate_dk_shares, derive_agg_dk};
 use tracing::warn;
 
 pub use self::sm::{Bolt12ReceiveSMState, Bolt12ReceiveStateMachine};
@@ -102,6 +102,10 @@ pub struct Bolt12OfferParams {
     /// How many payments the offer can receive before the wallet has to come
     /// back online and add more stock.
     pub stock: u64,
+    /// Whether, once the stock runs out, payments may use preimages the
+    /// federation generated. Each such payment costs the federation's pool
+    /// fee when claimed.
+    pub allow_pool: bool,
 }
 
 /// An offer this wallet registered with the federation.
@@ -210,7 +214,7 @@ impl LightningClientModule {
             offer_hash: offer_hash(&offer),
             max_gateway_fee: params.max_gateway_fee,
             expires_at: params.expires_at,
-            allow_pool: false,
+            allow_pool: params.allow_pool,
         };
         let registration = policy.id();
 
@@ -500,36 +504,26 @@ impl LightningClientModule {
     }
 
     async fn claim_bolt12_receive(&self, offer_index: u64, receive: StreamedReceive) {
-        let Source::Stock { index } = receive.contract.source;
-
-        // We encrypted the preimage, so we can derive the decryption key
-        // without asking the guardians for shares.
-        let Some(agg_decryption_key) = runtime::spawn_blocking({
-            let seed =
-                OfferSecrets::derive(&self.bolt12_secret, offer_index).encryption_seed(index);
-            let tpe_agg_pk = self.cfg.tpe_agg_pk;
-            let contract = receive.contract.clone();
-
-            move || {
-                let key: AggregateDecryptionKey = derive_agg_dk(&tpe_agg_pk, &seed);
-
-                (contract.verify_agg_decryption_key(&tpe_agg_pk, &key)
-                    && contract.decrypt_preimage(&key).is_some())
-                .then_some(key)
-            }
-        })
-        .await
-        else {
+        let Some(unlock) = self.bolt12_unlock(offer_index, &receive).await else {
             warn!(
                 target: LOG_CLIENT_MODULE_LNV2,
                 outpoint = %receive.outpoint,
-                "Ignoring BOLT12 receive that our stock secrets cannot claim"
+                "Ignoring BOLT12 receive whose preimage we cannot release"
             );
 
             return;
         };
 
-        if !self.is_worth_claiming(receive.contract.amount).await {
+        let premium = self
+            .cfg
+            .bolt12
+            .as_ref()
+            .map_or(Amount::ZERO, |bolt12| bolt12.unlock_premium(&unlock));
+
+        if !self
+            .is_worth_claiming(receive.contract.amount.saturating_sub(premium))
+            .await
+        {
             warn!(
                 target: LOG_CLIENT_MODULE_LNV2,
                 amount = %receive.contract.amount,
@@ -546,7 +540,7 @@ impl LightningClientModule {
                 operation_id,
                 receive: receive.clone(),
                 claim_keypair: OfferSecrets::derive(&self.bolt12_secret, offer_index).claim_key,
-                agg_decryption_key,
+                unlock,
                 state: Bolt12ReceiveSMState::Pending,
             });
 
@@ -564,6 +558,61 @@ impl LightningClientModule {
             )
             .await
             .ok();
+    }
+}
+
+impl LightningClientModule {
+    /// The keys that release a receive's preimage, if they do.
+    ///
+    /// For a stock item the wallet encrypted the preimage itself and derives
+    /// the key; for a generated preimage it collects the guardians' shares.
+    async fn bolt12_unlock(
+        &self,
+        offer_index: u64,
+        receive: &StreamedReceive,
+    ) -> Option<Bolt12Unlock> {
+        let tpe_agg_pk = self.cfg.tpe_agg_pk;
+        let contract = receive.contract.clone();
+
+        let keys = match contract.source {
+            Source::Stock { index } => {
+                let seed =
+                    OfferSecrets::derive(&self.bolt12_secret, offer_index).encryption_seed(index);
+
+                vec![derive_agg_dk(&tpe_agg_pk, &seed)]
+            }
+            Source::Pool { .. } => {
+                // The receive is funded, so every honest guardian has its
+                // shares; skipping it here would skip it for good.
+                let shares = self
+                    .module_api
+                    .bolt12_decryption_shares(
+                        receive.outpoint,
+                        contract.clone(),
+                        self.cfg.tpe_pks.clone(),
+                    )
+                    .await;
+
+                (0..contract.ciphertexts().len())
+                    .map(|i| {
+                        aggregate_dk_shares(
+                            &shares
+                                .iter()
+                                .map(|(peer, shares)| (peer.to_usize() as u64, shares[i]))
+                                .collect(),
+                        )
+                    })
+                    .collect()
+            }
+        };
+
+        runtime::spawn_blocking(move || {
+            (contract.verify_agg_decryption_keys(&tpe_agg_pk, &keys)
+                && contract.release(&keys).is_some())
+            .then(|| Bolt12Unlock::new(contract.source, keys))
+            .flatten()
+        })
+        .await
     }
 }
 

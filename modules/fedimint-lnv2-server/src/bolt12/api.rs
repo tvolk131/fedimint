@@ -12,19 +12,21 @@ use fedimint_lnv2_common::bolt12::{
     ReservationId, SignRequest, StockItem, StreamedReceive,
 };
 use fedimint_lnv2_common::endpoint_constants::{
-    BOLT12_AWAIT_RECEIVES_ENDPOINT, BOLT12_CONTRACT_ENDPOINT, BOLT12_GATEWAY_APPROVED_ENDPOINT,
+    BOLT12_AWAIT_RECEIVES_ENDPOINT, BOLT12_CONTRACT_ENDPOINT, BOLT12_DECRYPTION_SHARES_ENDPOINT,
+    BOLT12_GATEWAY_APPROVED_ENDPOINT, BOLT12_MPC_ENDPOINT, BOLT12_NEXT_POOL_ENDPOINT,
     BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_NONCE_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
     BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT, BOLT12_RESERVATION_ENDPOINT,
     BOLT12_SET_GATEWAY_VOTE_ENDPOINT, BOLT12_SIGN_ENDPOINT,
 };
 use futures::StreamExt;
+use tpe::DecryptionKeyShare;
 
-use super::signer;
+use super::{signer, transport};
 use crate::Lightning;
 use crate::db::{
-    Bolt12ContractKey, Bolt12GatewayDesiredVoteKey, Bolt12HandleKey, Bolt12RecipientKey,
-    Bolt12RegistrationKey, Bolt12ReservationKey, Bolt12StockRegistrationPrefix,
-    Bolt12StreamIndexKey, Bolt12StreamKey,
+    Bolt12ContractKey, Bolt12DecryptionSharesKey, Bolt12GatewayDesiredVoteKey, Bolt12HandleKey,
+    Bolt12PoolItemPrefix, Bolt12RecipientKey, Bolt12RegistrationKey, Bolt12ReservationKey,
+    Bolt12StockRegistrationPrefix, Bolt12StreamIndexKey, Bolt12StreamKey,
 };
 
 /// Largest batch of receives returned by one stream request.
@@ -167,9 +169,53 @@ impl Lightning {
         ]
     }
 
-    /// Invoice signing. Not consensus: each guardian answers for itself.
+    /// Views of the pool of generated preimages and of funded receives'
+    /// decryption shares.
+    pub(crate) fn bolt12_pool_endpoints() -> Vec<ApiEndpoint<Self>> {
+        vec![
+            public_api_endpoint! {
+                BOLT12_NEXT_POOL_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |_module: &Lightning, context, _params: ()| -> Option<(u64, [u8; 32])> {
+                    let db = context.db();
+                    let mut dbtx = db.begin_transaction_nc().await;
+
+                    // Rows are ordered by index and exist only while unused.
+                    let next = dbtx.find_by_prefix(&Bolt12PoolItemPrefix).await.next().await;
+
+                    Ok(next.map(|(key, item)| (key.0, item.payment_hash)))
+                }
+            },
+            public_api_endpoint! {
+                BOLT12_DECRYPTION_SHARES_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |_module: &Lightning, context, outpoint: OutPoint| -> Vec<DecryptionKeyShare> {
+                    // Long-polls like the LNv2 share endpoint: the shares are
+                    // written atomically with the funding.
+                    Ok(context.db().wait_key_exists(&Bolt12DecryptionSharesKey(outpoint)).await)
+                }
+            },
+        ]
+    }
+
+    /// Invoice signing and generation runs. Not consensus: each guardian
+    /// answers for itself.
     pub(crate) fn bolt12_signing_endpoints() -> Vec<ApiEndpoint<Self>> {
         vec![
+            public_api_endpoint! {
+                BOLT12_MPC_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |module: &Lightning, _context, packet: String| -> () {
+                    let worker = module
+                        .bolt12_worker
+                        .as_ref()
+                        .ok_or_else(|| ApiError::bad_request("Preimage generation is disabled".to_string()))?;
+
+                    transport::decode_packet(&packet)
+                        .and_then(|packet| worker.receive(&packet))
+                        .map_err(|e| ApiError::bad_request(e.to_string()))
+                }
+            },
             public_api_endpoint! {
                 BOLT12_NONCE_ENDPOINT,
                 ApiVersion::new(0, 0),

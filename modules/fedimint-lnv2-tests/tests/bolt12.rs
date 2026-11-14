@@ -5,6 +5,8 @@
 //! Lightning node is involved; the gateway's Lightning integration is covered
 //! separately.
 
+// Shared with the main test binary, which uses all of it.
+#[allow(dead_code)]
 mod mock;
 
 use std::sync::{Arc, Once};
@@ -36,7 +38,7 @@ use fedimint_lnv2_common::bolt12::{
     terms_hash,
 };
 use fedimint_lnv2_common::endpoint_constants::{
-    BOLT12_SET_GATEWAY_VOTE_ENDPOINT, DECRYPTION_KEY_SHARE_ENDPOINT,
+    BOLT12_DECRYPTION_SHARES_ENDPOINT, BOLT12_NEXT_POOL_ENDPOINT, BOLT12_SET_GATEWAY_VOTE_ENDPOINT,
 };
 use fedimint_lnv2_common::gateway_api::PaymentFee;
 use fedimint_lnv2_common::{LightningOutput, LightningOutputV0};
@@ -133,10 +135,17 @@ async fn create_offer(
     lightning: &LightningClientModule,
     stock: u64,
 ) -> Result<(Offer, fedimint_lnv2_client::bolt12::Bolt12Offer)> {
+    create_offer_with(lightning, offer_params(stock)).await
+}
+
+async fn create_offer_with(
+    lightning: &LightningClientModule,
+    params: Bolt12OfferParams,
+) -> Result<(Offer, fedimint_lnv2_client::bolt12::Bolt12Offer)> {
     retry(
         "offer registration",
         backoff_util::aggressive_backoff(),
-        || lightning.create_bolt12_offer(offer_params(stock)),
+        || lightning.create_bolt12_offer(params.clone()),
     )
     .await
 }
@@ -148,6 +157,7 @@ fn offer_params(stock: u64) -> Bolt12OfferParams {
         expires_at: duration_since_epoch().as_secs() + 3_600,
         max_gateway_fee: PaymentFee::RECEIVE_FEE_LIMIT,
         stock,
+        allow_pool: false,
     }
 }
 
@@ -320,10 +330,21 @@ async fn issue_invoice(gateway: &TestGateway, offer: &Offer, amount: Amount) -> 
         .bolt12_registration_by_handle(handle)
         .await?
         .context("registration")?;
-    let (index, item) = api
-        .bolt12_next_stock(registration)
-        .await?
-        .context("stock")?;
+    // The offer's own stock first, then the federation's pool.
+    let (source, payment_hash) = match api.bolt12_next_stock(registration).await? {
+        Some((index, item)) => (Source::Stock { index }, item.payment_hash),
+        None => {
+            let (index, payment_hash) = api
+                .request_current_consensus::<Option<(u64, [u8; 32])>>(
+                    BOLT12_NEXT_POOL_ENDPOINT.to_owned(),
+                    ApiRequestErased::new(()),
+                )
+                .await?
+                .context("no stock and an empty pool")?;
+
+            (Source::Pool { index }, payment_hash)
+        }
+    };
 
     let request = invoice_request(offer, amount)?;
     let path = encode_payment_path(&payment_path(offer, &request)?)?;
@@ -331,7 +352,7 @@ async fn issue_invoice(gateway: &TestGateway, offer: &Offer, amount: Amount) -> 
 
     let reserve = Reserve::new(
         registration,
-        Source::Stock { index },
+        source,
         amount,
         GATEWAY_FEE,
         terms_hash(&request, &path),
@@ -345,7 +366,7 @@ async fn issue_invoice(gateway: &TestGateway, offer: &Offer, amount: Amount) -> 
 
     let reservation = api.bolt12_reservation(id).await?.context("reservation")?;
 
-    ensure!(reservation.payment_hash == item.payment_hash);
+    ensure!(reservation.payment_hash == payment_hash);
 
     let lightning = gateway.client.get_first_module::<LightningClientModule>()?;
 
@@ -383,24 +404,33 @@ async fn released_preimage(
     let mut shares = std::collections::BTreeMap::new();
 
     for peer in cfg.tpe_pks.keys().take(3) {
-        let share: DecryptionKeyShare = api
+        let peer_shares: Vec<DecryptionKeyShare> = api
             .request_single_peer(
-                DECRYPTION_KEY_SHARE_ENDPOINT.to_owned(),
+                BOLT12_DECRYPTION_SHARES_ENDPOINT.to_owned(),
                 ApiRequestErased::new(outpoint),
                 *peer,
             )
             .await?;
 
-        ensure!(contract.verify_decryption_share(&cfg.tpe_pks[peer], &share));
+        ensure!(contract.verify_decryption_shares(&cfg.tpe_pks[peer], &peer_shares));
 
-        shares.insert(peer.to_usize() as u64, share);
+        shares.insert(peer.to_usize() as u64, peer_shares);
     }
 
-    let key = aggregate_dk_shares(&shares);
+    let keys: Vec<_> = (0..contract.ciphertexts().len())
+        .map(|i| {
+            aggregate_dk_shares(
+                &shares
+                    .iter()
+                    .map(|(peer, shares)| (*peer, shares[i]))
+                    .collect(),
+            )
+        })
+        .collect();
 
-    ensure!(contract.verify_agg_decryption_key(&cfg.tpe_agg_pk, &key));
+    ensure!(contract.verify_agg_decryption_keys(&cfg.tpe_agg_pk, &keys));
 
-    Ok(contract.decrypt_preimage(&key))
+    Ok(contract.release(&keys))
 }
 
 async fn await_balance_at_least(client: &ClientHandleArc, amount: Amount) -> Result<()> {
@@ -617,3 +647,72 @@ async fn signing_works_with_one_guardian_offline() -> Result<()> {
 /// The public key type is only used through the gateway key.
 #[allow(dead_code)]
 fn _assert_types(_: PublicKey) {}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generated_preimages_take_over_when_stock_runs_out() -> Result<()> {
+    let fed = fixtures().new_fed_not_degraded().await;
+    let gateway = TestGateway::new(&fed).await?;
+
+    gateway.approve(&fed, 3).await?;
+    gateway.await_approved().await?;
+
+    let wallet = wallet(&fed, 9).await;
+
+    fund(&wallet, sats(1_000)).await?;
+
+    let lightning = wallet.get_first_module::<LightningClientModule>()?;
+    let (offer, _) = create_offer_with(
+        &lightning,
+        Bolt12OfferParams {
+            allow_pool: true,
+            ..offer_params(1)
+        },
+    )
+    .await?;
+
+    let first = issue_invoice(&gateway, &offer, INVOICE_AMOUNT).await?;
+
+    assert!(matches!(first.reservation.source, Source::Stock { .. }));
+
+    // Meanwhile committees of guardians generate preimages; once one is in
+    // the pool, the stockless offer still issues invoices.
+    let second = retry(
+        "a generated preimage",
+        backoff_util::custom_backoff(Duration::from_secs(1), Duration::from_secs(2), Some(300)),
+        || issue_invoice(&gateway, &offer, INVOICE_AMOUNT),
+    )
+    .await?;
+
+    assert!(matches!(second.reservation.source, Source::Pool { .. }));
+    assert_eq!(
+        second.invoice.payment_hash().0,
+        second.reservation.payment_hash
+    );
+
+    let balance = wallet.get_balance_for_btc().await?;
+    let net = INVOICE_AMOUNT.saturating_sub(GATEWAY_FEE);
+    let id = Reservation::id(second.reservation.registration, second.reservation.source);
+    let outpoint = gateway.submit(Bolt12Output::Receive(id), net).await?;
+
+    // Nobody knew the preimage until funding released the shares.
+    let preimage = released_preimage(&gateway, outpoint, &second.reservation)
+        .await?
+        .context("the shares recover the preimage")?;
+
+    assert_eq!(
+        sha256::Hash::hash(&preimage).to_byte_array(),
+        second.reservation.payment_hash
+    );
+
+    // The online wallet claims it, paying the pool fee.
+    let pool_fee = lightning
+        .lightning_config()
+        .bolt12
+        .as_ref()
+        .context("BOLT12 config")?
+        .pool_fee;
+
+    await_balance_at_least(&wallet, balance + net - pool_fee - sats(100)).await?;
+
+    Ok(())
+}

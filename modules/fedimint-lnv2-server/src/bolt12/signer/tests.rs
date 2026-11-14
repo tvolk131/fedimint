@@ -15,7 +15,7 @@ use fedimint_lnv2_common::bolt12::invoice::{
 };
 use fedimint_lnv2_common::bolt12::{
     INVOICE_LIFETIME, NonceRequest, ReceivePolicy, Registration, RegistrationId, Reservation,
-    ReservationId, SignRequest, Source, terms_hash,
+    ReservationId, Sealed, SignRequest, Source, terms_hash,
 };
 use fedimint_lnv2_common::config::{
     FeeConsensus, LightningConfig, LightningConfigConsensus, LightningConfigPrivate,
@@ -183,12 +183,12 @@ impl Scenario {
             registration: policy.id(),
             source,
             payment_hash,
-            ciphertext: tpe::encrypt_preimage(
+            sealed: Sealed::Preimage(tpe::encrypt_preimage(
                 &cfgs[&PeerId::from(0)].consensus.tpe_agg_pk,
                 &[1; 32],
                 &[2; 32],
-                &source.binding(policy.id(), payment_hash),
-            ),
+                &Source::stock_binding(policy.id(), 0, payment_hash),
+            )),
             claim_pk: policy.claim_pk,
             gateway: gateway.public_key(),
             amount: Amount::from_msats(AMOUNT_MSATS),

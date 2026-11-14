@@ -9,6 +9,7 @@ pub mod db;
 mod metrics;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, ensure};
@@ -225,7 +226,15 @@ impl ModuleInit for LightningInit {
                 | DbKeyPrefix::Bolt12Stream
                 | DbKeyPrefix::Bolt12ContractIndex
                 | DbKeyPrefix::Bolt12Nonce
-                | DbKeyPrefix::Bolt12NonceCount => {}
+                | DbKeyPrefix::Bolt12NonceCount
+                | DbKeyPrefix::Bolt12DecryptionShares
+                | DbKeyPrefix::Bolt12PoolItem
+                | DbKeyPrefix::Bolt12PoolNext
+                | DbKeyPrefix::Bolt12PoolPending
+                | DbKeyPrefix::Bolt12PoolRun
+                | DbKeyPrefix::Bolt12PoolRunCount
+                | DbKeyPrefix::Bolt12PoolSubmission
+                | DbKeyPrefix::Bolt12PoolLocalRun => {}
                 DbKeyPrefix::IncomingContractIndex => {
                     push_db_pair_items!(
                         dbtx,
@@ -281,10 +290,28 @@ impl ServerModuleInit for LightningInit {
                 .get();
         }
 
+        let cfg: LightningConfig = args.cfg().to_typed()?;
+
+        let bolt12_worker = cfg
+            .consensus
+            .bolt12
+            .as_ref()
+            .filter(|bolt12| bolt12.pool_target > 0)
+            .map(|_| {
+                bolt12::worker::Worker::spawn(
+                    cfg.clone(),
+                    args.our_peer_id(),
+                    args.db().clone(),
+                    args.module_api().clone(),
+                    args.task_group(),
+                )
+            });
+
         Ok(Lightning {
-            cfg: args.cfg().to_typed()?,
+            cfg,
             our_peer_id: args.our_peer_id(),
             bolt12_signer: tokio::sync::Mutex::default(),
+            bolt12_worker,
             db: args.db().clone(),
             server_bitcoin_rpc_monitor: args.server_bitcoin_rpc_monitor(),
         })
@@ -458,6 +485,8 @@ pub struct Lightning {
     cfg: LightningConfig,
     our_peer_id: PeerId,
     bolt12_signer: tokio::sync::Mutex<bolt12::signer::Signer>,
+    /// Present while this federation generates preimages.
+    bolt12_worker: Option<Arc<bolt12::worker::Worker>>,
     db: Database,
     server_bitcoin_rpc_monitor: ServerBitcoinRpcMonitor,
 }
@@ -505,6 +534,8 @@ impl ServerModule for Lightning {
                     });
                 }
             }
+
+            items.extend(self.bolt12_pool_proposals(dbtx).await);
         }
 
         items
@@ -542,6 +573,19 @@ impl ServerModule for Lightning {
             LightningConsensusItem::Bolt12GatewayVote { gateway, approve } => {
                 bolt12::process_gateway_vote(dbtx, &self.cfg, peer, gateway, approve).await
             }
+            LightningConsensusItem::Bolt12PoolStart { run } => {
+                let now = self.consensus_unix_time(dbtx).await;
+
+                bolt12::pool::process_start(dbtx, &self.cfg, run, now).await
+            }
+            LightningConsensusItem::Bolt12PoolShares { run, shares } => {
+                bolt12::pool::process_shares(dbtx, &self.cfg, peer, run, shares).await
+            }
+            LightningConsensusItem::Bolt12PoolAbandon { run } => {
+                let now = self.consensus_unix_time(dbtx).await;
+
+                bolt12::pool::process_abandon(dbtx, &self.cfg, run, now).await
+            }
             LightningConsensusItem::Default { variant, .. } => Err(anyhow!(
                 "Received lnv2 consensus item with unknown variant {variant}"
             )),
@@ -554,7 +598,7 @@ impl ServerModule for Lightning {
         input: &'b LightningInput,
         _in_point: InPoint,
     ) -> Result<InputMeta, LightningInputError> {
-        let (pub_key, amount) = match input.ensure_v0_ref()? {
+        let (pub_key, amount, premium) = match input.ensure_v0_ref()? {
             LightningInputV0::Outgoing(outpoint, outgoing_witness) => {
                 let contract = dbtx
                     .remove_entry(&OutgoingContractKey(*outpoint))
@@ -603,7 +647,7 @@ impl ServerModule for Lightning {
                         .inc();
                 });
 
-                (pub_key, contract.amount)
+                (pub_key, contract.amount, Amount::ZERO)
             }
             LightningInputV0::Incoming(outpoint, agg_decryption_key) => {
                 let contract = dbtx
@@ -629,17 +673,27 @@ impl ServerModule for Lightning {
                     None => contract.commitment.refund_pk,
                 };
 
-                (pub_key, contract.commitment.amount)
+                (pub_key, contract.commitment.amount, Amount::ZERO)
             }
-            LightningInputV0::Bolt12Receive(outpoint, agg_decryption_key) => {
-                bolt12::process_input(dbtx, &self.cfg, *outpoint, agg_decryption_key).await?
+            LightningInputV0::Bolt12Receive(outpoint, unlock) => {
+                let effect = bolt12::process_input(dbtx, &self.cfg, *outpoint, unlock).await?;
+
+                (effect.pub_key, effect.amount, effect.premium)
             }
         };
+
+        let fee = self
+            .cfg
+            .consensus
+            .fee_consensus
+            .fee(amount)
+            .checked_add(premium)
+            .ok_or(LightningInputError::FeeOverflow)?;
 
         Ok(InputMeta {
             amount: TransactionItemAmounts {
                 amounts: Amounts::new_bitcoin(amount),
-                fees: Amounts::new_bitcoin(self.cfg.consensus.fee_consensus.fee(amount)),
+                fees: Amounts::new_bitcoin(fee),
             },
             pub_key,
         })
@@ -871,6 +925,7 @@ impl ServerModule for Lightning {
         ];
 
         endpoints.extend(Self::bolt12_api_endpoints());
+        endpoints.extend(Self::bolt12_pool_endpoints());
         endpoints.extend(Self::bolt12_signing_endpoints());
 
         endpoints

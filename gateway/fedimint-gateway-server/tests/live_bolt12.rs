@@ -435,6 +435,7 @@ async fn payer_pays_a_federated_offer_over_lightning() -> Result<()> {
         expires_at: duration_since_epoch().as_secs() + 3_600,
         max_gateway_fee: PaymentFee::RECEIVE_FEE_LIMIT,
         stock: 4,
+        allow_pool: false,
     };
     let (offer, _) = retry(
         "offer registration",

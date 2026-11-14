@@ -61,7 +61,7 @@ pub enum LightningInputV0 {
     Outgoing(OutPoint, OutgoingWitness),
     Incoming(OutPoint, AggregateDecryptionKey),
     /// Claim or refund a funded federated BOLT12 receive.
-    Bolt12Receive(OutPoint, AggregateDecryptionKey),
+    Bolt12Receive(OutPoint, bolt12::Bolt12Unlock),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]
@@ -122,6 +122,8 @@ pub enum LightningInputError {
     InvalidDecryptionKey,
     #[error("The forfeit signature is invalid")]
     InvalidForfeitSignature,
+    #[error("The input fee overflows")]
+    FeeOverflow,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Error, Encodable, Decodable)]
@@ -145,6 +147,19 @@ pub enum LightningConsensusItem {
         gateway: bitcoin::secp256k1::PublicKey,
         approve: bool,
     },
+    /// Start generation run `run` because the pool is below its target.
+    Bolt12PoolStart {
+        run: u64,
+    },
+    /// A committee member's encrypted shares from a finished run.
+    Bolt12PoolShares {
+        run: u64,
+        shares: Vec<bolt12::PoolShare>,
+    },
+    /// Give up on run `run`, which has outlived its timeout.
+    Bolt12PoolAbandon {
+        run: u64,
+    },
     #[encodable_default]
     Default {
         variant: u64,
@@ -163,6 +178,15 @@ impl std::fmt::Display for LightningConsensusItem {
             }
             LightningConsensusItem::Bolt12GatewayVote { gateway, approve } => {
                 write!(f, "LNv2 BOLT12 Gateway Vote {gateway} {approve}")
+            }
+            LightningConsensusItem::Bolt12PoolStart { run } => {
+                write!(f, "LNv2 BOLT12 Pool Start {run}")
+            }
+            LightningConsensusItem::Bolt12PoolShares { run, shares } => {
+                write!(f, "LNv2 BOLT12 Pool Shares {run} ({})", shares.len())
+            }
+            LightningConsensusItem::Bolt12PoolAbandon { run } => {
+                write!(f, "LNv2 BOLT12 Pool Abandon {run}")
             }
             LightningConsensusItem::Default { variant, bytes } => write!(
                 f,

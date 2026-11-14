@@ -16,6 +16,7 @@ async-trait = { workspace = true }
 bls12_381 = { workspace = true }
 chacha20poly1305 = { workspace = true }
 erased-serde = { workspace = true }
+fedimint-api-client = { workspace = true }
 fedimint-core = { workspace = true }
 fedimint-lnv2-common = { workspace = true }
 fedimint-logging = { workspace = true }
@@ -24,6 +25,7 @@ fedimint-server-core = { workspace = true }
 frost-secp256k1-tr = { workspace = true }
 futures = { workspace = true }
 group = { workspace = true }
+mpc = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -32,6 +34,7 @@ strum_macros = { workspace = true }
 tokio = { workspace = true }
 tpe = { workspace = true }
 tracing = { workspace = true }
+zeroize = "1"
 
 [dev-dependencies]
 lightning = { workspace = true }

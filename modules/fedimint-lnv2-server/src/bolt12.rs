@@ -6,7 +6,10 @@
 
 mod api;
 pub mod keys;
+pub mod pool;
 pub mod signer;
+pub mod transport;
+pub mod worker;
 
 use anyhow::{Context, Result, ensure};
 use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
@@ -14,22 +17,22 @@ use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::{Amount, OutPoint, PeerId};
 use fedimint_lnv2_common::LightningInputError;
 use fedimint_lnv2_common::bolt12::{
-    AddStock, Bolt12Output, INVOICE_LIFETIME, MAX_PENDING_PER_GATEWAY, MAX_PENDING_PER_OFFER,
-    MAX_REGISTRATION_LIFETIME, MAX_REGISTRATIONS, MAX_STOCK, MAX_STOCK_BATCH, Pending,
-    REGISTRATIONS_PRUNED_PER_REGISTER, Register, Registration, RegistrationId, Reservation,
-    ReservationId, Reserve, Source, StreamedReceive, output_amount_and_fee, quorum,
-    reservation_is_economical,
+    AddStock, Bolt12Output, Bolt12Unlock, INVOICE_LIFETIME, MAX_PENDING_PER_GATEWAY,
+    MAX_PENDING_PER_OFFER, MAX_PENDING_POOL, MAX_REGISTRATION_LIFETIME, MAX_REGISTRATIONS,
+    MAX_STOCK, MAX_STOCK_BATCH, Pending, PoolItem, REGISTRATIONS_PRUNED_PER_REGISTER, Register,
+    Registration, RegistrationId, Reservation, ReservationId, Reserve, Sealed, Source,
+    StreamedReceive, output_amount_and_fee, quorum, reservation_is_economical,
 };
 use fedimint_lnv2_common::config::LightningConfig;
 use futures::StreamExt;
-use tpe::AggregateDecryptionKey;
 
 use crate::db::{
-    Bolt12ContractIndexKey, Bolt12ContractKey, Bolt12ExpiryKey, Bolt12ExpiryPrefix,
-    Bolt12GatewayPendingKey, Bolt12GatewayVoteGatewayPrefix, Bolt12GatewayVoteKey, Bolt12HandleKey,
-    Bolt12OfferPendingKey, Bolt12PaymentHashKey, Bolt12RecipientKey, Bolt12RegistrationCountKey,
+    Bolt12ContractIndexKey, Bolt12ContractKey, Bolt12DecryptionSharesKey, Bolt12ExpiryKey,
+    Bolt12ExpiryPrefix, Bolt12GatewayPendingKey, Bolt12GatewayVoteGatewayPrefix,
+    Bolt12GatewayVoteKey, Bolt12HandleKey, Bolt12OfferPendingKey, Bolt12PaymentHashKey,
+    Bolt12PoolItemKey, Bolt12PoolPendingKey, Bolt12RecipientKey, Bolt12RegistrationCountKey,
     Bolt12RegistrationKey, Bolt12ReservationKey, Bolt12StockKey, Bolt12StockRegistrationPrefix,
-    Bolt12StreamIndexKey, Bolt12StreamKey, DecryptionKeyShareKey,
+    Bolt12StreamIndexKey, Bolt12StreamKey,
 };
 
 /// What an accepted output moves and costs.
@@ -330,6 +333,12 @@ async fn process_reserve(
         "gateway is not approved"
     );
 
+    let bolt12 = cfg
+        .consensus
+        .bolt12
+        .as_ref()
+        .context("federated BOLT12 is disabled")?;
+
     let mut registration = live_registration(dbtx, reserve.registration, now).await?;
 
     ensure!(
@@ -338,21 +347,33 @@ async fn process_reserve(
             &registration.policy,
             reserve.amount,
             reserve.gateway_fee,
+            bolt12.claim_premium(reserve.source),
         ),
         "amount does not cover fees or the gateway fee exceeds policy"
     );
-
-    let Source::Stock { index } = reserve.source;
-
-    let item = dbtx
-        .remove_entry(&Bolt12StockKey(reserve.registration, index))
-        .await
-        .context("stock item is unknown or already used")?;
 
     let id = reserve.reservation_id();
     let entry = Pending {
         expires_at: now.saturating_add(INVOICE_LIFETIME),
         reservation: id,
+    };
+
+    let (payment_hash, sealed) = match reserve.source {
+        Source::Stock { index } => {
+            let item = dbtx
+                .remove_entry(&Bolt12StockKey(reserve.registration, index))
+                .await
+                .context("stock item is unknown or already used")?;
+
+            registration.stock_unused = registration.stock_unused.saturating_sub(1);
+
+            (item.payment_hash, Sealed::Preimage(item.ciphertext))
+        }
+        Source::Pool { index } => {
+            let item = take_pool_item(dbtx, &registration, index, &entry, now).await?;
+
+            (item.payment_hash, item.sealed)
+        }
     };
 
     let offer_pending = dbtx
@@ -393,8 +414,8 @@ async fn process_reserve(
             &Reservation {
                 registration: reserve.registration,
                 source: reserve.source,
-                payment_hash: item.payment_hash,
-                ciphertext: item.ciphertext,
+                payment_hash,
+                sealed,
                 claim_pk: registration.policy.claim_pk,
                 gateway: reserve.gateway,
                 amount: reserve.amount,
@@ -408,12 +429,51 @@ async fn process_reserve(
         "source is already reserved"
     );
 
-    registration.stock_unused = registration.stock_unused.saturating_sub(1);
-
     dbtx.insert_entry(&Bolt12RegistrationKey(reserve.registration), &registration)
         .await;
 
     Ok(())
+}
+
+/// Take the generated preimage at `index` for a reservation, counting it
+/// against the pool's allowance.
+async fn take_pool_item(
+    dbtx: &mut DatabaseTransaction<'_>,
+    registration: &Registration,
+    index: u64,
+    entry: &Pending,
+    now: u64,
+) -> Result<PoolItem> {
+    // The recipient pays more for a generated preimage, so one is used only
+    // when it asked for that and its own stock is gone.
+    ensure!(
+        registration.policy.allow_pool,
+        "the offer does not accept generated preimages"
+    );
+    ensure!(registration.stock_unused == 0, "the offer still has stock");
+
+    let item = dbtx
+        .remove_entry(&Bolt12PoolItemKey(index))
+        .await
+        .context("pool item is unknown or already used")?;
+
+    let pool_pending = dbtx
+        .get_value(&Bolt12PoolPendingKey)
+        .await
+        .unwrap_or_default();
+    let mut pool_pending = live_pending(dbtx, pool_pending, now).await;
+
+    ensure!(
+        pool_pending.len() < MAX_PENDING_POOL,
+        "too many unpaid invoices use generated preimages"
+    );
+
+    pool_pending.push(entry.clone());
+
+    dbtx.insert_entry(&Bolt12PoolPendingKey, &pool_pending)
+        .await;
+
+    Ok(item)
 }
 
 fn without(pending: Option<Vec<Pending>>, id: ReservationId) -> Vec<Pending> {
@@ -456,6 +516,15 @@ async fn process_receive(
         dbtx.insert_entry(&gateway_key, &gateway_pending).await;
     }
 
+    if reservation.source.is_pool() {
+        let pool_pending = without(dbtx.remove_entry(&Bolt12PoolPendingKey).await, id);
+
+        if !pool_pending.is_empty() {
+            dbtx.insert_entry(&Bolt12PoolPendingKey, &pool_pending)
+                .await;
+        }
+    }
+
     let contract = reservation.contract();
 
     dbtx.insert_new_entry(&Bolt12ContractKey(outpoint), &contract)
@@ -478,22 +547,35 @@ async fn process_receive(
 
     // Written atomically with acceptance: a rejected funding transaction
     // leaves no share behind.
-    dbtx.insert_entry(
-        &DecryptionKeyShareKey(outpoint),
-        &tpe::create_dk_share(&cfg.private.sk, &contract.ciphertext),
-    )
-    .await;
+    let shares = contract
+        .ciphertexts()
+        .iter()
+        .map(|(ciphertext, _)| tpe::create_dk_share(&cfg.private.sk, ciphertext))
+        .collect::<Vec<_>>();
+
+    dbtx.insert_entry(&Bolt12DecryptionSharesKey(outpoint), &shares)
+        .await;
 
     Ok(contract.amount)
 }
 
-/// Spend a funded receive. Returns the key that must sign and the amount.
+/// What spending a funded receive requires and moves.
+pub struct InputEffect {
+    /// The key that must sign.
+    pub pub_key: PublicKey,
+    pub amount: Amount,
+    /// Charged on top of the ordinary input fee.
+    pub premium: Amount,
+}
+
+/// Spend a funded receive: the recipient's claim if the preimage is released,
+/// otherwise the gateway's refund.
 pub async fn process_input(
     dbtx: &mut DatabaseTransaction<'_>,
     cfg: &LightningConfig,
     outpoint: OutPoint,
-    key: &AggregateDecryptionKey,
-) -> Result<(PublicKey, Amount), LightningInputError> {
+    unlock: &Bolt12Unlock,
+) -> Result<InputEffect, LightningInputError> {
     let contract = dbtx
         .remove_entry(&Bolt12ContractKey(outpoint))
         .await
@@ -503,29 +585,45 @@ pub async fn process_input(
         dbtx.remove_entry(&Bolt12StreamKey(index)).await;
     }
 
-    if !contract.verify_agg_decryption_key(&cfg.consensus.tpe_agg_pk, key) {
+    if unlock.is_pool() != contract.source.is_pool()
+        || !contract.verify_agg_decryption_keys(&cfg.consensus.tpe_agg_pk, unlock.keys())
+    {
         return Err(LightningInputError::InvalidDecryptionKey);
     }
 
-    let pub_key = if contract.decrypt_preimage(key).is_some() {
-        contract.claim_pk
-    } else {
-        // The recipient uploaded a ciphertext without the preimage. The
-        // gateway gets its funding back and the offer stops issuing invoices.
-        if let Some(mut registration) = dbtx
+    let premium = cfg
+        .consensus
+        .bolt12
+        .as_ref()
+        .map_or(Amount::ZERO, |bolt12| bolt12.unlock_premium(unlock));
+
+    if contract.release(unlock.keys()).is_some() {
+        return Ok(InputEffect {
+            pub_key: contract.claim_pk,
+            amount: contract.amount,
+            premium,
+        });
+    }
+
+    // The gateway gets its funding back. A stock item without its preimage
+    // is the recipient's fault, so the offer also stops issuing invoices; a
+    // generated preimage can only fail through misbehaving guardians.
+    if !contract.source.is_pool()
+        && let Some(mut registration) = dbtx
             .get_value(&Bolt12RegistrationKey(contract.registration))
             .await
-        {
-            registration.voided = true;
+    {
+        registration.voided = true;
 
-            dbtx.insert_entry(&Bolt12RegistrationKey(contract.registration), &registration)
-                .await;
-        }
+        dbtx.insert_entry(&Bolt12RegistrationKey(contract.registration), &registration)
+            .await;
+    }
 
-        contract.refund_pk
-    };
-
-    Ok((pub_key, contract.amount))
+    Ok(InputEffect {
+        pub_key: contract.refund_pk,
+        amount: contract.amount,
+        premium,
+    })
 }
 
 /// Record a guardian's vote. Repeating the stored vote is rejected so it is

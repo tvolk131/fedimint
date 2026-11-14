@@ -14,24 +14,39 @@ use fedimint_core::module::{Amounts, ApiRequestErased};
 use fedimint_core::secp256k1::Keypair;
 use fedimint_core::util::FmtCompact;
 use fedimint_core::{NumPeersExt, OutPoint, PeerId, runtime};
-use fedimint_lnv2_common::bolt12::ReceiveContract;
+use fedimint_lnv2_common::bolt12::{Bolt12Unlock, ReceiveContract};
 use fedimint_lnv2_common::contracts::PaymentImage;
-use fedimint_lnv2_common::endpoint_constants::DECRYPTION_KEY_SHARE_ENDPOINT;
+use fedimint_lnv2_common::endpoint_constants::BOLT12_DECRYPTION_SHARES_ENDPOINT;
 use fedimint_lnv2_common::{LightningInput, LightningInputV0};
 use fedimint_logging::LOG_CLIENT_MODULE_GW;
-use tpe::{AggregatePublicKey, DecryptionKeyShare, PublicKeyShare, aggregate_dk_shares};
+use serde::{Deserialize, Serialize};
+use tpe::{
+    AggregateDecryptionKey, AggregatePublicKey, DecryptionKeyShare, PublicKeyShare,
+    aggregate_dk_shares,
+};
 use tracing::warn;
 
 use crate::GatewayClientContextV2;
 use crate::events::{IncomingPaymentFailed, IncomingPaymentSucceeded};
-use crate::receive_sm::DecryptionOutcome;
+
+/// What collecting decryption shares for a funded receive came to.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum DecryptionOutcome {
+    /// The funding transaction was rejected.
+    Rejected(String),
+    /// A quorum of valid shares aggregated to invalid keys.
+    InconsistentKeys,
+    /// One aggregate key per ciphertext, and the preimage if they release it.
+    Decrypted(Vec<AggregateDecryptionKey>, Option<[u8; 32]>),
+}
 
 /// Funds a federated BOLT12 receive and recovers the Lightning preimage.
 ///
 /// This is the BOLT12 counterpart of the incoming contract state machine, and
 /// ends in the same outcomes, so circuit completion treats both alike. The
-/// difference is who made the ciphertext: here the recipient uploaded it
-/// before going offline, bound to its registration rather than to a contract.
+/// difference is who made the ciphertexts: the recipient uploaded a stock
+/// item before going offline, or a committee of guardians sealed shares of a
+/// generated preimage.
 ///
 /// ```mermaid
 /// graph LR
@@ -145,7 +160,7 @@ impl Bolt12ReceiveStateMachine {
                     let tpe_pks = tpe_pks.clone();
                     let contract = contract.clone();
 
-                    move |peer_id, share: DecryptionKeyShare| {
+                    move |peer_id, shares: Vec<DecryptionKeyShare>| {
                         let tpe_pks = tpe_pks.clone();
                         let contract = contract.clone();
 
@@ -158,19 +173,19 @@ impl Bolt12ReceiveStateMachine {
                                         "Missing TPE PK for peer {peer_id}?!"
                                     )))?;
 
-                            if !contract.verify_decryption_share(pk, &share) {
+                            if !contract.verify_decryption_shares(pk, &shares) {
                                 return Err(ServerError::InvalidResponse(
-                                    "Invalid decryption share".to_string(),
+                                    "Invalid decryption shares".to_string(),
                                 ));
                             }
 
-                            Ok(share)
+                            Ok(shares)
                         })
                     }
                 },
                 num_peers,
             ),
-            DECRYPTION_KEY_SHARE_ENDPOINT.to_owned(),
+            BOLT12_DECRYPTION_SHARES_ENDPOINT.to_owned(),
             ApiRequestErased::new(outpoint),
         );
 
@@ -190,20 +205,26 @@ impl Bolt12ReceiveStateMachine {
         };
 
         runtime::spawn_blocking(move || {
-            let agg_decryption_key = aggregate_dk_shares(
-                &decryption_shares
-                    .into_iter()
-                    .map(|(peer, share)| (peer.to_usize() as u64, share))
-                    .collect(),
-            );
+            let ciphertexts = contract.ciphertexts().len();
 
-            if !contract.verify_agg_decryption_key(&tpe_agg_pk, &agg_decryption_key) {
+            let agg_decryption_keys: Vec<AggregateDecryptionKey> = (0..ciphertexts)
+                .map(|i| {
+                    aggregate_dk_shares(
+                        &decryption_shares
+                            .iter()
+                            .map(|(peer, shares)| (peer.to_usize() as u64, shares[i]))
+                            .collect(),
+                    )
+                })
+                .collect();
+
+            if !contract.verify_agg_decryption_keys(&tpe_agg_pk, &agg_decryption_keys) {
                 return DecryptionOutcome::InconsistentKeys;
             }
 
-            let preimage = contract.decrypt_preimage(&agg_decryption_key);
+            let preimage = contract.release(&agg_decryption_keys);
 
-            DecryptionOutcome::Decrypted(agg_decryption_key, preimage)
+            DecryptionOutcome::Decrypted(agg_decryption_keys, preimage)
         })
         .await
     }
@@ -239,7 +260,7 @@ impl Bolt12ReceiveStateMachine {
         global_context: DynGlobalClientContext,
         client_ctx: GatewayClientContextV2,
     ) -> Bolt12ReceiveStateMachine {
-        let (agg_decryption_key, preimage) = match outcome {
+        let (agg_decryption_keys, preimage) = match outcome {
             DecryptionOutcome::Rejected(error) => {
                 let state = Bolt12ReceiveSMState::Rejected(error.clone());
 
@@ -260,8 +281,8 @@ impl Bolt12ReceiveStateMachine {
                     )
                     .await;
             }
-            DecryptionOutcome::Decrypted(agg_decryption_key, preimage) => {
-                (agg_decryption_key, preimage)
+            DecryptionOutcome::Decrypted(agg_decryption_keys, preimage) => {
+                (agg_decryption_keys, preimage)
             }
         };
 
@@ -282,13 +303,21 @@ impl Bolt12ReceiveStateMachine {
             return old_state;
         }
 
-        // The recipient's stock item did not contain the preimage. The
-        // Lightning payment cannot be settled, so take the funding back.
+        // The ciphertexts did not yield the preimage. The Lightning payment
+        // cannot be settled, so take the funding back.
+        let Some(unlock) = Bolt12Unlock::new(old_state.contract.source, agg_decryption_keys) else {
+            return old_state
+                .fail(
+                    dbtx,
+                    &client_ctx,
+                    "Contract has no ciphertexts",
+                    Bolt12ReceiveSMState::Failure,
+                )
+                .await;
+        };
+
         let client_input = ClientInput::<LightningInput> {
-            input: LightningInput::V0(LightningInputV0::Bolt12Receive(
-                old_state.outpoint,
-                agg_decryption_key,
-            )),
+            input: LightningInput::V0(LightningInputV0::Bolt12Receive(old_state.outpoint, unlock)),
             amounts: Amounts::new_bitcoin(old_state.contract.amount),
             keys: vec![old_state.refund_keypair],
         };

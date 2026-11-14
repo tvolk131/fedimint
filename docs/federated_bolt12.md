@@ -10,8 +10,8 @@ funds a claim for the recipient once it holds the Lightning payment. The
 recipient claims later with its mnemonic-derived key. A gateway is trusted for
 availability only.
 
-This document specifies the stock-only milestone and reserves the extension
-points for MPC-generated preimages.
+This document specifies recipient-supplied stock and the pool of preimages the
+guardians generate by MPC.
 
 ## Trust and parameters
 
@@ -36,9 +36,11 @@ payment could expose the preimage of a live invoice.
    Guardians cannot check that the ciphertext holds the right preimage, so a
    funded receive keeps LNv2's refund path: if the decrypted value does not hash
    to the payment hash, the gateway reclaims its funding.
-2. **MPC pool** (later). Guardians jointly generate pairs nobody knows. A
-   registration opts in with `allow_pool`. The source is a tagged enum so new
-   record versions can be added.
+2. **Pool**. Committees of guardians jointly generate payment hashes whose
+   preimage nobody knows; see Generation. A registration opts in with
+   `allow_pool`, and a reservation may use the pool only once the
+   registration's stock is exhausted. The recipient pays `pool_fee` on top of
+   the ordinary fee when it claims such a receive.
 
 ## Consensus state
 
@@ -58,7 +60,13 @@ All state is in indexed tables; nothing is stored as one aggregate value.
 | Gateway vote | `(gateway key, PeerId)` | `bool` |
 | Receive contract | `OutPoint` | `ReceiveContract` |
 | Receive stream | `u64` | `OutPoint` |
-| Decryption share | `OutPoint` | reuses LNv2's `DecryptionKeyShareKey` |
+| Decryption shares | `OutPoint` | `Vec<DecryptionKeyShare>`, one per ciphertext |
+| Pool item | `index: u64` | `PoolItem` |
+| Pool next index | singleton | `u64` |
+| Pool pending list | singleton | `Vec<Pending>` (bounded) |
+| Generation run | singleton | `PoolRun` |
+| Run counter | singleton | `u64` |
+| Run submission | `(run, PeerId)` | `Vec<PoolShare>` |
 
 ```text
 Registration {
@@ -75,11 +83,18 @@ ReceivePolicy {
     expires_at: u64,
     allow_pool: bool,
 }
-StockItem { payment_hash: [u8; 32], ciphertext: CipherText, used: bool }
+StockItem { payment_hash: [u8; 32], ciphertext: CipherText }
+Source = Stock { index } | Pool { index }
+Sealed =
+    Preimage(CipherText)   // stock: the recipient's preimage
+  | Shares { run, threshold, shares: Vec<{ position, ciphertext }> }
+PoolItem { payment_hash, sealed: Sealed::Shares }
+PoolRun { run, committee: Vec<PeerId>, batch, started_at }
 Reservation {
     registration: RegistrationId,
-    source: Source,        // Stock { index }
+    source: Source,
     payment_hash: [u8; 32],
+    sealed: Sealed,
     claim_pk: PublicKey,
     gateway: PublicKey,
     amount: Amount,        // invoice amount
@@ -93,7 +108,7 @@ ReceiveContract {
     registration: RegistrationId,
     source: Source,
     payment_hash: [u8; 32],
-    ciphertext: CipherText,
+    sealed: Sealed,
     amount: Amount,        // invoice amount minus gateway fee
     gateway_fee: Amount,
     claim_pk: PublicKey,
@@ -124,25 +139,33 @@ Outputs (`LightningOutputV0`):
   `source`, `gateway_fee <= max_gateway_fee.fee(amount)`, and
   `amount > gateway_fee + funding fees` (the recipient nets more than zero).
   Enforces the pending limits below. A duplicate reservation is an error, not a
-  silent success. The stock item is marked used.
+  silent success. The stock item is deleted. A `Pool { index }` source also
+  requires `allow_pool`, no unused stock, and a pool item at `index`, which is
+  deleted; the economical check then includes `pool_fee`.
 - `Bolt12Receive { reservation }`. Value `amount - gateway_fee`. Requires an
   unfunded reservation whose invoice has not expired. Creates the receive
   contract, appends it to the receive stream, stores this guardian's decryption
-  share, and removes the reservation from both pending lists. Costs the normal
-  LNv2 fee plus `receive_fee` (plus a pool premium for pool-backed receives).
+  share for every ciphertext, and removes the reservation from the pending
+  lists. Costs the normal LNv2 fee plus `receive_fee`.
 
 Input (`LightningInputV0`):
 
-- `Bolt12Receive(outpoint, AggregateDecryptionKey)`. The key must verify
-  against the contract ciphertext and binding. If the decrypted value hashes to
-  the payment hash the input is spendable by `claim_pk`; otherwise by
-  `refund_pk`, and the registration is voided.
+- `Bolt12Receive(outpoint, Bolt12Unlock)`. `Bolt12Unlock` is `Stock(key)` or
+  `Pool(keys)`, matching the contract's source, with one aggregate decryption
+  key per ciphertext; each must verify against its ciphertext and binding. If
+  the decrypted stock value, or the preimage reconstructed from the decrypted
+  shares, hashes to the payment hash, the input is spendable by `claim_pk`;
+  otherwise by `refund_pk`, and a stock registration is voided. A `Pool` input
+  costs `pool_fee` on top of the ordinary fee, on the claim and on the refund
+  alike, so a client can price it without reading the contract.
 
 Consensus items:
 
 - `Bolt12GatewayVote { gateway, approve }`. Each guardian's latest vote is
   stored; a gateway is approved while at least `q` guardians vote to approve.
   Guardians set their vote through an authenticated admin endpoint.
+- `Bolt12PoolStart { run }`, `Bolt12PoolShares { run, shares }` and
+  `Bolt12PoolAbandon { run }`; see Generation.
 
 ## Limits
 
@@ -157,6 +180,9 @@ instead.
   `MAX_PENDING_PER_GATEWAY` (64) per gateway. Each list is a bounded vector of
   `(expires_at, ReservationId)`; expired entries are dropped, and their
   reservations deleted, whenever the list is next touched.
+- At most `MAX_PENDING_POOL` (32) pending reservations use the pool at once,
+  across all offers, so unpaid requests cannot drain it faster than runs
+  refill it.
 - Paid receives leave the lists immediately, so only unpaid requests consume
   allowance.
 - Guardians can withdraw their vote for a gateway that abuses its allowance.
@@ -200,6 +226,57 @@ item is burned against that gateway's allowance.
 4. Wallet, when next online: scan the receive stream for its claim keys,
    collect decryption shares and claim.
 
+## Generation
+
+The pool is enabled when `pool_target > 0`. Each guardian proposes
+`Bolt12PoolStart { run }` while no run is in progress and fewer than
+`pool_target` items are ready; the first one ordered starts run `run` (the run
+counter's value), recording its committee, `pool_batch` and the consensus
+time.
+
+- **Committee.** `2f + 1` guardians: the guardians in `PeerId` order, starting
+  at offset `run mod n` and wrapping. A member's position in this list is its
+  party index in the MPC. Rotation means an offline guardian stalls at most
+  the runs it is a member of.
+- **MPC** (`fedimint-mpc`). Degree-`f` Shamir sharing over GF(2^64) among the
+  committee, which is honest-majority with abort because at most `f` members
+  are malicious. Each member's contributions are XORed into `r`; the circuit
+  publishes `SHA256(r)` and gives each member its share of `r` (threshold
+  `f + 1`) masked under a key only that member supplied. Malicious members can
+  make a run abort but not change its output or learn `r`.
+- **Transport.** Members exchange messages through the module API endpoint
+  `bolt12_mpc`, chunked and encrypted with ChaCha20-Poly1305 under a key from
+  the two guardians' transport keys, bound to run, direction, round and chunk.
+  Senders retry until the recipient reaches the round.
+- **Durability.** Before sending anything, a member records the run and the
+  seed all its randomness comes from. A restarted member does not rejoin; the
+  run times out instead.
+- **Submission.** A member that finishes encrypts each share to the
+  federation's TPE key, bound to `(run, position, payment_hash)`, stores the
+  result and proposes `Bolt12PoolShares`. Consensus checks the sender is a
+  member, the count matches the batch and every ciphertext verifies.
+- **Completion.** When every member has submitted, the hash list submitted by
+  at least `f + 1` members (the honest ones always agree, and are a majority)
+  becomes pool items, sealed with the shares of the members who submitted it.
+  Hashes already seen are skipped. The run and its submissions are deleted.
+- **Timeout.** Once the consensus time passes `started_at +
+  POOL_RUN_TIMEOUT` (900 s), guardians propose `Bolt12PoolAbandon { run }`,
+  which deletes the run and its submissions. Results of an abandoned run are
+  never used, so no share of a later-published preimage ever leaves a member.
+- **Release.** Funding a pool receive stores each guardian's decryption share
+  for every member's ciphertext. The gateway and the recipient aggregate a
+  threshold of these per ciphertext, decrypt the `2f + 1` shares and
+  reconstruct `r` by trying subsets of `f + 1` until one hashes to the payment
+  hash. At least `f + 1` shares come from honest members, so this succeeds
+  whatever the others sealed.
+
+Reasoning recorded for review: openings check that all `2f + 1` shares lie on
+one degree-`f` polynomial, which the `f + 1` honest shares fix, so no digest
+echo per opening is needed; the challenge for the triple check is drawn by
+commit and reveal with an echoed commitment. Before a share leaves the MPC it
+is known only to its member; after sealing, decrypting it needs a quorum, and
+consensus only releases decryption shares once a receive is funded.
+
 ## Gateway
 
 - `POST /bolt12_ingress` with a federation id returns the gateway's blinded
@@ -229,12 +306,17 @@ item is burned against that gateway's allowance.
 
 ## Fees and minimum amounts
 
-`Bolt12Config` carries `registration_fee`, `stock_item_fee` and `receive_fee`.
+`Bolt12Config` carries `registration_fee`, `stock_item_fee`, `receive_fee`,
+`pool_fee`, `pool_target` and `pool_batch`.
 There is no separate minimum-amount setting. The single rule is that a
 reservation's amount must exceed every fee taken for the source it uses, so the
 recipient always nets more than zero. Pool-backed receives will add a premium to
 that sum, which raises their effective minimum without affecting stock-backed
 ones. Wallets should warn when fees are a large share of the amount.
+
+The gateway pays `receive_fee` when it funds a receive and passes it on in
+its own fee. The recipient pays `pool_fee` when it claims a pool receive,
+because it chose the pool.
 
 ## Privacy
 
@@ -246,8 +328,11 @@ scope.
 
 ## Deferred
 
-- MPC pool: one-hash direct-share circuit, committee generation with an
-  honest-majority parameterisation, blame-and-exclude, pool-wide limits.
+- Blame-and-exclude for generation runs: replaying an aborted run from the
+  members' revealed seeds and signed messages, and keeping blamed guardians
+  off committees for a number of runs that doubles on repeat offences.
+- Taking share coefficients and masks from the MPC's own shared randomness
+  instead of bit-checked inputs, which would make runs cheaper.
 - Payment paths through the gateway's channel peers, which older payers
   handle correctly and which hide the gateway node behind its peers.
 - Open (non-approved) gateways backed by a recipient deposit.

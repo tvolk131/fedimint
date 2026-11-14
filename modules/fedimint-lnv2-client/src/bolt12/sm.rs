@@ -7,10 +7,9 @@ use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::Amounts;
 use fedimint_core::secp256k1::Keypair;
 use fedimint_core::util::FmtCompact;
-use fedimint_lnv2_common::bolt12::StreamedReceive;
+use fedimint_lnv2_common::bolt12::{Bolt12Unlock, StreamedReceive};
 use fedimint_lnv2_common::{LightningInput, LightningInputV0};
 use fedimint_logging::LOG_CLIENT_MODULE_LNV2;
-use tpe::AggregateDecryptionKey;
 use tracing::warn;
 
 use crate::LightningClientContext;
@@ -26,7 +25,7 @@ pub struct Bolt12ReceiveStateMachine {
     pub operation_id: OperationId,
     pub receive: StreamedReceive,
     pub claim_keypair: Keypair,
-    pub agg_decryption_key: AggregateDecryptionKey,
+    pub unlock: Bolt12Unlock,
     pub state: Bolt12ReceiveSMState,
 }
 
@@ -84,7 +83,7 @@ impl Bolt12ReceiveStateMachine {
         let client_input = ClientInput::<LightningInput> {
             input: LightningInput::V0(LightningInputV0::Bolt12Receive(
                 old_state.receive.outpoint,
-                old_state.agg_decryption_key,
+                old_state.unlock.clone(),
             )),
             amounts: Amounts::new_bitcoin(contract.amount),
             keys: vec![old_state.claim_keypair],

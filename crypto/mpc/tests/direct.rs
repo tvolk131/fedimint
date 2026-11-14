@@ -1,10 +1,10 @@
 //! End-to-end runs of the preimage generator over the in-memory transport.
 
 use anyhow::Result;
-use fedimint_mpc::circuit::Circuit;
-use fedimint_mpc::direct::{self, Generated, Share, reconstruct};
-use fedimint_mpc::engine::{Params, Transport};
-use fedimint_mpc::memory::{MemoryTransport, mesh};
+use mpc::circuit::Circuit;
+use mpc::direct::{self, Generated, Share, reconstruct};
+use mpc::engine::{Params, Transport};
+use mpc::memory::{MemoryTransport, mesh};
 use sha2::{Digest as _, Sha256};
 
 /// Wraps a transport, counting rounds and optionally corrupting one message.

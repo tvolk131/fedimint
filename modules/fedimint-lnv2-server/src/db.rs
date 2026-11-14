@@ -6,8 +6,8 @@ use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::util::SafeUrl;
 use fedimint_core::{OutPoint, PeerId, impl_db_lookup, impl_db_record};
 use fedimint_lnv2_common::bolt12::{
-    Pending, ReceiveContract, Registration, RegistrationId, Reservation, ReservationId, StockItem,
-    StreamedReceive,
+    Pending, PoolItem, PoolRun, PoolShare, ReceiveContract, Registration, RegistrationId,
+    Reservation, ReservationId, StockItem, StreamedReceive,
 };
 use fedimint_lnv2_common::contracts::{IncomingContract, OutgoingContract};
 use fedimint_lnv2_common::{ContractId, LightningInputV0, LightningOutputV0};
@@ -53,6 +53,14 @@ pub enum DbKeyPrefix {
     Bolt12ContractIndex = 0x2f,
     Bolt12Nonce = 0x30,
     Bolt12NonceCount = 0x31,
+    Bolt12DecryptionShares = 0x32,
+    Bolt12PoolItem = 0x33,
+    Bolt12PoolNext = 0x34,
+    Bolt12PoolPending = 0x35,
+    Bolt12PoolRun = 0x36,
+    Bolt12PoolRunCount = 0x37,
+    Bolt12PoolSubmission = 0x38,
+    Bolt12PoolLocalRun = 0x39,
 }
 
 impl std::fmt::Display for DbKeyPrefix {
@@ -520,4 +528,116 @@ impl_db_record!(
     key = Bolt12NonceCountKey,
     value = u16,
     db_prefix = DbKeyPrefix::Bolt12NonceCount,
+);
+
+/// This guardian's decryption shares for a funded BOLT12 receive, one per
+/// ciphertext of its contract. Written atomically with the funding.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12DecryptionSharesKey(pub OutPoint);
+
+impl_db_record!(
+    key = Bolt12DecryptionSharesKey,
+    value = Vec<DecryptionKeyShare>,
+    db_prefix = DbKeyPrefix::Bolt12DecryptionShares,
+    notify_on_modify = true
+);
+
+/// Generated preimages not yet reserved, by pool index.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolItemKey(pub u64);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolItemPrefix;
+
+impl_db_record!(
+    key = Bolt12PoolItemKey,
+    value = PoolItem,
+    db_prefix = DbKeyPrefix::Bolt12PoolItem,
+);
+impl_db_lookup!(key = Bolt12PoolItemKey, query_prefix = Bolt12PoolItemPrefix);
+
+/// The index the next generated preimage is stored at.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolNextKey;
+
+impl_db_record!(
+    key = Bolt12PoolNextKey,
+    value = u64,
+    db_prefix = DbKeyPrefix::Bolt12PoolNext,
+);
+
+/// Unpaid, unexpired reservations backed by the pool.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolPendingKey;
+
+impl_db_record!(
+    key = Bolt12PoolPendingKey,
+    value = Vec<Pending>,
+    db_prefix = DbKeyPrefix::Bolt12PoolPending,
+);
+
+/// The generation run in progress, if any.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolRunKey;
+
+impl_db_record!(
+    key = Bolt12PoolRunKey,
+    value = PoolRun,
+    db_prefix = DbKeyPrefix::Bolt12PoolRun,
+    notify_on_modify = true
+);
+
+/// The number the next generation run gets.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolRunCountKey;
+
+impl_db_record!(
+    key = Bolt12PoolRunCountKey,
+    value = u64,
+    db_prefix = DbKeyPrefix::Bolt12PoolRunCount,
+);
+
+/// A committee member's encrypted shares for the run in progress.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolSubmissionKey(pub u64, pub PeerId);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolSubmissionRunPrefix(pub u64);
+
+impl_db_record!(
+    key = Bolt12PoolSubmissionKey,
+    value = Vec<PoolShare>,
+    db_prefix = DbKeyPrefix::Bolt12PoolSubmission,
+);
+impl_db_lookup!(
+    key = Bolt12PoolSubmissionKey,
+    query_prefix = Bolt12PoolSubmissionRunPrefix
+);
+
+/// This guardian's part in a generation run. Local, not consensus state.
+#[derive(Debug, Clone, Encodable, Decodable)]
+pub struct LocalRun {
+    /// All of this guardian's randomness in the run. Kept until the run ends
+    /// so an aborted run can be replayed.
+    pub seed: [u8; 32],
+    /// The encrypted shares to submit once the run succeeded.
+    pub submission: Option<Vec<PoolShare>>,
+}
+
+/// Written before this guardian sends anything in a run, so a restarted
+/// guardian never runs it twice.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolLocalRunKey(pub u64);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolLocalRunPrefix;
+
+impl_db_record!(
+    key = Bolt12PoolLocalRunKey,
+    value = LocalRun,
+    db_prefix = DbKeyPrefix::Bolt12PoolLocalRun,
+);
+impl_db_lookup!(
+    key = Bolt12PoolLocalRunKey,
+    query_prefix = Bolt12PoolLocalRunPrefix
 );

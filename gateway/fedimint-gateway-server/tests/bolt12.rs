@@ -213,6 +213,7 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
         expires_at: duration_since_epoch().as_secs() + 3_600,
         max_gateway_fee: PaymentFee::RECEIVE_FEE_LIMIT,
         stock: 4,
+        allow_pool: false,
     };
 
     // A new federation refuses registrations until its clock is set.

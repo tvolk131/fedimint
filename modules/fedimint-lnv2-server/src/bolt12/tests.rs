@@ -1,3 +1,5 @@
+mod pool;
+
 use std::collections::BTreeMap;
 
 use anyhow::Result;
@@ -9,24 +11,25 @@ use fedimint_core::secp256k1::{Keypair, PublicKey, SECP256K1};
 use fedimint_core::{Amount, NumPeersExt, OutPoint, PeerId, TransactionId};
 use fedimint_lnv2_common::LightningInputError;
 use fedimint_lnv2_common::bolt12::{
-    AddStock, Bolt12Config, Bolt12Output, INVOICE_LIFETIME, MAX_PENDING_PER_GATEWAY,
-    MAX_PENDING_PER_OFFER, MAX_REGISTRATION_LIFETIME, MAX_STOCK_BATCH, ReceivePolicy, Register,
-    RegistrationId, Reservation, ReservationId, Reserve, Source, StockItem, terms_hash,
+    AddStock, Bolt12Config, Bolt12Output, Bolt12Unlock, INVOICE_LIFETIME, MAX_PENDING_PER_GATEWAY,
+    MAX_PENDING_PER_OFFER, MAX_REGISTRATION_LIFETIME, MAX_STOCK_BATCH, ReceiveContract,
+    ReceivePolicy, Register, RegistrationId, Reservation, ReservationId, Reserve, Source,
+    StockItem, terms_hash,
 };
 use fedimint_lnv2_common::config::{
     FeeConsensus, LightningConfig, LightningConfigConsensus, LightningConfigPrivate,
 };
 use fedimint_lnv2_common::gateway_api::PaymentFee;
 use rand::rngs::OsRng;
-use tpe::{AggregateDecryptionKey, SecretKeyShare, aggregate_dk_shares};
+use tpe::{SecretKeyShare, aggregate_dk_shares};
 
 use super::{
     OutputEffect, gateway_is_approved, process_gateway_vote, process_input, process_output,
 };
 use crate::db::{
-    Bolt12ContractKey, Bolt12GatewayPendingKey, Bolt12OfferPendingKey, Bolt12RegistrationCountKey,
-    Bolt12RegistrationKey, Bolt12ReservationKey, Bolt12StreamIndexKey, Bolt12StreamKey,
-    DecryptionKeyShareKey,
+    Bolt12ContractKey, Bolt12DecryptionSharesKey, Bolt12GatewayPendingKey, Bolt12OfferPendingKey,
+    Bolt12RegistrationCountKey, Bolt12RegistrationKey, Bolt12ReservationKey, Bolt12StreamIndexKey,
+    Bolt12StreamKey,
 };
 use crate::{dealer_agg_pk, dealer_pk, dealer_polynomial, dealer_sk};
 
@@ -68,6 +71,9 @@ impl Federation {
                     registration_fee: Bolt12Config::DEFAULT_REGISTRATION_FEE,
                     stock_item_fee: Bolt12Config::DEFAULT_STOCK_ITEM_FEE,
                     receive_fee: Amount::from_sats(3),
+                    pool_fee: Amount::from_sats(20),
+                    pool_target: 4,
+                    pool_batch: 2,
                 }),
             },
             private: LightningConfigPrivate {
@@ -139,52 +145,76 @@ impl Federation {
         }
     }
 
+    /// Spend a funded receive with `keys`, returning who must sign, the
+    /// amount and the premium on top of the ordinary fee.
     async fn spend(
         &self,
         outpoint: OutPoint,
-        key: &AggregateDecryptionKey,
-    ) -> Result<(PublicKey, Amount), LightningInputError> {
+        unlock: &Bolt12Unlock,
+    ) -> Result<(PublicKey, Amount, Amount), LightningInputError> {
         let mut dbtx = self.db.begin_transaction().await;
 
-        let result = process_input(&mut dbtx.to_ref_nc(), &self.cfg, outpoint, key).await?;
+        let effect = process_input(&mut dbtx.to_ref_nc(), &self.cfg, outpoint, unlock).await?;
 
         dbtx.commit_tx().await;
 
-        Ok(result)
+        Ok((effect.pub_key, effect.amount, effect.premium))
+    }
+
+    async fn contract(&self, outpoint: OutPoint) -> ReceiveContract {
+        self.db
+            .begin_transaction_nc()
+            .await
+            .get_value(&Bolt12ContractKey(outpoint))
+            .await
+            .expect("receive is funded")
     }
 
     /// Aggregate decryption shares from a quorum that includes guardian 0's
-    /// share as stored by the funding output.
-    async fn aggregate_key(&self, outpoint: OutPoint) -> AggregateDecryptionKey {
-        let mut dbtx = self.db.begin_transaction_nc().await;
-
-        let contract = dbtx
-            .get_value(&Bolt12ContractKey(outpoint))
+    /// shares as stored by the funding output, one key per ciphertext.
+    async fn unlock(&self, outpoint: OutPoint) -> Bolt12Unlock {
+        let contract = self.contract(outpoint).await;
+        let stored = self
+            .db
+            .begin_transaction_nc()
             .await
-            .expect("receive is funded");
-        let stored = dbtx
-            .get_value(&DecryptionKeyShareKey(outpoint))
+            .get_value(&Bolt12DecryptionSharesKey(outpoint))
             .await
-            .expect("funding stored our share");
+            .expect("funding stored our shares");
 
         let mut shares = BTreeMap::new();
 
         for peer in 0..3u16 {
-            let share = tpe::create_dk_share(&self.sks[&PeerId::from(peer)], &contract.ciphertext);
+            let peer_shares: Vec<_> = contract
+                .ciphertexts()
+                .iter()
+                .map(|(ciphertext, _)| {
+                    tpe::create_dk_share(&self.sks[&PeerId::from(peer)], ciphertext)
+                })
+                .collect();
 
-            assert!(
-                contract.verify_decryption_share(
-                    &self.cfg.consensus.tpe_pks[&PeerId::from(peer)],
-                    &share
-                )
-            );
+            assert!(contract.verify_decryption_shares(
+                &self.cfg.consensus.tpe_pks[&PeerId::from(peer)],
+                &peer_shares
+            ));
 
-            shares.insert(u64::from(peer), share);
+            shares.insert(u64::from(peer), peer_shares);
         }
 
         assert_eq!(shares[&0], stored);
 
-        aggregate_dk_shares(&shares)
+        let keys = (0..stored.len())
+            .map(|i| {
+                aggregate_dk_shares(
+                    &shares
+                        .iter()
+                        .map(|(peer, shares)| (*peer, shares[i]))
+                        .collect(),
+                )
+            })
+            .collect();
+
+        Bolt12Unlock::new(contract.source, keys).expect("keys match the source")
     }
 
     async fn reservation(&self, id: ReservationId) -> Option<Reservation> {
@@ -348,19 +378,13 @@ async fn funded_receive_is_claimable_by_the_recipient() -> Result<()> {
 
     drop(dbtx);
 
-    let key = fed.aggregate_key(outpoint).await;
-    let contract = fed
-        .db
-        .begin_transaction_nc()
-        .await
-        .get_value(&Bolt12ContractKey(outpoint))
-        .await
-        .expect("receive is funded");
+    let key = fed.unlock(outpoint).await;
+    let contract = fed.contract(outpoint).await;
 
-    assert_eq!(contract.decrypt_preimage(&key), Some(preimage(&offer, 0)));
+    assert_eq!(contract.release(key.keys()), Some(preimage(&offer, 0)));
     assert_eq!(
         fed.spend(outpoint, &key).await,
-        Ok((offer.policy.claim_pk, net))
+        Ok((offer.policy.claim_pk, net, Amount::ZERO))
     );
 
     // Spending removes the contract and its stream entry.
@@ -399,7 +423,7 @@ async fn wrong_decryption_key_cannot_spend() -> Result<()> {
     let (second_outpoint, _) = fed.apply(Bolt12Output::Receive(second_id), NOW).await?;
 
     // A valid key for one receive is not a valid key for another.
-    let other_key = fed.aggregate_key(second_outpoint).await;
+    let other_key = fed.unlock(second_outpoint).await;
 
     assert_eq!(
         fed.spend(first_outpoint, &other_key).await,
@@ -407,7 +431,7 @@ async fn wrong_decryption_key_cannot_spend() -> Result<()> {
     );
 
     // The rejected attempt left the contract in place.
-    let key = fed.aggregate_key(first_outpoint).await;
+    let key = fed.unlock(first_outpoint).await;
 
     assert!(fed.spend(first_outpoint, &key).await.is_ok());
 
@@ -429,7 +453,7 @@ async fn stock_without_the_preimage_refunds_the_gateway_and_voids_the_offer() ->
             &fed.cfg.consensus.tpe_agg_pk,
             &rand::random(),
             &[7; 32],
-            &Source::Stock { index: 0 }.binding(offer.id, payment_hash),
+            &Source::stock_binding(offer.id, 0, payment_hash),
         ),
     };
     let good = stock(&fed, &offer, 1, 1).remove(0);
@@ -447,11 +471,15 @@ async fn stock_without_the_preimage_refunds_the_gateway_and_voids_the_offer() ->
     fed.apply(Bolt12Output::Reserve(request), NOW).await?;
 
     let (outpoint, _) = fed.apply(Bolt12Output::Receive(id), NOW).await?;
-    let key = fed.aggregate_key(outpoint).await;
+    let key = fed.unlock(outpoint).await;
 
     assert_eq!(
         fed.spend(outpoint, &key).await,
-        Ok((gateway.public_key(), Amount::from_sats(10_000 - 60)))
+        Ok((
+            gateway.public_key(),
+            Amount::from_sats(10_000 - 60),
+            Amount::ZERO
+        ))
     );
 
     // The remaining, valid stock can no longer be reserved.
@@ -791,7 +819,7 @@ async fn stock_uploads_are_validated() -> Result<()> {
             &fed.cfg.consensus.tpe_agg_pk,
             &rand::random(),
             &preimage(&offer, 0),
-            &Source::Stock { index: 1 }.binding(offer.id, payment_hash),
+            &Source::stock_binding(offer.id, 1, payment_hash),
         ),
     });
     let add = AddStock::new(offer.id, 0, repeated, &offer.key);
@@ -1000,7 +1028,7 @@ async fn expired_registrations_are_pruned_with_their_unused_stock() -> Result<()
             &fed.cfg.consensus.tpe_agg_pk,
             &rand::random(),
             &preimage(&offer, index),
-            &Source::Stock { index: 0 }.binding(renewed_id, item.payment_hash),
+            &Source::stock_binding(renewed_id, 0, item.payment_hash),
         ),
     };
     let reserved_hash = reissue(0, &items[0]);

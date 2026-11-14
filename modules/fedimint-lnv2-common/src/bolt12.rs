@@ -37,6 +37,13 @@ pub const MAX_PENDING_PER_OFFER: usize = 8;
 pub const MAX_PENDING_PER_GATEWAY: usize = 64;
 /// Expired registrations deleted while processing one new registration.
 pub const REGISTRATIONS_PRUNED_PER_REGISTER: usize = 4;
+/// Unpaid, unexpired reservations backed by the pool, across all offers.
+pub const MAX_PENDING_POOL: usize = 32;
+/// The most generated preimages the federation keeps ready.
+pub const MAX_POOL_TARGET: u64 = 256;
+/// Seconds of consensus time a generation run may take before it is
+/// abandoned.
+pub const POOL_RUN_TIMEOUT: u64 = 900;
 
 #[derive(
     Debug,
@@ -85,7 +92,8 @@ pub struct ReceivePolicy {
     /// Consensus unix time after which no new invoices are issued.
     pub expires_at: u64,
     /// Whether invoices may fall back to federation-generated preimages once
-    /// the recipient's stock is exhausted. Reserved; no pool exists yet.
+    /// the recipient's stock is exhausted. Such receives cost `pool_fee` more
+    /// to claim.
     pub allow_pool: bool,
 }
 
@@ -123,7 +131,7 @@ impl StockItem {
         encryption_seed: &[u8; 32],
     ) -> Self {
         let payment_hash = sha256::Hash::hash(preimage).to_byte_array();
-        let binding = Source::Stock { index }.binding(registration, payment_hash);
+        let binding = Source::stock_binding(registration, index, payment_hash);
         Self {
             payment_hash,
             ciphertext: encrypt_preimage(agg_pk, encryption_seed, preimage, &binding),
@@ -131,7 +139,7 @@ impl StockItem {
     }
 
     pub fn verify(&self, registration: RegistrationId, index: u64) -> bool {
-        let binding = Source::Stock { index }.binding(registration, self.payment_hash);
+        let binding = Source::stock_binding(registration, index, self.payment_hash);
         verify_ciphertext(&self.ciphertext, &binding)
     }
 }
@@ -139,21 +147,143 @@ impl StockItem {
 /// Where a reservation's payment hash and encrypted preimage come from.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
 pub enum Source {
+    /// The registration's own stock item at `index`.
     Stock { index: u64 },
+    /// The federation's generated preimage at `index` in the pool.
+    Pool { index: u64 },
 }
 
 impl Source {
-    /// The commitment a preimage ciphertext is bound to.
-    pub fn binding(self, registration: RegistrationId, payment_hash: [u8; 32]) -> sha256::Hash {
-        match self {
-            Source::Stock { index } => (
-                "fedimint/bolt12/stock/v1",
-                registration,
-                index,
-                payment_hash,
-            )
-                .consensus_hash(),
+    /// The commitment a stock ciphertext is bound to.
+    pub fn stock_binding(
+        registration: RegistrationId,
+        index: u64,
+        payment_hash: [u8; 32],
+    ) -> sha256::Hash {
+        (
+            "fedimint/bolt12/stock/v1",
+            registration,
+            index,
+            payment_hash,
+        )
+            .consensus_hash()
+    }
+
+    pub fn is_pool(self) -> bool {
+        matches!(self, Source::Pool { .. })
+    }
+}
+
+/// The commitment the encrypted share a committee member holds at `position`
+/// of a generated preimage is bound to.
+pub fn pool_share_binding(run: u64, position: u16, payment_hash: [u8; 32]) -> sha256::Hash {
+    ("fedimint/bolt12/pool-share/v1", run, position, payment_hash).consensus_hash()
+}
+
+/// A preimage encrypted to the federation until its receive is funded.
+// Stored and encoded, rarely moved; boxing the ciphertext buys nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
+pub enum Sealed {
+    /// The recipient's own preimage.
+    Preimage(CipherText),
+    /// Shares of a preimage a committee of guardians generated in generation
+    /// run `run`; any `threshold` correct shares recover it.
+    Shares {
+        run: u64,
+        threshold: u16,
+        shares: Vec<SealedShare>,
+    },
+}
+
+/// One committee member's share, encrypted to the federation. `position` is
+/// the member's index in the run's committee.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
+pub struct SealedShare {
+    pub position: u16,
+    pub ciphertext: CipherText,
+}
+
+/// The aggregate decryption keys that spend a funded receive, one per
+/// ciphertext of its contract. The variant must match the contract's source;
+/// it is explicit so the input's fee is known without the contract.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
+pub enum Bolt12Unlock {
+    Stock(AggregateDecryptionKey),
+    Pool(Vec<AggregateDecryptionKey>),
+}
+
+impl Bolt12Unlock {
+    pub fn new(source: Source, keys: Vec<AggregateDecryptionKey>) -> Option<Self> {
+        match source {
+            Source::Stock { .. } => match keys.as_slice() {
+                [key] => Some(Self::Stock(*key)),
+                _ => None,
+            },
+            Source::Pool { .. } => Some(Self::Pool(keys)),
         }
+    }
+
+    pub fn keys(&self) -> &[AggregateDecryptionKey] {
+        match self {
+            Self::Stock(key) => std::slice::from_ref(key),
+            Self::Pool(keys) => keys,
+        }
+    }
+
+    pub fn is_pool(&self) -> bool {
+        matches!(self, Self::Pool(..))
+    }
+}
+
+/// A generated preimage waiting in the pool.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
+pub struct PoolItem {
+    pub payment_hash: [u8; 32],
+    pub sealed: Sealed,
+}
+
+/// A committee member's share of one generated preimage, encrypted to the
+/// federation, as submitted after a successful run.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
+pub struct PoolShare {
+    pub payment_hash: [u8; 32],
+    pub ciphertext: CipherText,
+}
+
+/// A generation run the federation has started.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
+pub struct PoolRun {
+    pub run: u64,
+    /// Members in position order.
+    pub committee: Vec<PeerId>,
+    /// Preimages the run generates.
+    pub batch: u64,
+    pub started_at: u64,
+}
+
+impl PoolRun {
+    /// The run's MPC degree: the most malicious guardians a federation of
+    /// `guardians` tolerates.
+    pub fn degree(guardians: usize) -> usize {
+        guardians.saturating_sub(1) / 3
+    }
+
+    /// Committee size for a federation of `guardians`.
+    pub fn committee_size(guardians: usize) -> usize {
+        2 * Self::degree(guardians) + 1
+    }
+
+    /// Correct shares needed to recover a preimage.
+    pub fn threshold(&self) -> usize {
+        self.committee.len() / 2 + 1
+    }
+
+    pub fn position(&self, peer: PeerId) -> Option<u16> {
+        self.committee
+            .iter()
+            .position(|member| *member == peer)
+            .and_then(|position| u16::try_from(position).ok())
     }
 }
 
@@ -162,7 +292,7 @@ pub struct Reservation {
     pub registration: RegistrationId,
     pub source: Source,
     pub payment_hash: [u8; 32],
-    pub ciphertext: CipherText,
+    pub sealed: Sealed,
     pub claim_pk: PublicKey,
     pub gateway: PublicKey,
     /// The invoice amount the payer will be asked for.
@@ -196,7 +326,7 @@ impl Reservation {
             registration: self.registration,
             source: self.source,
             payment_hash: self.payment_hash,
-            ciphertext: self.ciphertext,
+            sealed: self.sealed.clone(),
             amount: self.net_amount(),
             gateway_fee: self.gateway_fee,
             claim_pk: self.claim_pk,
@@ -230,7 +360,7 @@ pub struct ReceiveContract {
     pub registration: RegistrationId,
     pub source: Source,
     pub payment_hash: [u8; 32],
-    pub ciphertext: CipherText,
+    pub sealed: Sealed,
     /// Invoice amount minus the gateway fee.
     pub amount: Amount,
     pub gateway_fee: Amount,
@@ -239,27 +369,93 @@ pub struct ReceiveContract {
 }
 
 impl ReceiveContract {
-    pub fn binding(&self) -> sha256::Hash {
-        self.source.binding(self.registration, self.payment_hash)
+    /// Every ciphertext guardians release a decryption share for once the
+    /// receive is funded, with the commitment it is bound to.
+    pub fn ciphertexts(&self) -> Vec<(CipherText, sha256::Hash)> {
+        match (&self.sealed, self.source) {
+            (Sealed::Preimage(ciphertext), Source::Stock { index }) => vec![(
+                *ciphertext,
+                Source::stock_binding(self.registration, index, self.payment_hash),
+            )],
+            (Sealed::Shares { run, shares, .. }, Source::Pool { .. }) => shares
+                .iter()
+                .map(|share| {
+                    (
+                        share.ciphertext,
+                        pool_share_binding(*run, share.position, self.payment_hash),
+                    )
+                })
+                .collect(),
+            // Consensus never pairs a source with the other kind of sealing.
+            _ => vec![],
+        }
     }
 
-    pub fn verify_decryption_share(&self, pk: &PublicKeyShare, share: &DecryptionKeyShare) -> bool {
-        verify_dk_share(pk, share, &self.ciphertext, &self.binding())
+    /// Whether `shares` holds one valid decryption share per ciphertext.
+    pub fn verify_decryption_shares(
+        &self,
+        pk: &PublicKeyShare,
+        shares: &[DecryptionKeyShare],
+    ) -> bool {
+        let ciphertexts = self.ciphertexts();
+
+        !ciphertexts.is_empty()
+            && ciphertexts.len() == shares.len()
+            && ciphertexts
+                .iter()
+                .zip(shares)
+                .all(|((ciphertext, binding), share)| {
+                    verify_dk_share(pk, share, ciphertext, binding)
+                })
     }
 
-    pub fn verify_agg_decryption_key(
+    /// Whether `keys` holds one valid aggregate key per ciphertext.
+    pub fn verify_agg_decryption_keys(
         &self,
         agg_pk: &AggregatePublicKey,
-        key: &AggregateDecryptionKey,
+        keys: &[AggregateDecryptionKey],
     ) -> bool {
-        verify_agg_dk(agg_pk, key, &self.ciphertext, &self.binding())
+        let ciphertexts = self.ciphertexts();
+
+        !ciphertexts.is_empty()
+            && ciphertexts.len() == keys.len()
+            && ciphertexts
+                .iter()
+                .zip(keys)
+                .all(|((ciphertext, binding), key)| verify_agg_dk(agg_pk, key, ciphertext, binding))
     }
 
-    /// The Lightning preimage, or `None` if the recipient uploaded a
-    /// ciphertext that does not contain it.
-    pub fn decrypt_preimage(&self, key: &AggregateDecryptionKey) -> Option<[u8; 32]> {
-        let preimage = decrypt_preimage(&self.ciphertext, key);
-        (sha256::Hash::hash(&preimage).to_byte_array() == self.payment_hash).then_some(preimage)
+    /// The Lightning preimage, or `None` if the decrypted values do not yield
+    /// it: the recipient uploaded a wrong stock ciphertext, or too few
+    /// committee members sealed correct shares. `keys` must have passed
+    /// [`Self::verify_agg_decryption_keys`].
+    pub fn release(&self, keys: &[AggregateDecryptionKey]) -> Option<[u8; 32]> {
+        match &self.sealed {
+            Sealed::Preimage(ciphertext) => {
+                let preimage = decrypt_preimage(ciphertext, keys.first()?);
+
+                (sha256::Hash::hash(&preimage).to_byte_array() == self.payment_hash)
+                    .then_some(preimage)
+            }
+            Sealed::Shares {
+                threshold, shares, ..
+            } => {
+                let shares: Vec<_> = shares
+                    .iter()
+                    .zip(keys)
+                    .map(|(share, key)| {
+                        mpc::direct::Share::new(
+                            usize::from(share.position),
+                            decrypt_preimage(&share.ciphertext, key),
+                        )
+                    })
+                    .collect();
+
+                mpc::direct::reconstruct(&self.payment_hash, usize::from(*threshold), &shares)
+                    .ok()
+                    .map(|recovered| recovered.preimage)
+            }
+        }
     }
 }
 
@@ -435,12 +631,41 @@ pub struct Bolt12Config {
     pub stock_item_fee: Amount,
     /// Charged on top of the ordinary fee when a receive is funded.
     pub receive_fee: Amount,
+    /// Charged on top of the ordinary fee when the recipient claims a receive
+    /// backed by a generated preimage.
+    pub pool_fee: Amount,
+    /// Generated preimages to keep ready; zero disables generation.
+    pub pool_target: u64,
+    /// Preimages one generation run produces.
+    pub pool_batch: u64,
 }
 
 impl Bolt12Config {
     pub const DEFAULT_REGISTRATION_FEE: Amount = Amount::from_sats(100);
     pub const DEFAULT_STOCK_ITEM_FEE: Amount = Amount::from_sats(1);
     pub const DEFAULT_RECEIVE_FEE: Amount = Amount::ZERO;
+    pub const DEFAULT_POOL_FEE: Amount = Amount::from_sats(20);
+    pub const DEFAULT_POOL_TARGET: u64 = 8;
+    pub const DEFAULT_POOL_BATCH: u64 = 4;
+
+    /// The extra fee spending a receive from `source` costs. Charged on the
+    /// refund too, which only happens if guardians sealed bad shares.
+    pub fn claim_premium(&self, source: Source) -> Amount {
+        if source.is_pool() {
+            self.pool_fee
+        } else {
+            Amount::ZERO
+        }
+    }
+
+    /// The extra fee an input spending a receive with `unlock` costs.
+    pub fn unlock_premium(&self, unlock: &Bolt12Unlock) -> Amount {
+        if unlock.is_pool() {
+            self.pool_fee
+        } else {
+            Amount::ZERO
+        }
+    }
 }
 
 /// The amount an output moves and the fee it costs. `None` if the output
@@ -481,12 +706,15 @@ pub fn reservation_is_economical(
     policy: &ReceivePolicy,
     amount: Amount,
     gateway_fee: Amount,
+    claim_premium: Amount,
 ) -> bool {
     if gateway_fee >= amount || gateway_fee > policy.max_gateway_fee.fee(amount.msats) {
         return false;
     }
     let net = amount.saturating_sub(gateway_fee);
-    net > fees.fee(net)
+    fees.fee(net)
+        .checked_add(claim_premium)
+        .is_some_and(|cost| net > cost)
 }
 
 /// Guardians needed to sign an invoice or release a preimage.

@@ -7,7 +7,7 @@ use fedimint_lnv2_common::bolt12::{
     Registration, RegistrationId, Reservation, ReservationId, StockItem,
 };
 use fedimint_lnv2_common::endpoint_constants::{
-    BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
+    BOLT12_NEXT_POOL_ENDPOINT, BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
     BOLT12_RESERVATION_ENDPOINT, CONSENSUS_BLOCK_COUNT_ENDPOINT,
     OUTGOING_CONTRACT_EXPIRATION_ENDPOINT,
 };
@@ -39,6 +39,9 @@ pub trait GatewayFederationApi {
         &self,
         reservation: ReservationId,
     ) -> FederationResult<Option<Reservation>>;
+
+    /// The lowest-indexed generated preimage not yet reserved.
+    async fn bolt12_next_pool(&self) -> FederationResult<Option<(u64, [u8; 32])>>;
 }
 
 #[apply(async_trait_maybe_send!)]
@@ -94,6 +97,14 @@ where
         self.request_current_consensus(
             BOLT12_RESERVATION_ENDPOINT.to_string(),
             ApiRequestErased::new(reservation),
+        )
+        .await
+    }
+
+    async fn bolt12_next_pool(&self) -> FederationResult<Option<(u64, [u8; 32])>> {
+        self.request_current_consensus(
+            BOLT12_NEXT_POOL_ENDPOINT.to_string(),
+            ApiRequestErased::new(()),
         )
         .await
     }

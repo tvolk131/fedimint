@@ -20,6 +20,9 @@ pub const BOLT12_GATEWAY_APPROVED_ENDPOINT: &str = "bolt12_gateway_approved";
 pub const BOLT12_SET_GATEWAY_VOTE_ENDPOINT: &str = "bolt12_set_gateway_vote";
 pub const BOLT12_NONCE_ENDPOINT: &str = "bolt12_nonce";
 pub const BOLT12_SIGN_ENDPOINT: &str = "bolt12_sign";
+pub const BOLT12_NEXT_POOL_ENDPOINT: &str = "bolt12_next_pool";
+pub const BOLT12_DECRYPTION_SHARES_ENDPOINT: &str = "bolt12_decryption_shares";
+pub const BOLT12_MPC_ENDPOINT: &str = "bolt12_mpc";
 
 // Gateway endpoints
 pub const CREATE_BOLT11_INVOICE_ENDPOINT: &str = "/create_bolt11_invoice";

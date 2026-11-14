@@ -25,7 +25,7 @@ use fedimint_core::module::{Amounts, CommonModuleInit};
 use fedimint_core::{Amount, impl_db_record};
 use fedimint_lnv2_common::bolt12::invoice::encode_payment_path;
 use fedimint_lnv2_common::bolt12::{
-    Bolt12Output, RegistrationId, Reservation, ReservationId, Reserve, Source,
+    Bolt12Output, ReceivePolicy, RegistrationId, Reservation, ReservationId, Reserve, Source,
     reservation_is_economical, terms_hash,
 };
 use fedimint_lnv2_common::{LightningCommonInit, LightningOutput, LightningOutputV0};
@@ -144,18 +144,8 @@ impl GatewayClientModuleV2 {
             .await?
             .context("offer is not registered with this federation")?;
 
-        ensure!(
-            reservation_is_economical(
-                &self.cfg.fee_consensus,
-                &state.policy,
-                request.amount,
-                request.gateway_fee
-            ),
-            "amount does not cover fees or the fee exceeds the recipient's limit"
-        );
-
         let (reservation, path) = self
-            .reserve_bolt12_stock(registration, &request, &payment_path)
+            .reserve_bolt12(registration, &state.policy, &request, &payment_path)
             .await?;
 
         let invoice = sign_invoice(
@@ -184,11 +174,35 @@ impl GatewayClientModuleV2 {
         Ok(invoice)
     }
 
-    /// Reserve one of the offer's unused stock items for this request.
-    /// Returns the reservation and the encoded payment path it pins.
-    async fn reserve_bolt12_stock<F, Fut>(
+    /// The source the next reservation for `registration` should use: its
+    /// lowest unused stock item, or once those are gone and the recipient
+    /// allows it, the next generated preimage.
+    async fn next_bolt12_source(
         &self,
         registration: RegistrationId,
+        policy: &ReceivePolicy,
+    ) -> Result<(Source, [u8; 32])> {
+        if let Some((index, item)) = self.module_api.bolt12_next_stock(registration).await? {
+            return Ok((Source::Stock { index }, item.payment_hash));
+        }
+
+        ensure!(policy.allow_pool, "offer has no unused stock left");
+
+        let (index, payment_hash) = self
+            .module_api
+            .bolt12_next_pool()
+            .await?
+            .context("offer has no unused stock left and the pool is empty")?;
+
+        Ok((Source::Pool { index }, payment_hash))
+    }
+
+    /// Reserve a payment hash for this request. Returns the reservation and
+    /// the encoded payment path it pins.
+    async fn reserve_bolt12<F, Fut>(
+        &self,
+        registration: RegistrationId,
+        policy: &ReceivePolicy,
         request: &Bolt12InvoiceRequest,
         payment_path: &F,
     ) -> Result<(Reservation, Vec<u8>)>
@@ -196,24 +210,37 @@ impl GatewayClientModuleV2 {
         F: Fn([u8; 32]) -> Fut,
         Fut: Future<Output = Result<BlindedPaymentPath>>,
     {
+        let bolt12 = self
+            .cfg
+            .bolt12
+            .as_ref()
+            .context("federated BOLT12 is disabled")?;
+
         let mut last_error = None;
 
         // Another gateway may reserve the same item first; that only costs a
         // retry with the next one.
         for _ in 0..RESERVE_ATTEMPTS {
-            let (index, item) = self
-                .module_api
-                .bolt12_next_stock(registration)
-                .await?
-                .context("offer has no unused stock left")?;
+            let (source, payment_hash) = self.next_bolt12_source(registration, policy).await?;
+
+            ensure!(
+                reservation_is_economical(
+                    &self.cfg.fee_consensus,
+                    policy,
+                    request.amount,
+                    request.gateway_fee,
+                    bolt12.claim_premium(source),
+                ),
+                "amount does not cover fees or the fee exceeds the recipient's limit"
+            );
 
             // The path commits to the payment hash, so it must be built
             // before the reservation that pins it.
-            let path = encode_payment_path(&payment_path(item.payment_hash).await?)?;
+            let path = encode_payment_path(&payment_path(payment_hash).await?)?;
 
             let reserve = Reserve::new(
                 registration,
-                Source::Stock { index },
+                source,
                 request.amount,
                 request.gateway_fee,
                 terms_hash(&request.invoice_request, &path),

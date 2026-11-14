@@ -45,7 +45,8 @@ use fedimint_lnv2_common::config::LightningClientConfig;
 use fedimint_lnv2_common::contracts::{IncomingContract, PaymentImage};
 use fedimint_lnv2_common::gateway_api::SendPaymentPayload;
 use fedimint_lnv2_common::{
-    LightningCommonInit, LightningInvoice, LightningModuleTypes, LightningOutput, LightningOutputV0,
+    LightningCommonInit, LightningInputV0, LightningInvoice, LightningModuleTypes, LightningOutput,
+    LightningOutputV0,
 };
 use futures::StreamExt;
 use lightning_invoice::Bolt11Invoice;
@@ -278,11 +279,19 @@ impl ClientModule for GatewayClientModuleV2 {
     fn input_fee(
         &self,
         amount: &Amounts,
-        _input: &<Self::Common as ModuleCommon>::Input,
+        input: &<Self::Common as ModuleCommon>::Input,
     ) -> Option<Amounts> {
-        Some(Amounts::new_bitcoin(
-            self.cfg.fee_consensus.fee(amount.expect_only_bitcoin()),
-        ))
+        let fee = self.cfg.fee_consensus.fee(amount.expect_only_bitcoin());
+
+        // Spending a receive backed by a generated preimage costs more.
+        let premium = match (input.ensure_v0_ref().ok()?, self.cfg.bolt12.as_ref()) {
+            (LightningInputV0::Bolt12Receive(_, unlock), Some(bolt12)) => {
+                bolt12.unlock_premium(unlock)
+            }
+            _ => Amount::ZERO,
+        };
+
+        Some(Amounts::new_bitcoin(fee.checked_add(premium)?))
     }
 
     fn output_fee(

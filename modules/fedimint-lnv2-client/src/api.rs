@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::ready;
 
 use fedimint_api_client::api::{
-    FederationApiExt, FederationResult, IModuleFederationApi, ServerResult,
+    FederationApiExt, FederationResult, IModuleFederationApi, ServerError, ServerResult,
 };
 use fedimint_api_client::query::FilterMapThreshold;
 #[cfg(feature = "cli")]
@@ -22,12 +22,13 @@ use fedimint_lnv2_common::contracts::IncomingContract;
 use fedimint_lnv2_common::endpoint_constants::{ADD_GATEWAY_ENDPOINT, REMOVE_GATEWAY_ENDPOINT};
 use fedimint_lnv2_common::endpoint_constants::{
     AWAIT_INCOMING_CONTRACT_ENDPOINT, AWAIT_INCOMING_CONTRACTS_ENDPOINT, AWAIT_PREIMAGE_ENDPOINT,
-    BOLT12_AWAIT_RECEIVES_ENDPOINT, BOLT12_CONTRACT_ENDPOINT, BOLT12_GATEWAY_APPROVED_ENDPOINT,
-    BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
-    BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT, BOLT12_RESERVATION_ENDPOINT,
-    CONSENSUS_BLOCK_COUNT_ENDPOINT, GATEWAYS_ENDPOINT,
+    BOLT12_AWAIT_RECEIVES_ENDPOINT, BOLT12_CONTRACT_ENDPOINT, BOLT12_DECRYPTION_SHARES_ENDPOINT,
+    BOLT12_GATEWAY_APPROVED_ENDPOINT, BOLT12_NEXT_STOCK_ENDPOINT,
+    BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT, BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT,
+    BOLT12_RESERVATION_ENDPOINT, CONSENSUS_BLOCK_COUNT_ENDPOINT, GATEWAYS_ENDPOINT,
 };
 use rand::seq::SliceRandom;
+use tpe::{DecryptionKeyShare, PublicKeyShare};
 
 #[apply(async_trait_maybe_send!)]
 pub trait LightningFederationApi {
@@ -76,6 +77,15 @@ pub trait LightningFederationApi {
     async fn await_bolt12_receives(&self, start: u64, n: usize) -> (Vec<StreamedReceive>, u64);
 
     async fn bolt12_gateway_approved(&self, gateway: PublicKey) -> FederationResult<bool>;
+
+    /// A threshold of guardians' decryption shares for a funded receive,
+    /// each set verified against the contract. Retries until it has them.
+    async fn bolt12_decryption_shares(
+        &self,
+        outpoint: OutPoint,
+        contract: ReceiveContract,
+        tpe_pks: BTreeMap<PeerId, PublicKeyShare>,
+    ) -> BTreeMap<PeerId, Vec<DecryptionKeyShare>>;
 
     async fn gateways_from_peer(&self, peer: PeerId) -> ServerResult<Vec<SafeUrl>>;
 
@@ -194,6 +204,35 @@ where
         self.request_current_consensus(
             BOLT12_GATEWAY_APPROVED_ENDPOINT.to_string(),
             ApiRequestErased::new(gateway),
+        )
+        .await
+    }
+
+    async fn bolt12_decryption_shares(
+        &self,
+        outpoint: OutPoint,
+        contract: ReceiveContract,
+        tpe_pks: BTreeMap<PeerId, PublicKeyShare>,
+    ) -> BTreeMap<PeerId, Vec<DecryptionKeyShare>> {
+        self.request_with_strategy_retry(
+            FilterMapThreshold::new(
+                move |peer, shares: Vec<DecryptionKeyShare>| {
+                    let valid = tpe_pks
+                        .get(&peer)
+                        .is_some_and(|pk| contract.verify_decryption_shares(pk, &shares));
+
+                    ready(if valid {
+                        Ok(shares)
+                    } else {
+                        Err(ServerError::InvalidResponse(
+                            "Invalid decryption shares".to_string(),
+                        ))
+                    })
+                },
+                self.all_peers().to_num_peers(),
+            ),
+            BOLT12_DECRYPTION_SHARES_ENDPOINT.to_string(),
+            ApiRequestErased::new(outpoint),
         )
         .await
     }

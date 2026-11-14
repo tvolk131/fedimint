@@ -14,7 +14,7 @@ use fedimint_core::PeerId;
 use fedimint_core::bitcoin::hashes::{Hash, sha256};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::secp256k1::{PublicKey, SECP256K1, SecretKey, ecdh};
-use fedimint_lnv2_common::bolt12::{Bolt12Config, quorum};
+use fedimint_lnv2_common::bolt12::{Bolt12Config, MAX_POOL_TARGET, quorum};
 use fedimint_lnv2_common::config::{Bolt12PrivateConfig, LightningConfig};
 use fedimint_server_core::config::PeerHandleOps;
 use frost_secp256k1_tr as frost;
@@ -56,6 +56,9 @@ fn config(
         registration_fee: Bolt12Config::DEFAULT_REGISTRATION_FEE,
         stock_item_fee: Bolt12Config::DEFAULT_STOCK_ITEM_FEE,
         receive_fee: Bolt12Config::DEFAULT_RECEIVE_FEE,
+        pool_fee: Bolt12Config::DEFAULT_POOL_FEE,
+        pool_target: Bolt12Config::DEFAULT_POOL_TARGET,
+        pool_batch: Bolt12Config::DEFAULT_POOL_BATCH,
     })
 }
 
@@ -304,6 +307,11 @@ pub fn validate(identity: PeerId, config: &LightningConfig) -> Result<()> {
         public.transport_keys.get(&identity)
             == Some(&private.transport_secret.public_key(SECP256K1)),
         "BOLT12 transport secret does not match our public key"
+    );
+    ensure!(
+        public.pool_target <= MAX_POOL_TARGET
+            && (1..=mpc::circuit::MAX_BATCH as u64).contains(&public.pool_batch),
+        "BOLT12 pool target or batch is out of range"
     );
 
     let key = frost::keys::KeyPackage::deserialize(&private.key_package)?;

@@ -348,7 +348,15 @@ async fn test_server_db_migrations() -> anyhow::Result<()> {
                 | DbKeyPrefix::Bolt12Stream
                 | DbKeyPrefix::Bolt12ContractIndex
                 | DbKeyPrefix::Bolt12Nonce
-                | DbKeyPrefix::Bolt12NonceCount => {
+                | DbKeyPrefix::Bolt12NonceCount
+                | DbKeyPrefix::Bolt12DecryptionShares
+                | DbKeyPrefix::Bolt12PoolItem
+                | DbKeyPrefix::Bolt12PoolNext
+                | DbKeyPrefix::Bolt12PoolPending
+                | DbKeyPrefix::Bolt12PoolRun
+                | DbKeyPrefix::Bolt12PoolRunCount
+                | DbKeyPrefix::Bolt12PoolSubmission
+                | DbKeyPrefix::Bolt12PoolLocalRun => {
                     // Neither read nor written by `migrate_to_v1`, and
                     // the v0 snapshot holds no rows under them, so there
                     // is nothing to validate. Seeding them would widen
