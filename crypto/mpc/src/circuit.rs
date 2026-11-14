@@ -3,7 +3,6 @@
 use anyhow::{Context as _, Result, bail, ensure};
 use sha2::{Digest as _, Sha256};
 
-use crate::field::{F, point};
 use crate::{MAX_PARTIES, MAX_TRIPLES};
 
 /// AND gates in one SHA-256 compression of a 32-byte message.
@@ -26,7 +25,11 @@ pub struct Circuit {
     pub parties: usize,
     pub inputs_per_party: usize,
     pub gates: Vec<Gate>,
+    /// Wires opened to everyone.
     pub outputs: Vec<usize>,
+    /// Wires never opened. Every 256 of them, most significant bit first,
+    /// form a secret value that each party receives a Shamir share of.
+    pub secret_outputs: Vec<usize>,
 }
 
 /// Gates grouped into layers by AND depth. Layer `d` holds the AND gates
@@ -67,7 +70,11 @@ impl Circuit {
         }
 
         ensure!(
-            self.outputs.iter().all(|&w| w < self.wire_count()),
+            self.outputs
+                .iter()
+                .chain(&self.secret_outputs)
+                .all(|&w| w < self.wire_count())
+                && self.secret_outputs.len().is_multiple_of(256),
             "Undefined output wire"
         );
 
@@ -96,6 +103,12 @@ impl Circuit {
         }
 
         for &output in &self.outputs {
+            hash.update((output as u64).to_le_bytes());
+        }
+
+        hash.update((self.secret_outputs.len() as u64).to_le_bytes());
+
+        for &output in &self.secret_outputs {
             hash.update((output as u64).to_le_bytes());
         }
 
@@ -291,114 +304,58 @@ impl Compression {
     }
 }
 
-/// Input slots of 256 bits each party supplies per preimage: its contribution
-/// to `r`, to each of the `threshold - 1` higher share coefficients, and the
-/// mask its own share is opened under.
-pub fn slots(threshold: usize) -> usize {
-    threshold + 1
-}
-
-/// Multiplication triples a direct-share run consumes: the AND gates plus one
+/// Multiplication triples a generator run consumes: the AND gates plus one
 /// bit check per input.
-pub fn direct_triples(parties: usize, batch: usize, threshold: usize) -> usize {
-    batch * SHA256_AND_GATES + parties * batch * slots(threshold) * 256
+pub fn direct_triples(parties: usize, batch: usize) -> usize {
+    batch * SHA256_AND_GATES + parties * batch * 256
 }
 
 /// The generator: for each of `batch` preimages, `r` is the XOR of every
-/// party's contribution. The circuit outputs `SHA256(r)`, then, for each party
-/// in order, that party's Shamir share of `r` (threshold `threshold`,
-/// evaluation point `party + 1`) XORed with a mask only that party supplied.
-///
-/// Opening the outputs therefore reveals the hash to everyone and each share
-/// only to its owner.
-pub fn direct(parties: usize, batch: usize, threshold: usize) -> Result<Circuit> {
+/// party's 256-bit contribution. The circuit outputs `SHA256(r)` publicly and
+/// keeps `r` as a secret output, which the engine hands out as Shamir shares
+/// (see [`crate::engine::run`]).
+pub fn direct(parties: usize, batch: usize) -> Result<Circuit> {
     ensure!(
         (3..=MAX_PARTIES).contains(&parties),
         "Unsupported party count"
     );
     ensure!((1..=MAX_BATCH).contains(&batch), "Unsupported batch size");
     ensure!(
-        threshold >= 2 && threshold <= parties,
-        "Unsupported share threshold"
-    );
-    ensure!(
-        direct_triples(parties, batch, threshold) <= MAX_TRIPLES,
+        direct_triples(parties, batch) <= MAX_TRIPLES,
         "The run would need too many triples"
     );
 
-    let slots = slots(threshold);
-
     let mut circuit = Circuit {
         parties,
-        inputs_per_party: batch * slots * 256,
+        inputs_per_party: batch * 256,
         gates: vec![],
         outputs: vec![],
+        secret_outputs: vec![],
     };
 
-    let input = |party: usize, item: usize, slot: usize, bit: usize| {
-        party * batch * slots * 256 + (item * slots + slot) * 256 + bit
-    };
+    let input = |party: usize, item: usize, bit: usize| party * batch * 256 + item * 256 + bit;
 
     let zero = circuit.add(Gate::Xor(0, 0));
     let one = circuit.add(Gate::Not(zero));
     let compression = Compression::parse()?;
 
     for item in 0..batch {
-        // Coefficient 0 is r; the rest randomise the shares.
-        let mut coefficients = vec![];
+        let mut preimage = vec![];
 
-        for slot in 0..threshold {
-            let mut word = vec![];
+        for bit in 0..256 {
+            let mut wire = input(0, item, bit);
 
-            for bit in 0..256 {
-                let mut wire = input(0, item, slot, bit);
-
-                for party in 1..parties {
-                    wire = circuit.add(Gate::Xor(wire, input(party, item, slot, bit)));
-                }
-
-                word.push(wire);
+            for party in 1..parties {
+                wire = circuit.add(Gate::Xor(wire, input(party, item, bit)));
             }
 
-            coefficients.push(word);
+            preimage.push(wire);
         }
 
-        let digest = compression.append(&mut circuit, &coefficients[0], zero, one)?;
+        let digest = compression.append(&mut circuit, &preimage, zero, one)?;
 
         circuit.outputs.extend(digest);
-
-        for recipient in 0..parties {
-            let mut share = vec![zero; 256];
-            let mut factor = F(1);
-
-            for coefficient in &coefficients {
-                // Each 256-bit coefficient is four GF(2^64) words, most
-                // significant bit first. Multiplying by a public element is
-                // linear over GF(2), so it needs only XOR gates.
-                for word in 0..4 {
-                    for input_bit in 0..64 {
-                        let product = F(1u64 << (63 - input_bit)) * factor;
-
-                        for output_bit in 0..64 {
-                            if (product.0 >> (63 - output_bit)) & 1 != 0 {
-                                let out = word * 64 + output_bit;
-
-                                share[out] = circuit
-                                    .add(Gate::Xor(share[out], coefficient[word * 64 + input_bit]));
-                            }
-                        }
-                    }
-                }
-
-                factor *= point(recipient + 1);
-            }
-
-            for (bit, &wire) in share.iter().enumerate() {
-                let masked = circuit.add(Gate::Xor(wire, input(recipient, item, slots - 1, bit)));
-
-                circuit.outputs.push(masked);
-            }
-        }
+        circuit.secret_outputs.extend(preimage);
     }
 
     Ok(circuit)

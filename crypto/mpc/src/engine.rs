@@ -14,6 +14,13 @@
 //!   and resharing, then each is checked against a second triple sharing its
 //!   `b` under a random challenge (sacrifice). Gates use Beaver's method.
 //! - Inputs: every input wire is checked to be a bit.
+//! - Secret outputs: a 256-bit secret `v`, held as bit sharings, becomes four
+//!   field-element sharings by a local linear map. Each party then gets one
+//!   Shamir share of `v`: the evaluation at its point of a degree-`degree`
+//!   polynomial whose constant term is `v` and whose other coefficients are
+//!   random values nobody knows. Every party computes its sharing of each
+//!   recipient's share locally and sends it to that recipient only, who checks
+//!   it like an opening. Nothing about a share is ever made public.
 //!
 //! A malicious party can make honest parties abort but not change an output.
 //!
@@ -227,11 +234,17 @@ impl<T: Transport> Engine<'_, T> {
     async fn open(&mut self, shares: &[F]) -> Result<Vec<F>> {
         let incoming = self.broadcast(encode(shares)).await?;
 
+        self.reconstruct(&incoming, shares.len())
+    }
+
+    /// The values behind every party's shares in `incoming`, which must lie on
+    /// one degree-`degree` polynomial per value.
+    fn reconstruct(&self, incoming: &[Vec<u8>], count: usize) -> Result<Vec<F>> {
         let rows = incoming
             .iter()
             .map(|data| {
                 ensure!(
-                    data.len() == 8 * shares.len(),
+                    data.len() == 8 * count,
                     "A party opened the wrong number of shares"
                 );
 
@@ -248,9 +261,9 @@ impl<T: Transport> Engine<'_, T> {
                 .fold(F(0), |acc, (&w, row)| acc + w * row[i])
         };
 
-        let mut values = Vec::with_capacity(shares.len());
+        let mut values = Vec::with_capacity(count);
 
-        for i in 0..shares.len() {
+        for i in 0..count {
             for (p, row) in rows.iter().enumerate().skip(base) {
                 ensure!(
                     interpolate(p + 1, i) == row[i],
@@ -262,6 +275,71 @@ impl<T: Transport> Engine<'_, T> {
         }
 
         Ok(values)
+    }
+
+    /// Give every party a Shamir share of each 256-bit secret in `bits`
+    /// (sharings of bits, most significant first), and return this party's
+    /// shares.
+    async fn deal_secrets(&mut self, bits: &[F]) -> Result<Vec<[u8; 32]>> {
+        let degree = self.degree();
+        let words = bits.len() / 64;
+
+        // Bit b of a word, most significant first, is the field element with
+        // only that bit set; composing a word is linear in its bit sharings.
+        let values = Secrets(
+            bits.as_chunks::<64>()
+                .0
+                .iter()
+                .map(|word| {
+                    word.iter()
+                        .enumerate()
+                        .fold(F(0), |acc, (b, &bit)| acc + bit * F(1u64 << (63 - b)))
+                })
+                .collect(),
+        );
+
+        let coefficients = self.random(words * degree).await?;
+
+        let outgoing = (0..self.parties())
+            .map(|recipient| {
+                let x = point(recipient + 1);
+
+                let shares = Secrets(
+                    (0..words)
+                        .map(|w| {
+                            let higher = &coefficients.0[w * degree..(w + 1) * degree];
+
+                            values.0[w] + evaluate(higher, x) * x
+                        })
+                        .collect(),
+                );
+
+                encode(&shares.0)
+            })
+            .collect();
+
+        let incoming = Zeroizing::new(self.exchange(outgoing).await?);
+
+        // Wiped when dropped.
+        let own = Secrets(self.reconstruct(&incoming, words)?);
+
+        let shares = own
+            .0
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|value| {
+                let mut out = [0u8; 32];
+
+                for (chunk, word) in out.chunks_mut(8).zip(value) {
+                    chunk.copy_from_slice(&word.0.to_be_bytes());
+                }
+
+                out
+            })
+            .collect();
+
+        Ok(shares)
     }
 
     /// A random challenge no party can predict before it has committed.
@@ -413,7 +491,24 @@ fn decode(bytes: &[u8]) -> Vec<F> {
         .collect()
 }
 
-/// Evaluate `circuit` jointly and return its opened outputs.
+/// What a run gives this party.
+pub struct Output {
+    /// The public outputs, in circuit order.
+    pub public: Vec<bool>,
+    /// This party's Shamir share of each secret output, in circuit order,
+    /// four big-endian GF(2^64) words each, at evaluation point `party + 1`.
+    pub shares: Vec<[u8; 32]>,
+}
+
+impl Drop for Output {
+    fn drop(&mut self) {
+        for share in &mut self.shares {
+            share.zeroize();
+        }
+    }
+}
+
+/// Evaluate `circuit` jointly and return its outputs.
 ///
 /// `context` must be unique to the run and the same for every party; it binds
 /// the challenges. All of this party's randomness comes from `seed`, which
@@ -426,7 +521,7 @@ pub async fn run<T: Transport>(
     inputs: &[bool],
     seed: &[u8; 32],
     context: &[u8],
-) -> Result<Vec<bool>> {
+) -> Result<Output> {
     circuit.validate()?;
 
     ensure!(party < params.parties, "Party index out of range");
@@ -535,12 +630,18 @@ pub async fn run<T: Transport>(
 
     let opened = engine.open(&outputs.0).await?;
 
-    opened
+    let public = opened
         .into_iter()
         .map(|x| match x.0 {
             0 => Ok(false),
             1 => Ok(true),
             _ => None.context("An output is not a bit"),
         })
-        .collect()
+        .collect::<Result<_>>()?;
+
+    let secret = Secrets(circuit.secret_outputs.iter().map(|&i| wires.0[i]).collect());
+
+    let shares = engine.deal_secrets(&secret.0).await?;
+
+    Ok(Output { public, shares })
 }

@@ -90,7 +90,7 @@ impl Transport for Lossy {
                 continue;
             };
 
-            let message = tokio::time::timeout(Duration::from_secs(2), receiver.recv()).await;
+            let message = tokio::time::timeout(Duration::from_secs(20), receiver.recv()).await;
 
             let Ok(Some((received_round, message))) = message else {
                 continue;

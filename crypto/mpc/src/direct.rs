@@ -14,7 +14,7 @@ use sha2::{Digest as _, Sha256};
 use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::MAX_PARTIES;
-use crate::circuit::{self, Circuit, bytes, slots};
+use crate::circuit::{self, Circuit, bytes};
 use crate::engine::{self, Params, Transport};
 use crate::field::{F, inverse, point};
 
@@ -61,7 +61,7 @@ pub struct Generated {
 
 /// The circuit a run of `batch` preimages evaluates.
 pub fn circuit(params: Params, batch: usize) -> Result<Circuit> {
-    circuit::direct(params.parties(), batch, params.degree() + 1)
+    circuit::direct(params.parties(), batch)
 }
 
 /// This party's circuit inputs, derived from its seed so a replay can
@@ -97,52 +97,31 @@ pub async fn generate<T: Transport>(
 ) -> Result<Vec<Generated>> {
     let inputs = inputs(seed, circuit);
 
-    let outputs = Zeroizing::new(
-        engine::run(transport, params, party, circuit, &inputs, seed, context).await?,
-    );
-
-    let slots = slots(params.degree() + 1);
-    let row_len = 256 * (1 + params.parties());
+    let output = engine::run(transport, params, party, circuit, &inputs, seed, context).await?;
 
     ensure!(
-        outputs.len() == batch * row_len && inputs.len() == batch * slots * 256,
+        output.public.len() == batch * 256 && output.shares.len() == batch,
         "Outputs do not match the batch"
     );
 
-    let mut generated = Vec::with_capacity(batch);
+    Ok(output
+        .public
+        .as_chunks::<256>()
+        .0
+        .iter()
+        .zip(&output.shares)
+        .map(|(digest, share)| {
+            // The digest wires come least significant bit first.
+            let mut digest = digest.to_vec();
 
-    for item in 0..batch {
-        let row = &outputs[item * row_len..(item + 1) * row_len];
+            digest.reverse();
 
-        // The digest wires come least significant bit first.
-        let mut digest = row[..256].to_vec();
-
-        digest.reverse();
-
-        let offset = 256 * (1 + party);
-        let mask = &inputs[(item * slots + slots - 1) * 256..(item * slots + slots) * 256];
-
-        let mut share_bits = Zeroizing::new(
-            row[offset..offset + 256]
-                .iter()
-                .zip(mask)
-                .map(|(&a, &b)| a ^ b)
-                .collect::<Vec<_>>(),
-        );
-
-        let mut value = bytes(&share_bits);
-
-        share_bits.zeroize();
-
-        generated.push(Generated {
-            payment_hash: bytes(&digest).try_into().expect("256 bits"),
-            share: Share::new(party, value.as_slice().try_into().expect("256 bits")),
-        });
-
-        value.zeroize();
-    }
-
-    Ok(generated)
+            Generated {
+                payment_hash: bytes(&digest).try_into().expect("256 bits"),
+                share: Share::new(party, *share),
+            }
+        })
+        .collect())
 }
 
 /// A preimage recovered from shares.

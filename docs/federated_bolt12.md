@@ -256,9 +256,12 @@ time.
 - **MPC** (`fedimint-mpc`). Degree-`f` Shamir sharing over GF(2^64) among the
   committee, which is honest-majority with abort because at most `f` members
   are malicious. Each member's contributions are XORed into `r`; the circuit
-  publishes `SHA256(r)` and gives each member its share of `r` (threshold
-  `f + 1`) masked under a key only that member supplied. Malicious members can
-  make a run abort but not change its output or learn `r`.
+  publishes `SHA256(r)`. The MPC then turns `r` into field elements, draws
+  `f` random coefficients nobody knows, and sends each member, privately, its
+  sharing of that member's Shamir share of `r` (threshold `f + 1`), which the
+  member checks like any opening. Only the contributions to `r` are
+  bit-checked circuit inputs. Malicious members can make a run abort but not
+  change its output or learn `r`.
 - **Transport.** Members exchange messages through the module API endpoint
   `bolt12_mpc`. Each message is Schnorr-signed by its sender under its
   transport key, bound to run, sender, recipient and round, then chunked and
@@ -392,8 +395,8 @@ scope.
 
 - An end-to-end test of blame against a misbehaving guardian; blame is
   covered by unit tests of the judge and of the consensus rules.
-- Taking share coefficients and masks from the MPC's own shared randomness
-  instead of bit-checked inputs, which would make runs cheaper.
+- A lower-depth SHA-256 circuit (carry-lookahead adders): over a real
+  network a run's time is dominated by its ~1,600 rounds, not its gates.
 - Payment paths through the gateway's channel peers, which older payers
   handle correctly and which hide the gateway node behind its peers.
 - Open (non-approved) gateways backed by a recipient deposit.
