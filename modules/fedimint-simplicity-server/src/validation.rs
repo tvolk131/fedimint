@@ -24,15 +24,19 @@ use fedimint_simplicity_common::{
 };
 use simplicity::RedeemNode;
 
+use crate::Simplicity;
 use crate::db::{AssetKey, NamespaceKey};
-use crate::{Simplicity, preparation, validate_shape};
+use crate::preparation::{Prepared, ProgramCache};
 
-#[derive(Debug)]
-pub(crate) struct ValidatedTransaction {
-    pub txid: TransactionId,
-    pub inputs: Vec<InputMeta>,
-    pub creations: Vec<(AssetId, AssetRecord)>,
-    pub namespaces: Vec<[u8; 32]>,
+/// The module's [`fedimint_server_core::ServerModule::TransactionValidation`]:
+/// everything input and output processing needs, computed before core
+/// mutates anything.
+#[derive(Debug, Default)]
+pub struct ValidatedTransaction {
+    /// This instance's inputs, in transaction order.
+    pub(crate) inputs: Vec<InputMeta>,
+    pub(crate) creations: Vec<(AssetId, AssetRecord)>,
+    pub(crate) namespaces: Vec<[u8; 32]>,
 }
 
 fn output_error(context: &ModuleTransactionContext<'_>, error: ContractError) -> TransactionError {
@@ -46,13 +50,12 @@ pub(crate) async fn validate(
     module: &Simplicity,
     dbtx: &mut DatabaseTransaction<'_>,
     context: &ModuleTransactionContext<'_>,
+    prepared: &Prepared,
 ) -> Result<ValidatedTransaction, TransactionError> {
     let output_err = |error| output_error(context, error);
     let input_err = |error| {
         TransactionError::Input(DynInputError::from_typed(context.module_instance_id, error))
     };
-    validate_shape(context).map_err(output_err)?;
-    let prepared = preparation::get(context)?;
     let hashes = TransactionHashes::new(context);
     let mut outputs = Vec::new();
     let mut actions = AssetActions::default();
@@ -153,7 +156,11 @@ pub(crate) async fn validate(
     let fees = if executions.is_empty() {
         Ok(Vec::new())
     } else {
-        prepared.admission.run(move || execute(executions)).await
+        let cache = prepared.cache.clone();
+        prepared
+            .admission
+            .run(move || execute(executions, &cache))
+            .await
     }
     .map_err(input_err)?;
     let metadata = inputs
@@ -169,7 +176,6 @@ pub(crate) async fn validate(
         })
         .collect();
     Ok(ValidatedTransaction {
-        txid: hashes.txid(),
         inputs: metadata,
         creations,
         namespaces,
@@ -186,14 +192,14 @@ struct Execution {
 }
 
 /// Execute inputs in transaction order and stop at the first failure.
-fn execute(executions: Vec<Execution>) -> Result<Vec<Amount>, ContractError> {
+fn execute(executions: Vec<Execution>, cache: &ProgramCache) -> Result<Vec<Amount>, ContractError> {
     executions
         .into_iter()
         .map(|execution| {
             let environment = execution.environment?;
             let program = match execution.program? {
                 Some(program) => program,
-                None => preparation::decode(&execution.input)?,
+                None => cache.decode_matched(&execution.input)?,
             };
             execute_decoded(&execution.input, &environment, &program)
         })

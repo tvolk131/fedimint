@@ -1,5 +1,8 @@
-//! Stateless limits for the complete transaction, across every Simplicity
-//! instance. These are consensus constants, not guardian-local timing limits.
+//! Stateless limits on a transaction's Simplicity items. Every limit applies
+//! to each Simplicity module instance separately, except
+//! [`MAX_TRANSACTION_OUTPUTS`], which counts all outer outputs. Fedimint
+//! creates one instance per module kind, so in practice these are transaction
+//! limits. These are consensus constants, not guardian-local timing limits.
 use std::collections::{BTreeMap, BTreeSet};
 
 use fedimint_core::core::{DynInputError, ModuleInstanceId};
@@ -20,6 +23,9 @@ use crate::{
 #[cfg(test)]
 mod tests;
 
+/// Static cost of each Simplicity instance's items in a transaction.
+pub type InstanceCosts = BTreeMap<ModuleInstanceId, Cost>;
+
 /// Check a transaction under construction, before outer signatures exist.
 /// Counts, bytes and structural faults are checked before decoding redemption
 /// programs. Decode sequentially and drop each result, bounding simultaneous
@@ -30,35 +36,36 @@ pub fn check_transaction(transaction: &Transaction) -> Result<(), ContractError>
     transaction_cost(transaction).map(|_| ())
 }
 
-/// The same unsigned resource check, retaining the aggregate static cost for
-/// local diagnostics. No program executes until this whole-kind check passes.
-pub fn transaction_cost(transaction: &Transaction) -> Result<Cost, ContractError> {
-    let cost = check_structure(transaction)?;
-    check_programs(transaction, cost)
+/// The same unsigned resource check, retaining each instance's static cost
+/// for local diagnostics.
+pub fn transaction_cost(transaction: &Transaction) -> Result<InstanceCosts, ContractError> {
+    let costs = check_structure(transaction)?;
+    check_programs(transaction, costs)
 }
 
 /// Complete signed resource check for callers without guardian state. Guardian
-/// processing separates `check_signed_structure` from decoding after resolving
-/// all contracts. The unsigned client finalizer uses `check_transaction`.
+/// validation separates `check_signed_structure` from decoding, which follows
+/// contract resolution. The unsigned client finalizer uses `check_transaction`.
 pub fn check_signed_transaction(
     transaction: &Transaction,
     error_instance: ModuleInstanceId,
 ) -> Result<(), TransactionError> {
-    let cost = check_signed_structure(transaction, error_instance)?;
-    check_programs(transaction, cost)
+    check_signed_structure(transaction, error_instance)?;
+    check_structure(transaction)
+        .and_then(|costs| check_programs(transaction, costs))
         .map(|_| ())
         .map_err(|error| TransactionError::Input(DynInputError::from_typed(error_instance, error)))
 }
 
-/// Cheap guardian checks before state resolution. Return the creation charge
-/// so kind-wide preparation can add decoded costs to the same budget.
+/// Cheap guardian checks before state resolution. Returns `instance`'s
+/// creation charge, so validation can add its decoded programs' costs to the
+/// same budget.
 pub fn check_signed_structure(
     transaction: &Transaction,
-    error_instance: ModuleInstanceId,
+    instance: ModuleInstanceId,
 ) -> Result<Cost, TransactionError> {
-    let input_error =
-        |error| TransactionError::Input(DynInputError::from_typed(error_instance, error));
-    let cost = check_structure(transaction).map_err(input_error)?;
+    let input_error = |error| TransactionError::Input(DynInputError::from_typed(instance, error));
+    let costs = check_structure(transaction).map_err(input_error)?;
     match &transaction.signatures {
         TransactionSignature::NaiveMultisig(signatures) => {
             if signatures.len() != transaction.inputs.len() {
@@ -69,56 +76,72 @@ pub fn check_signed_structure(
             return Err(TransactionError::UnsupportedSignatureScheme { variant: *variant });
         }
     }
-    Ok(cost)
+    Ok(costs
+        .get(&instance)
+        .copied()
+        .unwrap_or(Cost::from_milliweight(0)))
 }
 
-fn check_structure(transaction: &Transaction) -> Result<Cost, ContractError> {
+/// Add `cost` to an instance's running total and check it against the budget.
+pub fn charge(
+    costs: &mut InstanceCosts,
+    instance: ModuleInstanceId,
+    cost: Cost,
+) -> Result<(), ContractError> {
+    let total = costs.entry(instance).or_insert(Cost::from_milliweight(0));
+    *total = *total + cost;
+    if *total > Cost::from_milliweight(MAX_TRANSACTION_MILLIWEIGHT) {
+        return Err(ContractError::Limit);
+    }
+    Ok(())
+}
+
+fn check_structure(transaction: &Transaction) -> Result<InstanceCosts, ContractError> {
     let mut counts = BTreeMap::new();
-    let mut bytes = 0usize;
-    let mut cost = Cost::from_milliweight(0);
-    let limit = Cost::from_milliweight(MAX_TRANSACTION_MILLIWEIGHT);
+    let mut bytes = BTreeMap::<ModuleInstanceId, usize>::new();
+    let mut costs = InstanceCosts::new();
     for input in &transaction.inputs {
         if let Some(contract) = input.as_any().downcast_ref::<ContractInput>() {
-            let count = counts.entry(input.module_instance_id()).or_insert(0usize);
+            let instance = input.module_instance_id();
+            let count = counts.entry(instance).or_insert(0usize);
             *count += 1;
-            bytes = bytes
+            let bytes = bytes.entry(instance).or_default();
+            *bytes = bytes
                 .checked_add(contract.program.len())
                 .and_then(|bytes| bytes.checked_add(contract.witness.len()))
                 .ok_or(ContractError::Limit)?;
             if *count > MAX_CONTRACTS
                 || contract.program.len() > MAX_PROGRAM_BYTES
                 || contract.witness.len() > MAX_WITNESS_BYTES
-                || bytes > MAX_TRANSACTION_REDEMPTION_BYTES
+                || *bytes > MAX_TRANSACTION_REDEMPTION_BYTES
             {
                 return Err(ContractError::Limit);
             }
+            costs.entry(instance).or_insert(Cost::from_milliweight(0));
         }
     }
-    let has_inputs = !counts.is_empty();
     counts.clear();
-    let mut has_outputs = false;
     for output in &transaction.outputs {
         if let Some(simplicity) = output.as_any().downcast_ref::<SimplicityOutput>() {
-            has_outputs = true;
-            let count = counts.entry(output.module_instance_id()).or_insert(0usize);
+            let instance = output.module_instance_id();
+            let count = counts.entry(instance).or_insert(0usize);
             *count += 1;
             if *count > MAX_CONTRACTS {
                 return Err(ContractError::Limit);
             }
-            if let Some(action) = simplicity.actions() {
-                let signatures = u32::try_from(action.actions.creations.len())
-                    .map_err(|_| ContractError::Limit)?;
-                let charge = signatures
-                    .checked_mul(CREATION_SIGNATURE_MILLIWEIGHT)
-                    .ok_or(ContractError::Limit)?;
-                cost = cost + Cost::from_milliweight(charge);
-                if cost > limit {
-                    return Err(ContractError::Limit);
-                }
-            }
+            let signatures = simplicity
+                .actions()
+                .map_or(Ok(0), |action| {
+                    u32::try_from(action.actions.creations.len())
+                })
+                .map_err(|_| ContractError::Limit)?;
+            let creation = signatures
+                .checked_mul(CREATION_SIGNATURE_MILLIWEIGHT)
+                .ok_or(ContractError::Limit)?;
+            charge(&mut costs, instance, Cost::from_milliweight(creation))?;
         }
     }
-    if (has_inputs || has_outputs) && transaction.outputs.len() > MAX_TRANSACTION_OUTPUTS {
+    if !costs.is_empty() && transaction.outputs.len() > MAX_TRANSACTION_OUTPUTS {
         return Err(ContractError::Limit);
     }
     // Check all cheap bounds first, even when an earlier input is malformed.
@@ -171,20 +194,20 @@ fn check_structure(transaction: &Transaction) -> Result<Cost, ContractError> {
             }
         }
     }
-    Ok(cost)
+    Ok(costs)
 }
 
-fn check_programs(transaction: &Transaction, mut cost: Cost) -> Result<Cost, ContractError> {
-    let limit = Cost::from_milliweight(MAX_TRANSACTION_MILLIWEIGHT);
+fn check_programs(
+    transaction: &Transaction,
+    mut costs: InstanceCosts,
+) -> Result<InstanceCosts, ContractError> {
     for input in &transaction.inputs {
         if let Some(contract) = input.as_any().downcast_ref::<ContractInput>() {
-            cost = cost + runtime::decode_program(contract)?.bounds().cost;
-            if cost > limit {
-                return Err(ContractError::Limit);
-            }
+            let cost = runtime::decode_program(contract)?.bounds().cost;
+            charge(&mut costs, input.module_instance_id(), cost)?;
         }
     }
-    Ok(cost)
+    Ok(costs)
 }
 
 /// Output-only structural rules, shared with snapshot-dependent guardian

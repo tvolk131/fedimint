@@ -507,6 +507,7 @@ impl ServerModuleInit for WalletInit {
 impl ServerModule for Wallet {
     type Common = WalletModuleTypes;
     type Init = WalletInit;
+    type TransactionValidation = ();
 
     async fn consensus_proposal<'a>(
         &'a self,

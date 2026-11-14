@@ -140,6 +140,7 @@ impl ServerModule for Unknown {
     /// Define the consensus types
     type Common = UnknownModuleTypes;
     type Init = UnknownInit;
+    type TransactionValidation = ();
 
     async fn consensus_proposal(
         &self,

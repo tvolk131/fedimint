@@ -5,6 +5,10 @@ use futures::FutureExt;
 
 use super::*;
 
+fn executor() -> Arc<Executor> {
+    Executor::new().expect("the OS can start worker threads")
+}
+
 async fn eventually(condition: impl Fn() -> bool) {
     for _ in 0..500 {
         if condition() {
@@ -21,7 +25,8 @@ async fn runs_jobs_on_named_worker_threads() {
         (TxProcessingMode::Consensus, "simplicity-consensus-"),
         (TxProcessingMode::Submission, "simplicity-submission-"),
     ] {
-        let thread = Admission::unlimited(mode)
+        let thread = executor()
+            .unlimited(mode)
             .run(|| {
                 std::thread::current()
                     .name()
@@ -35,7 +40,7 @@ async fn runs_jobs_on_named_worker_threads() {
 
 #[tokio::test]
 async fn panics_resume_in_the_caller_and_the_pool_survives() {
-    let consensus = Admission::unlimited(TxProcessingMode::Consensus);
+    let consensus = executor().unlimited(TxProcessingMode::Consensus);
     let panic = AssertUnwindSafe(consensus.run(|| {
         panic!("job panicked");
     }))
@@ -53,7 +58,7 @@ async fn slow_jobs_leave_the_runtime_free() {
             fedimint_core::runtime::sleep(Duration::from_millis(10)).await;
         }
     };
-    let submission = Admission::unlimited(TxProcessingMode::Submission);
+    let submission = executor().unlimited(TxProcessingMode::Submission);
     // Run inline, the job would block the only runtime thread and win.
     tokio::select! {
         biased;
@@ -75,23 +80,24 @@ async fn jobs_get_a_large_stack() {
         }
     }
     // About 16 MiB of frames, well past an 8 MiB default thread stack.
-    let submission = Admission::unlimited(TxProcessingMode::Submission);
+    let submission = executor().unlimited(TxProcessingMode::Submission);
     assert_eq!(submission.run(|| depth(16_000)).await, 0);
 }
 
 #[tokio::test]
 async fn submissions_beyond_the_limit_wait_and_consensus_does_not() {
     let permits = Arc::new(Semaphore::new(2));
-    let first = Admission::acquire_from(&permits, TxProcessingMode::Submission).await;
-    let _second = Admission::acquire_from(&permits, TxProcessingMode::Submission).await;
+    let first = Admission::acquire_from(&executor(), &permits, TxProcessingMode::Submission).await;
+    let _second =
+        Admission::acquire_from(&executor(), &permits, TxProcessingMode::Submission).await;
     // Giving up a place in line takes no permit.
     assert!(
-        Admission::acquire_from(&permits, TxProcessingMode::Submission)
+        Admission::acquire_from(&executor(), &permits, TxProcessingMode::Submission)
             .now_or_never()
             .is_none()
     );
     assert!(
-        Admission::acquire_from(&permits, TxProcessingMode::Consensus)
+        Admission::acquire_from(&executor(), &permits, TxProcessingMode::Consensus)
             .now_or_never()
             .is_some()
     );
@@ -105,7 +111,8 @@ async fn submissions_beyond_the_limit_wait_and_consensus_does_not() {
 #[tokio::test]
 async fn jobs_keep_their_admission_after_the_caller_stops_waiting() {
     let permits = Arc::new(Semaphore::new(1));
-    let admission = Admission::acquire_from(&permits, TxProcessingMode::Submission).await;
+    let admission =
+        Admission::acquire_from(&executor(), &permits, TxProcessingMode::Submission).await;
     let (started, wait_started) = mpsc::channel();
     let (finish, wait_finish) = mpsc::channel::<()>();
     let mut caller = Box::pin(admission.run(move || {
@@ -133,7 +140,8 @@ async fn released_values_are_freed_on_a_worker_before_the_admission() {
         }
     }
     let permits = Arc::new(Semaphore::new(1));
-    let admission = Admission::acquire_from(&permits, TxProcessingMode::Submission).await;
+    let admission =
+        Admission::acquire_from(&executor(), &permits, TxProcessingMode::Submission).await;
     let (sender, receiver) = mpsc::channel();
     admission.release(Probe(permits.clone(), sender));
     let (thread, available) = receiver.recv().expect("probe is freed");
@@ -148,7 +156,7 @@ async fn consensus_jobs_do_not_queue_behind_submissions() {
     let (started, wait_started) = mpsc::channel();
     let (finish, wait_finish) = mpsc::channel::<()>();
     let wait_finish = Arc::new(std::sync::Mutex::new(wait_finish));
-    let submission = Admission::unlimited(TxProcessingMode::Submission);
+    let submission = executor().unlimited(TxProcessingMode::Submission);
     let mut blocked = Vec::new();
     for _ in 0..threads {
         let started = started.clone();
@@ -165,7 +173,7 @@ async fn consensus_jobs_do_not_queue_behind_submissions() {
             .recv()
             .expect("every submission thread is busy");
     }
-    let consensus = Admission::unlimited(TxProcessingMode::Consensus);
+    let consensus = executor().unlimited(TxProcessingMode::Consensus);
     assert_eq!(consensus.run(|| 7).await, 7);
     for _ in 0..threads {
         finish.send(()).expect("a job is waiting");

@@ -44,6 +44,7 @@ pub struct Observation {
 }
 
 #[derive(Debug, Serialize)]
+/// Usage of the most loaded Simplicity instance. Limits apply per instance.
 pub struct Resources {
     pub milliweight: u32,
     pub milliweight_limit: u32,
@@ -194,16 +195,19 @@ pub fn analyze(
                 .map(|contract| (index, output.module_instance_id(), contract))
         })
         .collect();
+    let mut redemption_bytes = BTreeMap::<ModuleInstanceId, usize>::new();
+    for (_, instance, input) in &inputs {
+        *redemption_bytes.entry(*instance).or_default() +=
+            input.program.len() + input.witness.len();
+    }
     report.resources = Some(Resources {
-        milliweight: cost
-            .to_string()
-            .parse()
-            .expect("pinned Simplicity Cost displays integer milliweight"),
+        milliweight: cost.values().max().map_or(0, |cost| {
+            cost.to_string()
+                .parse()
+                .expect("pinned Simplicity Cost displays integer milliweight")
+        }),
         milliweight_limit: common::limits::MAX_TRANSACTION_MILLIWEIGHT,
-        redemption_bytes: inputs
-            .iter()
-            .map(|(_, _, input)| input.program.len() + input.witness.len())
-            .sum(),
+        redemption_bytes: redemption_bytes.into_values().max().unwrap_or(0),
         redemption_bytes_limit: common::limits::MAX_TRANSACTION_REDEMPTION_BYTES,
     });
     // Decoding already succeeded above; reuse the canonical fee implementation.

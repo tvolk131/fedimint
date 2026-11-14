@@ -242,7 +242,7 @@ fn pruning_and_clock_sensitive_paths_use_the_supplied_observation() {
 }
 
 #[test]
-fn aggregate_caps_reject_before_execution_across_instances() {
+fn aggregate_caps_reject_before_execution_within_an_instance() {
     let (mut tx, snapshots) = fixture("fn main() {}");
     let mut input = tx.inputs[0]
         .as_any()
@@ -250,9 +250,26 @@ fn aggregate_caps_reject_before_execution_across_instances() {
         .unwrap()
         .clone();
     input.witness = vec![0; common::limits::MAX_WITNESS_BYTES];
+    let mut second = input.clone();
+    second.outpoint.out_idx += 1;
+    // Split across instances, each instance is within its own byte cap.
     tx.inputs = vec![
         DynInput::from_typed(MODULE, input.clone()),
-        DynInput::from_typed(MODULE + 1, input),
+        DynInput::from_typed(MODULE + 1, second.clone()),
+    ];
+    assert!(!matches!(
+        check(
+            &analyze(&tx, federation(), &snapshots),
+            "structure_and_resources"
+        ),
+        Outcome::Failed {
+            code: "resource_limit",
+            ..
+        }
+    ));
+    tx.inputs = vec![
+        DynInput::from_typed(MODULE, input),
+        DynInput::from_typed(MODULE, second),
     ];
     let report = analyze(&tx, federation(), &snapshots);
     assert!(matches!(
@@ -267,6 +284,32 @@ fn aggregate_caps_reject_before_execution_across_instances() {
         Outcome::NotChecked { .. }
     ));
     assert!(report.resources.is_none());
+}
+
+#[test]
+fn resources_report_the_most_loaded_instance() {
+    let (mut tx, snapshots) = fixture("fn main() {}");
+    let input = tx.inputs[0]
+        .as_any()
+        .downcast_ref::<ContractInput>()
+        .unwrap()
+        .clone();
+    let mut second = input.clone();
+    second.outpoint.out_idx += 1;
+    let bytes = input.program.len() + input.witness.len();
+    let resources = |tx: &Transaction| {
+        let resources = analyze(tx, federation(), &snapshots).resources.unwrap();
+        (resources.milliweight, resources.redemption_bytes)
+    };
+    let (single, single_bytes) = resources(&tx);
+    assert_eq!(single_bytes, bytes);
+    tx.inputs = vec![
+        DynInput::from_typed(MODULE, input.clone()),
+        DynInput::from_typed(MODULE + 1, second.clone()),
+    ];
+    assert_eq!(resources(&tx), (single, bytes));
+    tx.inputs.push(DynInput::from_typed(MODULE + 1, input));
+    assert_eq!(resources(&tx), (2 * single, 2 * bytes));
 }
 
 #[test]

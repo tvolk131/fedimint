@@ -261,6 +261,7 @@ impl ServerModule for Meta {
     /// Define the consensus types
     type Common = MetaModuleTypes;
     type Init = MetaInit;
+    type TransactionValidation = ();
 
     /// Check the difference between what's desired vs submitted and consensus.
     ///

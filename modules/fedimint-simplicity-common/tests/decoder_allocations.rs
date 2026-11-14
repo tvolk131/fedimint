@@ -183,9 +183,14 @@ fn aggregate_byte_limit_rejects_before_allocating_decoded_constants() {
         4 * input.program.len()
             > fedimint_simplicity_common::limits::MAX_TRANSACTION_REDEMPTION_BYTES
     );
+    // The byte limit applies per instance, so all copies share one instance.
     let tx = Transaction {
         inputs: (0..4)
-            .map(|index| DynInput::from_typed(4 + index % 2, input.clone()))
+            .map(|index| {
+                let mut input = input.clone();
+                input.outpoint.out_idx = index;
+                DynInput::from_typed(4, input)
+            })
             .collect(),
         outputs: vec![],
         nonce: [0; 8],

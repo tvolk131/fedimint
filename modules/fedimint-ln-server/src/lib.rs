@@ -369,6 +369,7 @@ pub struct Lightning {
 impl ServerModule for Lightning {
     type Common = LightningModuleTypes;
     type Init = LightningInit;
+    type TransactionValidation = ();
 
     async fn consensus_proposal(
         &self,

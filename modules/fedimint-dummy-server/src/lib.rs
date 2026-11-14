@@ -171,6 +171,7 @@ impl ServerModule for Dummy {
     /// Define the consensus types
     type Common = DummyModuleTypes;
     type Init = DummyInit;
+    type TransactionValidation = ();
 
     async fn consensus_proposal(
         &self,

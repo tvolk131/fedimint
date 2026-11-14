@@ -15,6 +15,7 @@ use fedimint_server_core::{
 use fedimint_simplicity_client::compiler::{Value, arguments, witnesses};
 use fedimint_simplicity_client::{ContractProgram, sign_transaction};
 use fedimint_simplicity_common::compiler::ValueConstructible as _;
+use fedimint_simplicity_common::resources;
 use simplicity::ConstructNode;
 use simplicity::node::CoreConstructible;
 
@@ -49,8 +50,7 @@ fn spend(index: u64, valid: bool) -> (ContractInput, StoredContract) {
     (input, stored)
 }
 
-/// Like [`spend`], but with program bytes that no other test decodes, so
-/// assertions about the shared program cache hold while other tests run.
+/// Like [`spend`], but with a distinct program per tag.
 fn tagged_spend(tag: u64, index: u64, valid: bool) -> (ContractInput, StoredContract) {
     let program = ContractProgram::compile(
         &format!("fn main() {{ assert!(jet::eq_64(witness::TAG, {tag})); }}"),
@@ -102,9 +102,19 @@ fn context(tx: &Transaction, instance: u16) -> ModuleTransactionContext<'_> {
         },
         mode: TxProcessingMode::Consensus,
         module_instance_id: instance,
-        preparation: None,
-        validation: None,
     }
+}
+
+/// The program cache of the registered module instance that processes
+/// `instance`'s items.
+fn programs(modules: &ServerModuleRegistry, instance: u16) -> Arc<ProgramCache> {
+    modules
+        .get_expect(instance)
+        .as_any()
+        .downcast_ref::<Simplicity>()
+        .unwrap()
+        .programs
+        .clone()
 }
 
 fn federation() -> (Database, ServerModuleRegistry) {
@@ -159,9 +169,28 @@ async fn check(
     }
 }
 
+/// Core validates instances in id order, each to completion, so resolution,
+/// decoding, commitment checks and execution are ordered within an instance,
+/// and a lower instance's failure wins over any failure of a higher one.
 #[tokio::test]
-async fn all_instances_resolve_before_decoding_and_check_commitments_before_execution() {
-    for ids in [[4, 4], [4, 7], [7, 4]] {
+async fn each_instance_resolves_before_decoding_and_checks_commitments_before_execution() {
+    for (ids, missing_state, wrong_commitment) in [
+        (
+            [4, 4],
+            input_error(4, ContractError::UnknownContract),
+            input_error(4, ContractError::Commitment),
+        ),
+        (
+            [4, 7],
+            input_error(4, ContractError::Program),
+            input_error(4, ContractError::Rejected),
+        ),
+        (
+            [7, 4],
+            input_error(4, ContractError::UnknownContract),
+            input_error(4, ContractError::Commitment),
+        ),
+    ] {
         let (db, modules) = federation();
         let (first, stored_first) = spend(0, false);
         let (last, mut stored_last) = spend(1, true);
@@ -169,14 +198,9 @@ async fn all_instances_resolve_before_decoding_and_check_commitments_before_exec
         let mut malformed = first.clone();
         malformed.program.clear();
         let tx = transaction(vec![(ids[0], malformed), (ids[1], last.clone())]);
-        // Missing later state wins even over an earlier malformed program.
-        check(
-            &db,
-            &modules,
-            &tx,
-            Err(input_error(ids[1], ContractError::UnknownContract)),
-        )
-        .await;
+        // Within an instance, missing later state wins even over an earlier
+        // malformed program.
+        check(&db, &modules, &tx, Err(missing_state)).await;
         seed(&db, ids[1], &last, &stored_last).await;
         check(
             &db,
@@ -188,14 +212,9 @@ async fn all_instances_resolve_before_decoding_and_check_commitments_before_exec
         let tx = transaction(vec![(ids[0], first.clone()), (ids[1], last.clone())]);
         stored_last.output.cmr = [0; 32];
         seed(&db, ids[1], &last, &stored_last).await;
-        // The earlier program would fail if it ran; the late CMR must win.
-        check(
-            &db,
-            &modules,
-            &tx,
-            Err(input_error(ids[1], ContractError::Commitment)),
-        )
-        .await;
+        // Within an instance, the earlier program would fail if it ran; the
+        // late CMR must win.
+        check(&db, &modules, &tx, Err(wrong_commitment)).await;
         stored_last.output.cmr = runtime::decode_program(&last)
             .unwrap()
             .cmr()
@@ -305,29 +324,32 @@ fn retention_accounting_has_inclusive_boundaries_and_counts_large_values() {
 }
 
 #[tokio::test]
-async fn aggregate_cost_is_checked_across_instances_before_any_execution() {
-    let (db, modules) = federation();
-    let (first, stored) = spend(0, false);
-    seed(&db, 4, &first, &stored).await;
-    let mut inputs = vec![(4, first)];
-    for (id, index) in [(4, 1), (7, 2)] {
-        let (mut input, mut stored) = spend(index, true);
-        input.program = units(13); // 1,638,300 milliweight each, individually valid.
-        input.witness.clear();
-        stored.output.cmr = runtime::decode_program(&input)
-            .unwrap()
-            .cmr()
-            .to_byte_array();
-        seed(&db, id, &input, &stored).await;
-        inputs.push((id, input));
+async fn aggregate_cost_is_checked_per_instance_before_any_execution() {
+    // Two expensive programs exceed the budget together, but only when they
+    // belong to the same instance.
+    for (expensive, valid, expected) in [
+        ([4, 4], false, Err(input_error(4, ContractError::Limit))),
+        ([4, 7], true, Ok(())),
+    ] {
+        let (db, modules) = federation();
+        let (first, stored) = spend(0, valid);
+        seed(&db, 4, &first, &stored).await;
+        let mut inputs = vec![(4, first)];
+        for (id, index) in expensive.into_iter().zip([1, 2]) {
+            let (mut input, mut stored) = spend(index, true);
+            input.program = units(13); // 1,638,300 milliweight each, individually valid.
+            input.witness.clear();
+            stored.output.cmr = runtime::decode_program(&input)
+                .unwrap()
+                .cmr()
+                .to_byte_array();
+            seed(&db, id, &input, &stored).await;
+            inputs.push((id, input));
+        }
+        // The first program fails if it runs, so a limit error means the
+        // instance's whole cost was checked before execution.
+        check(&db, &modules, &transaction(inputs), expected).await;
     }
-    check(
-        &db,
-        &modules,
-        &transaction(inputs),
-        Err(input_error(7, ContractError::Limit)),
-    )
-    .await;
 }
 
 #[tokio::test]
@@ -358,7 +380,8 @@ async fn retention_budget_changes_neither_execution_result_nor_fees() {
         ] {
             let mut dbtx = db.begin_transaction_nc().await;
             let mut dbtx = dbtx.to_ref_with_prefix_module_id(4).0;
-            let mut context = context(&tx, 4);
+            let context = context(&tx, 4);
+            let cost = resources::check_signed_structure(&tx, 4).unwrap();
             let resolved = resolve(
                 &mut dbtx,
                 &context,
@@ -366,22 +389,23 @@ async fn retention_budget_changes_neither_execution_result_nor_fees() {
             )
             .await
             .unwrap();
-            let prepared = Decoding::new(&context, BTreeMap::from([(4, resolved)]))
-                .unwrap()
-                .run(budget, Admission::unlimited(TxProcessingMode::Consensus))
+            let prepared = Decoding::new(&context, resolved, cost)
+                .run(
+                    budget,
+                    module.executor.unlimited(TxProcessingMode::Consensus),
+                    module.programs.clone(),
+                )
                 .unwrap();
             assert_eq!(
                 prepared.programs.values().filter(|p| p.is_some()).count(),
                 count
             );
             if evict {
-                cache::forget(first);
-                assert!(!cache::contains(first));
+                module.programs.forget(first);
+                assert!(!module.programs.contains(first));
             }
-            let prepared = ModuleTransactionValidation::new(prepared);
-            context.preparation = Some(&prepared);
             results.push(
-                validation::validate(&module, &mut dbtx, &context)
+                validation::validate(&module, &mut dbtx, &context, &prepared)
                     .await
                     .map(|v| {
                         v.inputs
@@ -392,7 +416,7 @@ async fn retention_budget_changes_neither_execution_result_nor_fees() {
             );
             if evict {
                 // Execution decoded the first program afresh and cached it.
-                assert!(cache::contains(first));
+                assert!(module.programs.contains(first));
             }
         }
         assert_eq!(results[0], results[1]);
@@ -468,18 +492,24 @@ async fn submissions_wait_for_admission_before_decoding_and_consensus_does_not()
             .unwrap(),
         );
     }
-    let held = crate::executor::hold_permits(0).await;
+    let cost = resources::check_signed_structure(&tx, 4).unwrap();
+    let executor = Executor::new().unwrap();
+    let cache = Arc::new(ProgramCache::new());
+    let held = executor.hold_permits(0).await;
     let mut waiting = Box::pin(prepare(
+        &executor,
+        &cache,
         &submission,
-        BTreeMap::from([(4, resolved.pop().unwrap())]),
+        resolved.pop().unwrap(),
+        cost,
     ));
     assert!(timeout(UNADMITTED, &mut waiting).await.is_err());
     // A submission decoding before admission would have cached its program.
-    assert!(!cache::contains(&input));
-    prepare(&consensus, BTreeMap::from([(4, resolved.pop().unwrap())]))
+    assert!(!cache.contains(&input));
+    prepare(&executor, &cache, &consensus, resolved.pop().unwrap(), cost)
         .await
         .unwrap();
-    assert!(cache::contains(&input));
+    assert!(cache.contains(&input));
     drop(held);
     waiting.await.unwrap();
 }
@@ -501,20 +531,16 @@ async fn submissions_keep_their_admission_until_their_programs_are_freed() {
     )
     .await
     .unwrap();
-    let held = crate::executor::hold_permits(1).await;
-    let prepared = prepare(&submission, BTreeMap::from([(4, resolved)]))
+    let cost = resources::check_signed_structure(&tx, 4).unwrap();
+    let executor = Executor::new().unwrap();
+    let cache = Arc::new(ProgramCache::new());
+    let held = executor.hold_permits(1).await;
+    let prepared = prepare(&executor, &cache, &submission, resolved, cost)
         .await
         .unwrap();
-    assert!(
-        prepared
-            .get::<Prepared>()
-            .unwrap()
-            .programs
-            .values()
-            .all(Option::is_some)
-    );
+    assert!(prepared.programs.values().all(Option::is_some));
     // The retained programs keep the last admission after decoding finishes.
-    let mut next = Box::pin(Admission::acquire(TxProcessingMode::Submission));
+    let mut next = Box::pin(executor.admit(TxProcessingMode::Submission));
     assert!(timeout(UNADMITTED, &mut next).await.is_err());
     drop(prepared);
     timeout(Duration::from_secs(10), next)
@@ -538,9 +564,11 @@ async fn only_programs_that_match_a_contract_are_cached() {
         Err(input_error(4, ContractError::Commitment)),
     )
     .await;
-    assert!(!cache::contains(&input));
+    assert!(!programs(&modules, 4).contains(&input));
     stored.output.cmr = cmr;
     seed(&db, 4, &input, &stored).await;
     check(&db, &modules, &tx, Ok(())).await;
-    assert!(cache::contains(&input));
+    assert!(programs(&modules, 4).contains(&input));
+    // Each instance caches only the programs it processed.
+    assert!(!programs(&modules, 7).contains(&input));
 }

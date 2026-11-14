@@ -94,9 +94,9 @@ fn bundle() -> ContractOutput {
 }
 
 #[test]
-fn cost_is_exact_inclusive_and_shared_across_instances() {
+fn cost_is_exact_inclusive_and_per_instance() {
     // Unit composition costs (2*n - 1)*100. These small encodings have
-    // individually acceptable bounds whose sum is exactly the shared limit.
+    // individually acceptable bounds whose sum is exactly one instance's limit.
     for (tail, expected) in [
         (1808, Ok(())),
         (1809, Ok(())),
@@ -111,38 +111,63 @@ fn cost_is_exact_inclusive_and_shared_across_instances() {
             cost,
             Cost::from_milliweight(2_000_000 + (tail as u32 - 1808) * 200 - 200)
         );
-        for instances in [[4, 4], [4, 7], [7, 4]] {
-            let tx = transaction(
-                vec![
-                    DynInput::from_typed(instances[0], first.clone()),
-                    DynInput::from_typed(instances[1], second.clone()),
-                ],
+        let spend = |instances: &[ModuleInstanceId]| {
+            transaction(
+                instances
+                    .iter()
+                    .zip([&first, &second].into_iter().cycle())
+                    .map(|(instance, input)| DynInput::from_typed(*instance, input.clone()))
+                    .collect(),
                 vec![],
-            );
-            assert_eq!(check_transaction(&tx), expected);
+            )
+        };
+        for instance in [4, 7] {
+            assert_eq!(check_transaction(&spend(&[instance, instance])), expected);
         }
+        // Split across instances, neither instance comes near its budget.
+        for instances in [[4, 7], [7, 4]] {
+            assert_eq!(check_transaction(&spend(&instances)), Ok(()));
+        }
+        // Each instance may spend up to its own budget in the same transaction.
+        assert_eq!(check_transaction(&spend(&[4, 4, 7, 7])), expected);
     }
 }
 
 #[test]
-fn combined_bytes_and_individual_lengths_are_checked_before_decoding() {
+fn combined_bytes_per_instance_and_individual_lengths_are_checked_before_decoding() {
     let mut first = input(vec![]);
     first.witness = vec![0; MAX_WITNESS_BYTES];
-    let second = first.clone();
-    // Exactly 16 KiB reaches decoding, where this malformed program fails.
+    let mut second = first.clone();
+    second.outpoint.out_idx = 1;
+    // Exactly 16 KiB in one instance reaches decoding, where this malformed
+    // program fails.
     let tx = transaction(
         vec![
             DynInput::from_typed(4, first.clone()),
-            DynInput::from_typed(7, second.clone()),
+            DynInput::from_typed(4, second.clone()),
         ],
         vec![],
     );
     assert_eq!(check_transaction(&tx), Err(ContractError::Program));
     first.program.push(0);
+    for instances in [[4, 7], [7, 4]] {
+        let mut tx = transaction(
+            vec![
+                DynInput::from_typed(instances[0], first.clone()),
+                DynInput::from_typed(instances[1], second.clone()),
+            ],
+            vec![],
+        );
+        for _ in 0..2 {
+            // Bytes are counted per instance, so split inputs reach decoding.
+            assert_eq!(check_transaction(&tx), Err(ContractError::Program));
+            tx.inputs.reverse();
+        }
+    }
     let mut tx = transaction(
         vec![
             DynInput::from_typed(4, first.clone()),
-            DynInput::from_typed(7, second),
+            DynInput::from_typed(4, second),
         ],
         vec![],
     );
@@ -169,33 +194,44 @@ fn combined_bytes_and_individual_lengths_are_checked_before_decoding() {
 }
 
 #[test]
-fn creation_signatures_share_the_execution_budget_including_output_only_instances() {
+fn creation_signatures_share_their_instance_execution_budget_including_output_only_instances() {
     let tx = transaction(
         vec![],
         vec![
-            out(4, creations(10, 2)),
-            out(7, creations(10, 3)),
+            out(4, creations(20, 2)),
+            out(7, creations(20, 3)),
             out(4, bundle()),
             out(7, bundle()),
         ],
     );
+    // Each instance spends exactly its own whole budget on creations.
     assert_eq!(check_transaction(&tx), Ok(()));
-    let mut over = tx.clone();
-    over.outputs[1] = out(7, creations(11, 3));
-    assert_eq!(check_transaction(&over), Err(ContractError::Limit));
+    for (index, instance, destination) in [(0, 4, 2), (1, 7, 3)] {
+        let mut over = tx.clone();
+        over.outputs[index] = out(instance, creations(21, destination));
+        assert_eq!(check_transaction(&over), Err(ContractError::Limit));
+    }
     // Even the minimum valid input costs something: there is no separate
     // allowance for programs after spending the entire budget on creation.
-    let mut over = tx;
-    over.inputs.push(DynInput::from_typed(9, input(units(1))));
-    assert_eq!(check_transaction(&over), Err(ContractError::Limit));
+    for instance in [4, 7] {
+        let mut over = tx.clone();
+        over.inputs
+            .push(DynInput::from_typed(instance, input(units(1))));
+        assert_eq!(check_transaction(&over), Err(ContractError::Limit));
+    }
+    // Another instance's budget is untouched.
+    let mut other = tx;
+    other.inputs.push(DynInput::from_typed(9, input(units(1))));
+    assert_eq!(check_transaction(&other), Ok(()));
     for (count, expected) in [(500, Ok(())), (501, Err(ContractError::Limit))] {
-        assert_eq!(
-            check_transaction(&transaction(
-                vec![DynInput::from_typed(4, input(units(count)))],
-                vec![out(7, creations(19, 1)), out(7, bundle())]
-            )),
-            expected
-        );
+        let spend = |instance| {
+            transaction(
+                vec![DynInput::from_typed(instance, input(units(count)))],
+                vec![out(7, creations(19, 1)), out(7, bundle())],
+            )
+        };
+        assert_eq!(check_transaction(&spend(7)), expected);
+        assert_eq!(check_transaction(&spend(4)), Ok(()));
     }
 }
 
@@ -209,6 +245,19 @@ fn counted_payload_excludes_recovery_and_counts_every_repeated_program() {
         )),
         Ok(())
     );
+    let mut repeated = program.clone();
+    repeated.outpoint.out_idx = 1;
+    assert_eq!(
+        check_transaction(&transaction(
+            vec![
+                DynInput::from_typed(4, program.clone()),
+                DynInput::from_typed(4, repeated)
+            ],
+            vec![]
+        )),
+        Err(ContractError::Limit)
+    );
+    // Another instance counts its own copy against its own budget.
     assert_eq!(
         check_transaction(&transaction(
             vec![
@@ -217,7 +266,7 @@ fn counted_payload_excludes_recovery_and_counts_every_repeated_program() {
             ],
             vec![]
         )),
-        Err(ContractError::Limit)
+        Ok(())
     );
     let mut output = bundle();
     output.recovery = vec![0; MAX_RECOVERY_BYTES];
