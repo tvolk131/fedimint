@@ -240,7 +240,8 @@ impl ModuleInit for LightningInit {
                 | DbKeyPrefix::Bolt12Blame
                 | DbKeyPrefix::Bolt12Dispute
                 | DbKeyPrefix::Bolt12PoolTranscript
-                | DbKeyPrefix::Bolt12PoolLocalVerdict => {}
+                | DbKeyPrefix::Bolt12PoolLocalVerdict
+                | DbKeyPrefix::Bolt12GatewayApprovalCount => {}
                 DbKeyPrefix::IncomingContractIndex => {
                     push_db_pair_items!(
                         dbtx,

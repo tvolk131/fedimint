@@ -23,7 +23,7 @@ use fedimint_lnv2_common::endpoint_constants::{ADD_GATEWAY_ENDPOINT, REMOVE_GATE
 use fedimint_lnv2_common::endpoint_constants::{
     AWAIT_INCOMING_CONTRACT_ENDPOINT, AWAIT_INCOMING_CONTRACTS_ENDPOINT, AWAIT_PREIMAGE_ENDPOINT,
     BOLT12_AWAIT_RECEIVES_ENDPOINT, BOLT12_CONTRACT_ENDPOINT, BOLT12_DECRYPTION_SHARES_ENDPOINT,
-    BOLT12_GATEWAY_APPROVED_ENDPOINT, BOLT12_NEXT_STOCK_ENDPOINT,
+    BOLT12_GATEWAY_APPROVED_ENDPOINT, BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_RECIPIENT_USED_ENDPOINT,
     BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT, BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT,
     BOLT12_RESERVATION_ENDPOINT, CONSENSUS_BLOCK_COUNT_ENDPOINT, GATEWAYS_ENDPOINT,
 };
@@ -55,6 +55,10 @@ pub trait LightningFederationApi {
         &self,
         claim_pk: PublicKey,
     ) -> FederationResult<Option<(RegistrationId, Registration)>>;
+
+    /// Whether `claim_pk` was ever registered, even if its registration has
+    /// since expired and been pruned.
+    async fn bolt12_recipient_used(&self, claim_pk: PublicKey) -> FederationResult<bool>;
 
     /// The lowest-indexed unused stock item of a registration.
     async fn bolt12_next_stock(
@@ -154,6 +158,14 @@ where
     ) -> FederationResult<Option<(RegistrationId, Registration)>> {
         self.request_current_consensus(
             BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT.to_string(),
+            ApiRequestErased::new(claim_pk),
+        )
+        .await
+    }
+
+    async fn bolt12_recipient_used(&self, claim_pk: PublicKey) -> FederationResult<bool> {
+        self.request_current_consensus(
+            BOLT12_RECIPIENT_USED_ENDPOINT.to_string(),
             ApiRequestErased::new(claim_pk),
         )
         .await

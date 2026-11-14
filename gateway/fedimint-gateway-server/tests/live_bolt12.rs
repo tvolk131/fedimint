@@ -390,6 +390,30 @@ async fn payer_pays_a_federated_offer_over_lightning() -> Result<()> {
     )
     .await?;
 
+    // The payer sets its HTLC's expiry from its own view of the chain, and
+    // the gateway checks it against its own; both must be at the tip, or the
+    // gateway sees too little time left and fails the payment.
+    retry(
+        "nodes at the chain tip",
+        backoff_util::aggressive_backoff_long(),
+        || async {
+            block_in_place(|| payer.sync_wallets())?;
+            lnrpc.sync_wallet()?;
+
+            let tip = u32::try_from(block_in_place(|| miner.get_block_count())?)?;
+            let payer_height = payer.status().current_best_block.height;
+            let gateway_height = lnrpc.info().await?.block_height;
+
+            ensure!(
+                payer_height == tip && gateway_height == tip,
+                "tip {tip}, payer {payer_height}, gateway {gateway_height}"
+            );
+
+            Ok(())
+        },
+    )
+    .await?;
+
     // The federation and a gateway backed by the LDK node.
     let fed = fixtures.new_fed_not_degraded().await;
     let gateway = fixtures.new_gateway_with_lightning(lnrpc.clone()).await;
@@ -452,35 +476,7 @@ async fn payer_pays_a_federated_offer_over_lightning() -> Result<()> {
             .bolt12_payment()
             .send_using_amount(&offer, INVOICE_AMOUNT.msats, None, None, None)?;
 
-    let preimage = {
-        let mut attempts = 0;
-
-        loop {
-            let payment = payer.payment(&payment_id).context("unknown payment")?;
-
-            match (payment.status, payment.kind) {
-                (
-                    PaymentStatus::Succeeded,
-                    PaymentKind::Bolt12Offer {
-                        hash: Some(hash),
-                        preimage: Some(preimage),
-                        ..
-                    },
-                ) => {
-                    ensure!(sha256::Hash::hash(&preimage.0).to_byte_array() == hash.0);
-
-                    break preimage;
-                }
-                (PaymentStatus::Failed, _) => bail!("the payment failed"),
-                (status, _) => {
-                    ensure!(attempts < 600, "payment still {status:?}");
-                }
-            }
-
-            attempts += 1;
-            sleep(Duration::from_millis(100)).await;
-        }
-    };
+    let preimage = await_payment(&payer, &payment_id).await?;
 
     println!("paid; preimage {}", sha256::Hash::hash(&preimage.0));
 
@@ -501,6 +497,36 @@ async fn payer_pays_a_federated_offer_over_lightning() -> Result<()> {
     )
     .await?;
 
+    // Both nodes still answer requests for offers they issued themselves:
+    // the payer has no external handler installed, and the gateway's handler
+    // leaves offers without the federated routing prefix to its node.
+    let payer_offer =
+        payer
+            .bolt12_payment()
+            .receive(1_000_000, "the payer's own offer", None, None)?;
+
+    lnrpc
+        .pay_offer(payer_offer.to_string(), None, None, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("gateway paying the payer's offer: {e:?}"))?;
+
+    let gateway_offer: ldk_node::lightning::offers::offer::Offer = lnrpc
+        .create_offer(
+            Some(Amount::from_sats(1_000)),
+            Some("the gateway's own offer".to_string()),
+            None,
+            None,
+        )
+        .map_err(|e| anyhow::anyhow!("gateway offer: {e:?}"))?
+        .parse()
+        .map_err(|e| anyhow::anyhow!("gateway offer: {e:?}"))?;
+
+    let payment_id = payer
+        .bolt12_payment()
+        .send(&gateway_offer, None, None, None)?;
+
+    await_payment(&payer, &payment_id).await?;
+
     task_group
         .shutdown_join_all(Duration::from_secs(10))
         .await?;
@@ -510,4 +536,33 @@ async fn payer_pays_a_federated_offer_over_lightning() -> Result<()> {
     std::fs::remove_dir_all(&run_dir)?;
 
     Ok(())
+}
+
+/// Wait for an outgoing BOLT12 payment to succeed and return its preimage.
+async fn await_payment(
+    payer: &ldk_node::Node,
+    payment_id: &ldk_node::lightning::ln::channelmanager::PaymentId,
+) -> Result<ldk_node::lightning_types::payment::PaymentPreimage> {
+    for _ in 0..600 {
+        let payment = payer.payment(payment_id).context("unknown payment")?;
+
+        match (payment.status, payment.kind) {
+            (
+                PaymentStatus::Succeeded,
+                PaymentKind::Bolt12Offer {
+                    hash: Some(hash),
+                    preimage: Some(preimage),
+                    ..
+                },
+            ) => {
+                ensure!(sha256::Hash::hash(&preimage.0).to_byte_array() == hash.0);
+
+                return Ok(preimage);
+            }
+            (PaymentStatus::Failed, _) => bail!("the payment failed"),
+            _ => sleep(Duration::from_millis(100)).await,
+        }
+    }
+
+    bail!("the payment did not complete")
 }

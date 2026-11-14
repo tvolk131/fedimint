@@ -9,8 +9,9 @@
 mod receive_sm;
 pub mod signing;
 
+use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result, ensure};
 use bitcoin::hashes::sha256;
@@ -97,6 +98,48 @@ pub struct Bolt12InvoiceRequest {
     pub gateway_fee: Amount,
 }
 
+/// Requests being issued, by request hash.
+static ISSUING: LazyLock<std::sync::Mutex<HashMap<sha256::Hash, Arc<futures::lock::Mutex<()>>>>> =
+    LazyLock::new(Default::default);
+
+/// Exclusive issuance of one invoice request.
+struct IssuingLock {
+    request_hash: sha256::Hash,
+    guard: Option<futures::lock::OwnedMutexGuard<()>>,
+}
+
+impl IssuingLock {
+    async fn acquire(request_hash: sha256::Hash) -> Self {
+        let lock = ISSUING
+            .lock()
+            .expect("not poisoned")
+            .entry(request_hash)
+            .or_default()
+            .clone();
+
+        Self {
+            request_hash,
+            guard: Some(lock.lock_owned().await),
+        }
+    }
+}
+
+impl Drop for IssuingLock {
+    fn drop(&mut self) {
+        let mut issuing = ISSUING.lock().expect("not poisoned");
+
+        drop(self.guard.take());
+
+        // Only the map holds the lock now unless another request waits.
+        if issuing
+            .get(&self.request_hash)
+            .is_some_and(|lock| Arc::strong_count(lock) == 1)
+        {
+            issuing.remove(&self.request_hash);
+        }
+    }
+}
+
 fn receive_operation_id(reservation: ReservationId) -> OperationId {
     OperationId::from_encodable(&("fedimint/bolt12/gateway-receive/v1", reservation))
 }
@@ -127,6 +170,10 @@ impl GatewayClientModuleV2 {
         let request_hash: sha256::Hash =
             ("fedimint/bolt12/issued/v1", &request.invoice_request).consensus_hash();
         let db = self.client_ctx.module_db();
+
+        // A repeated request waits for the first and then finds its invoice,
+        // instead of reserving a second payment hash.
+        let _issuing = IssuingLock::acquire(request_hash).await;
 
         if let Some(invoice) = db
             .begin_transaction_nc()

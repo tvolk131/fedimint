@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, ensure};
 use fedimint_core::db::{Database, DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
+use fedimint_core::secp256k1::PublicKey;
 use fedimint_lnv2_common::bolt12::invoice::{Issuer, Terms, signing_digest, unsigned_invoice};
 use fedimint_lnv2_common::bolt12::{
     NonceRequest, NonceResponse, ReservationId, SignRequest, quorum,
@@ -25,6 +26,12 @@ use crate::db::{Bolt12NonceCountKey, Bolt12NonceKey, Bolt12RegistrationKey, Bolt
 
 /// Nonces held in memory at once, across all reservations.
 const MAX_TICKETS: usize = 64;
+/// Nonces held at once for one gateway's reservations, so one gateway that
+/// never finishes signing cannot crowd out the others.
+const MAX_TICKETS_PER_GATEWAY: usize = 16;
+/// Nonces held at once for one reservation. A gateway needs one; a second
+/// covers a retry while the first is outstanding.
+const MAX_TICKETS_PER_RESERVATION: usize = 2;
 /// Nonces ever issued for one reservation, surviving restarts.
 const MAX_ATTEMPTS: u16 = 16;
 /// Upper bound on a serialized signing package.
@@ -34,6 +41,7 @@ const MAX_PACKAGE_BYTES: usize = 16_384;
 pub type TicketId = (ReservationId, [u8; 32]);
 
 struct Ticket {
+    gateway: PublicKey,
     expires_at: u64,
     digest: [u8; 32],
     nonces: frost::round1::SigningNonces,
@@ -54,6 +62,7 @@ impl std::fmt::Debug for Signer {
 /// What a guardian agreed to sign for a reservation.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct Approval {
+    pub gateway: PublicKey,
     pub digest: [u8; 32],
     pub expires_at: u64,
 }
@@ -101,6 +110,7 @@ pub async fn approve(
     )?;
 
     Ok(Approval {
+        gateway: reservation.gateway,
         digest: signing_digest(&invoice),
         expires_at: reservation.expires_at(),
     })
@@ -131,14 +141,43 @@ impl Signer {
             });
         }
 
+        let mut dbtx = db.begin_transaction().await;
+
+        // Nonces for reservations that were funded since are of no use.
+        if self.tickets.len() >= MAX_TICKETS
+            || self.gateway_tickets(approval.gateway) >= MAX_TICKETS_PER_GATEWAY
+        {
+            let mut stale = vec![];
+
+            for ticket_id in self.tickets.keys() {
+                if dbtx
+                    .get_value(&Bolt12ReservationKey(ticket_id.0))
+                    .await
+                    .is_none()
+                {
+                    stale.push(*ticket_id);
+                }
+            }
+
+            for ticket_id in stale {
+                self.tickets.remove(&ticket_id);
+            }
+        }
+
         ensure!(
             self.tickets.len() < MAX_TICKETS,
             "invoice signing capacity reached"
         );
+        ensure!(
+            self.gateway_tickets(approval.gateway) < MAX_TICKETS_PER_GATEWAY,
+            "invoice signing capacity for this gateway reached"
+        );
+        ensure!(
+            self.tickets.keys().filter(|(r, _)| *r == id.0).count() < MAX_TICKETS_PER_RESERVATION,
+            "too many signing attempts in progress for this reservation"
+        );
 
         let key = key_package(cfg)?;
-
-        let mut dbtx = db.begin_transaction().await;
 
         let attempts = dbtx
             .get_value(&Bolt12NonceCountKey(id.0))
@@ -169,6 +208,7 @@ impl Signer {
         self.tickets.insert(
             id,
             Ticket {
+                gateway: approval.gateway,
                 expires_at: approval.expires_at,
                 digest: approval.digest,
                 nonces,
@@ -177,6 +217,13 @@ impl Signer {
         );
 
         Ok(response)
+    }
+
+    fn gateway_tickets(&self, gateway: PublicKey) -> usize {
+        self.tickets
+            .values()
+            .filter(|ticket| ticket.gateway == gateway)
+            .count()
     }
 
     /// Produce our signature share for the digest we approved in round one.

@@ -3937,7 +3937,7 @@ dependencies = [
 [[package]]
 name = "fedimint-ldk-node"
 version = "0.7.1"
-source = "git+https://github.com/tvolk131/ldk-node?rev=d4949dbca696869061fc3da6853c5a4a9500a83d#d4949dbca696869061fc3da6853c5a4a9500a83d"
+source = "git+https://github.com/tvolk131/ldk-node?rev=dadc034db5230204c000d17c25c6679e747e2de3#dadc034db5230204c000d17c25c6679e747e2de3"
 dependencies = [
  "base64 0.22.1",
  "bdk_chain",

@@ -65,6 +65,8 @@ pub struct FakeLightningTest {
     /// payment sent before a state machine restart from one that never left
     /// the gateway.
     outbound_payments: Mutex<HashSet<sha256::Hash>>,
+    /// Every response the gateway sent for a held payment, in order.
+    completed_htlcs: Mutex<Vec<InterceptPaymentResponse>>,
 }
 
 impl FakeLightningTest {
@@ -79,7 +81,13 @@ impl FakeLightningTest {
             gateway_node_pub_key: PublicKey::from_keypair(&kp),
             amount_sent,
             outbound_payments: Mutex::new(HashSet::new()),
+            completed_htlcs: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The responses the gateway sent for held payments, in order.
+    pub fn completed_htlcs(&self) -> Vec<InterceptPaymentResponse> {
+        self.completed_htlcs.lock().expect("Not poisoned").clone()
     }
 
     fn record_outbound_payment(&self, payment_hash: sha256::Hash) {
@@ -256,10 +264,12 @@ impl ILnRpcClient for FakeLightningTest {
         Ok((stream, Arc::new(Self::new())))
     }
 
-    async fn complete_htlc(
-        &self,
-        _htlc: InterceptPaymentResponse,
-    ) -> Result<(), LightningRpcError> {
+    async fn complete_htlc(&self, htlc: InterceptPaymentResponse) -> Result<(), LightningRpcError> {
+        self.completed_htlcs
+            .lock()
+            .expect("Not poisoned")
+            .push(htlc);
+
         Ok(())
     }
 

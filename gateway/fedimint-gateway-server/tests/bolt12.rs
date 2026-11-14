@@ -2,7 +2,7 @@
 //! recipient's claim when the payment arrives, against a four-guardian test
 //! federation and the fake Lightning node.
 
-use std::sync::Once;
+use std::sync::{Arc, Once};
 
 use anyhow::{Context as _, Result, ensure};
 use bitcoin::hashes::{Hash as _, sha256};
@@ -19,7 +19,7 @@ use fedimint_dummy_server::DummyInit;
 use fedimint_gateway_server::Gateway;
 use fedimint_gwv2_client::GatewayClientModuleV2;
 use fedimint_lightning::bolt12::Bolt12Request;
-use fedimint_lightning::{InterceptPaymentRequest, NO_INCOMING_CIRCUIT};
+use fedimint_lightning::{InterceptPaymentRequest, NO_INCOMING_CIRCUIT, PaymentAction};
 use fedimint_lnv2_client::api::LightningFederationApi as _;
 use fedimint_lnv2_client::bolt12::Bolt12OfferParams;
 use fedimint_lnv2_client::{LightningClientInit, LightningClientModule};
@@ -27,6 +27,7 @@ use fedimint_lnv2_common::endpoint_constants::BOLT12_SET_GATEWAY_VOTE_ENDPOINT;
 use fedimint_lnv2_common::gateway_api::PaymentFee;
 use fedimint_testing::federation::FederationTest;
 use fedimint_testing::fixtures::Fixtures;
+use fedimint_testing::ln::FakeLightningTest;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::inbound_payment::ExpandedKey;
 use lightning::offers::invoice::Bolt12Invoice;
@@ -181,7 +182,10 @@ async fn await_balance_at_least(client: &ClientHandleArc, amount: Amount) -> Res
 async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()> {
     let fixtures = fixtures();
     let fed = fixtures.new_fed_not_degraded().await;
-    let gateway = fixtures.new_gateway().await;
+    let lightning_node = Arc::new(FakeLightningTest::new());
+    let gateway = fixtures
+        .new_gateway_with_lightning(lightning_node.clone())
+        .await;
 
     fed.connect_gateway(&gateway).await;
 
@@ -245,6 +249,16 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
     let lightning_context = gateway.get_lightning_context().await?;
     let gateway_balance = gateway_client.get_balance_for_btc().await?;
 
+    let payment_hash = sha256::Hash::from_byte_array(invoice.payment_hash().0);
+    let responses = || {
+        lightning_node
+            .completed_htlcs()
+            .into_iter()
+            .filter(|response| response.payment_hash == payment_hash)
+            .map(|response| response.action)
+            .collect::<Vec<_>>()
+    };
+
     // A payment that is short of the invoice is failed back unfunded.
     assert_eq!(
         gateway
@@ -256,6 +270,7 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
         "bolt12"
     );
     assert_eq!(gateway_client.get_balance_for_btc().await?, gateway_balance);
+    assert!(matches!(responses().as_slice(), [PaymentAction::Cancel]));
 
     // So is one that leaves too little time before its claim deadline to
     // settle safely.
@@ -271,6 +286,10 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
         "bolt12"
     );
     assert_eq!(gateway_client.get_balance_for_btc().await?, gateway_balance);
+    assert!(matches!(
+        responses().as_slice(),
+        [PaymentAction::Cancel, PaymentAction::Cancel]
+    ));
 
     // The exact payment funds the recipient's claim, which the online wallet
     // picks up from the receive stream.
@@ -287,6 +306,27 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
     await_balance_at_least(&wallet, balance_before_receive + sats(4_000)).await?;
 
     assert!(gateway_client.get_balance_for_btc().await? < gateway_balance);
+
+    // The gateway settles the Lightning payment with the released preimage.
+    retry(
+        "settlement",
+        backoff_util::aggressive_backoff_long(),
+        || async {
+            match responses().as_slice() {
+                [
+                    PaymentAction::Cancel,
+                    PaymentAction::Cancel,
+                    PaymentAction::Settle(preimage),
+                ] => {
+                    ensure!(sha256::Hash::hash(&preimage.0) == payment_hash);
+
+                    Ok(())
+                }
+                other => anyhow::bail!("responses so far: {other:?}"),
+            }
+        },
+    )
+    .await?;
 
     // A payment for a hash the gateway never issued is not taken for BOLT12.
     let unknown = InterceptPaymentRequest {

@@ -50,14 +50,15 @@ All state is in indexed tables; nothing is stored as one aggregate value.
 |---|---|---|
 | Registration | `RegistrationId` | `Registration` |
 | Handle index | `handle: [u8; 32]` | `RegistrationId` |
-| Recipient index | `claim_pk` | `RegistrationId` |
+| Recipient index | `claim_pk` | `RegistrationId`; kept after pruning |
 | Expiry index | `(expires_at, RegistrationId)` | `()` |
 | Stock | `(RegistrationId, index: u64)` | `StockItem` |
 | Payment hash index | `payment_hash` | `()` |
 | Reservation | `ReservationId` | `Reservation` |
 | Offer pending list | `RegistrationId` | `Vec<Pending>` (bounded) |
 | Gateway pending list | gateway key | `Vec<Pending>` (bounded) |
-| Gateway vote | `(gateway key, PeerId)` | `bool` |
+| Gateway approval | `(gateway key, PeerId)` | `true`; only approvals are stored |
+| Approval count | `PeerId` | `u64` |
 | Receive contract | `OutPoint` | `ReceiveContract` |
 | Receive stream | `u64` | `OutPoint` |
 | Decryption shares | `OutPoint` | `Vec<DecryptionKeyShare>`, one per ciphertext |
@@ -131,7 +132,10 @@ Outputs (`LightningOutputV0`):
   unexpired policy with `expires_at` at most one year ahead, an unused handle and
   claim key, and fewer than `MAX_REGISTRATIONS` live registrations. Costs
   `registration_fee`. Processing first deletes up to a fixed number of expired
-  registrations (and their unused stock) found through the expiry index.
+  registrations (and their unused stock) found through the expiry index. A
+  pruned registration's claim key stays in the recipient index: it can never
+  be registered again, and a wallet restored from its seed uses it to tell
+  which offer indices it has used.
 - `Bolt12AddStock { registration, start, items, signature }`. Signed by
   `claim_pk`. `start` must equal `stock_len`, `items` holds 1 to 64 entries, each
   ciphertext must verify against its binding, each payment hash must be new
@@ -191,6 +195,9 @@ instead.
 - Paid receives leave the lists immediately, so only unpaid requests consume
   allowance.
 - Guardians can withdraw their vote for a gateway that abuses its allowance.
+  Each guardian approves at most `MAX_APPROVALS_PER_GUARDIAN` (256) gateways
+  at once, and a withdrawn approval is deleted, so votes cannot grow state
+  without bound.
 
 ## Invoice signing
 
@@ -208,7 +215,10 @@ Signing is outside consensus and needs only a quorum.
    of that canonical invoice. Nonces live in memory, each is used once, and a
    durable marker is written before a commitment or share is returned. A
    restarted guardian cannot resume old attempts. Attempts per reservation are
-   capped.
+   capped at 16 in total and 2 at a time. Each guardian holds at most 64
+   nonces, at most 16 of them for one gateway, and reclaims those of
+   reservations that were funded, so a gateway that never finishes signing
+   cannot crowd out the others.
 
 If a gateway pins terms that guardians reject, no invoice exists and the stock
 item is burned against that gateway's allowance.
@@ -338,7 +348,11 @@ consensus only releases decryption shares once a receive is funded.
   retry. Requests share the gateway's invoice rate limit.
 - A held payment is matched against every connected federation's issued
   BOLT12 invoices by payment hash, after LNv2 and before LNv1. A payment whose
-  amount differs from the invoice is failed back unfunded.
+  amount differs from the invoice is failed back unfunded. The gateway never
+  issues invoices with one payment hash for two federations, so a federation
+  cannot copy another's published hash to capture its payments.
+- Identical invoice requests are issued one at a time; a repeat waits for the
+  first and returns its invoice rather than reserving a second hash.
 - Payment paths ask payers for a 144-block final CLTV delta. A blinded path's
   delta lives in its payinfo and cannot be enforced by the receiving node, so
   the gateway funds a claim only if the held HTLC leaves at least 36 blocks

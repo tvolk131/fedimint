@@ -12,13 +12,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use fedimint_api_client::api::FederationResult;
+use fedimint_client_module::OperationAlreadyExistsError;
 use fedimint_client_module::transaction::{ClientOutput, ClientOutputBundle, TransactionBuilder};
 use fedimint_core::bitcoin::hashes::sha256;
 use fedimint_core::core::OperationId;
 use fedimint_core::db::IDatabaseTransactionOpsCoreTyped;
 use fedimint_core::module::{Amounts, CommonModuleInit};
 use fedimint_core::secp256k1::{Keypair, PublicKey, SECP256K1};
-use fedimint_core::util::SafeUrl;
+use fedimint_core::util::{FmtCompact as _, SafeUrl};
 use fedimint_core::{Amount, runtime};
 use fedimint_derive_secret::{ChildId, DerivableSecret};
 use fedimint_lnv2_common::bolt12::invoice::{offer_hash, routing_metadata};
@@ -397,7 +398,10 @@ impl LightningClientModule {
     }
 
     /// Find offers this wallet registered before its database was lost, by
-    /// probing the federation for the claim keys of unused indices.
+    /// probing the federation for the claim keys of unused indices. The
+    /// federation remembers every claim key ever registered, so offers that
+    /// have since expired still mark their index as used and do not open a
+    /// gap that would hide later ones.
     pub(crate) async fn recover_bolt12_offers(&self) -> FederationResult<()> {
         let mut next = self
             .client_ctx
@@ -431,6 +435,14 @@ impl LightningClientModule {
                     },
                 )
                 .await;
+                dbtx.insert_entry(&Bolt12NextOfferIndexKey, &(index + 1))
+                    .await;
+                dbtx.commit_tx().await;
+
+                next = index + 1;
+            } else if self.module_api.bolt12_recipient_used(claim_pk).await? {
+                let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
+
                 dbtx.insert_entry(&Bolt12NextOfferIndexKey, &(index + 1))
                     .await;
                 dbtx.commit_tx().await;
@@ -489,21 +501,57 @@ impl LightningClientModule {
             .await;
 
         let claim_keys = self.bolt12_claim_keys().await;
+        let mut claims = vec![];
 
         for receive in receives {
-            if let Some(offer_index) = claim_keys.get(&receive.contract.claim_pk) {
-                self.claim_bolt12_receive(*offer_index, receive).await;
+            if let Some(offer_index) = claim_keys.get(&receive.contract.claim_pk)
+                && let Some(claim) = self.prepare_bolt12_claim(*offer_index, receive).await
+            {
+                claims.push(claim);
             }
         }
 
+        // The claims and the cursor move together: a receive is never passed
+        // over without its claim operation being stored.
         let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
+
+        for (operation_id, meta, state_machine) in claims {
+            // An existing operation means the batch was processed before.
+            let _: Result<(), OperationAlreadyExistsError> = self
+                .client_ctx
+                .manual_operation_start_dbtx(
+                    &mut dbtx.to_ref_nc(),
+                    operation_id,
+                    LightningCommonInit::KIND.as_str(),
+                    meta,
+                    vec![self.client_ctx.make_dyn_state(state_machine)],
+                )
+                .await;
+        }
 
         dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &next_index)
             .await;
-        dbtx.commit_tx().await;
+
+        if let Err(err) = dbtx.commit_tx_result().await {
+            warn!(
+                target: LOG_CLIENT_MODULE_LNV2,
+                err = %err.fmt_compact(),
+                "Could not store BOLT12 claims; retrying the batch"
+            );
+        }
     }
 
-    async fn claim_bolt12_receive(&self, offer_index: u64, receive: StreamedReceive) {
+    /// The claim operation for a receive to one of our offers, or `None` if
+    /// we cannot or should not claim it.
+    async fn prepare_bolt12_claim(
+        &self,
+        offer_index: u64,
+        receive: StreamedReceive,
+    ) -> Option<(
+        OperationId,
+        LightningOperationMeta,
+        LightningClientStateMachines,
+    )> {
         let Some(unlock) = self.bolt12_unlock(offer_index, &receive).await else {
             warn!(
                 target: LOG_CLIENT_MODULE_LNV2,
@@ -511,7 +559,7 @@ impl LightningClientModule {
                 "Ignoring BOLT12 receive whose preimage we cannot release"
             );
 
-            return;
+            return None;
         };
 
         let premium = self
@@ -530,7 +578,7 @@ impl LightningClientModule {
                 "Ignoring BOLT12 receive, its amount does not cover the claim fee"
             );
 
-            return;
+            return None;
         }
 
         let operation_id = bolt12_receive_operation_id(&receive);
@@ -544,20 +592,14 @@ impl LightningClientModule {
                 state: Bolt12ReceiveSMState::Pending,
             });
 
-        // This only fails if the operation already exists, which makes
-        // processing a stream batch twice harmless.
-        self.client_ctx
-            .manual_operation_start(
-                operation_id,
-                LightningCommonInit::KIND.as_str(),
-                LightningOperationMeta::Bolt12Receive(Bolt12ReceiveOperationMeta {
-                    offer_index,
-                    receive,
-                }),
-                vec![self.client_ctx.make_dyn_state(state_machine)],
-            )
-            .await
-            .ok();
+        Some((
+            operation_id,
+            LightningOperationMeta::Bolt12Receive(Bolt12ReceiveOperationMeta {
+                offer_index,
+                receive,
+            }),
+            state_machine,
+        ))
     }
 }
 

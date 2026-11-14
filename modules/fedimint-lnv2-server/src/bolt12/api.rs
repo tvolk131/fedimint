@@ -16,8 +16,9 @@ use fedimint_lnv2_common::endpoint_constants::{
     BOLT12_AWAIT_RECEIVES_ENDPOINT, BOLT12_CONTRACT_ENDPOINT, BOLT12_DECRYPTION_SHARES_ENDPOINT,
     BOLT12_GATEWAY_APPROVED_ENDPOINT, BOLT12_MPC_ENDPOINT, BOLT12_MPC_EVIDENCE_ENDPOINT,
     BOLT12_NEXT_POOL_ENDPOINT, BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_NONCE_ENDPOINT,
-    BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT, BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT,
-    BOLT12_RESERVATION_ENDPOINT, BOLT12_SET_GATEWAY_VOTE_ENDPOINT, BOLT12_SIGN_ENDPOINT,
+    BOLT12_RECIPIENT_USED_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
+    BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT, BOLT12_RESERVATION_ENDPOINT,
+    BOLT12_SET_GATEWAY_VOTE_ENDPOINT, BOLT12_SIGN_ENDPOINT,
 };
 use futures::StreamExt;
 use tpe::DecryptionKeyShare;
@@ -90,6 +91,19 @@ impl Lightning {
                     let id = db.begin_transaction_nc().await.get_value(&Bolt12RecipientKey(claim_pk)).await;
 
                     Ok(registration(&db, id).await)
+                }
+            },
+            public_api_endpoint! {
+                BOLT12_RECIPIENT_USED_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |_module: &Lightning, context, claim_pk: PublicKey| -> bool {
+                    Ok(context
+                        .db()
+                        .begin_transaction_nc()
+                        .await
+                        .get_value(&Bolt12RecipientKey(claim_pk))
+                        .await
+                        .is_some())
                 }
             },
             public_api_endpoint! {

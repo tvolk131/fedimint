@@ -67,6 +67,7 @@ pub enum DbKeyPrefix {
     Bolt12Dispute = 0x3d,
     Bolt12PoolTranscript = 0x3e,
     Bolt12PoolLocalVerdict = 0x3f,
+    Bolt12GatewayApprovalCount = 0x40,
 }
 
 impl std::fmt::Display for DbKeyPrefix {
@@ -429,12 +430,15 @@ impl_db_record!(
     db_prefix = DbKeyPrefix::Bolt12GatewayPending,
 );
 
-/// A guardian's latest consensus vote on a gateway.
+/// A guardian's approval of a gateway. Only approvals are stored.
 #[derive(Debug, Clone, Encodable, Decodable)]
 pub struct Bolt12GatewayVoteKey(pub PublicKey, pub PeerId);
 
 #[derive(Debug, Encodable, Decodable)]
 pub struct Bolt12GatewayVoteGatewayPrefix(pub PublicKey);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12GatewayVotePrefix;
 
 impl_db_record!(
     key = Bolt12GatewayVoteKey,
@@ -444,7 +448,8 @@ impl_db_record!(
 
 impl_db_lookup!(
     key = Bolt12GatewayVoteKey,
-    query_prefix = Bolt12GatewayVoteGatewayPrefix
+    query_prefix = Bolt12GatewayVoteGatewayPrefix,
+    query_prefix = Bolt12GatewayVotePrefix
 );
 
 /// The vote this guardian's operator asked for. Local, not consensus state.
@@ -756,4 +761,14 @@ impl_db_record!(
 impl_db_lookup!(
     key = Bolt12PoolLocalVerdictKey,
     query_prefix = Bolt12PoolLocalVerdictPrefix
+);
+
+/// How many gateways each guardian currently approves.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12GatewayApprovalCountKey(pub PeerId);
+
+impl_db_record!(
+    key = Bolt12GatewayApprovalCountKey,
+    value = u64,
+    db_prefix = DbKeyPrefix::Bolt12GatewayApprovalCount,
 );

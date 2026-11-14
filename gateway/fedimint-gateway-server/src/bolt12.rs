@@ -3,8 +3,8 @@
 //!
 //! See `docs/federated_bolt12.md` for the protocol.
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, ensure};
@@ -64,6 +64,27 @@ struct InProgressGuard(Arc<InProgress>, sha256::Hash);
 impl Drop for InProgressGuard {
     fn drop(&mut self) {
         self.0.0.lock().expect("not poisoned").remove(&self.1);
+    }
+}
+
+/// Payment hashes whose invoices are being issued, by federation.
+///
+/// A held payment is matched to a federation by its hash, so one hash must
+/// never be issued for two federations: a federation could otherwise copy a
+/// hash another one published and have the payment fund its own claim. Once
+/// issued, the hash is recorded with its federation's reservation, which
+/// [`Gateway::claim_bolt12_hash`] checks too.
+static ISSUING: LazyLock<Mutex<HashMap<sha256::Hash, FederationId>>> =
+    LazyLock::new(Mutex::default);
+
+/// Releases a payment hash from [`ISSUING`] when issuance ends.
+struct IssuingGuard(Arc<Mutex<Option<sha256::Hash>>>);
+
+impl Drop for IssuingGuard {
+    fn drop(&mut self) {
+        if let Some(hash) = self.0.lock().expect("not poisoned").take() {
+            ISSUING.lock().expect("not poisoned").remove(&hash);
+        }
     }
 }
 
@@ -210,20 +231,29 @@ impl Gateway {
         let client = self.select_client(federation_id).await?;
         let module = client.value().get_first_module::<GatewayClientModuleV2>()?;
 
+        let issuing = IssuingGuard(Arc::default());
+
         let payment_path = |payment_hash: [u8; 32]| {
             let lnrpc = lnrpc.clone();
             let invoice_request = invoice_request.clone();
+            let claimed = issuing.0.clone();
 
             async move {
+                let payment_hash = sha256::Hash::from_byte_array(payment_hash);
+
+                self.claim_bolt12_hash(federation_id, payment_hash).await?;
+
+                // A retry with the next stock item claims its own hash.
+                if let Some(previous) = claimed.lock().expect("not poisoned").replace(payment_hash)
+                    && previous != payment_hash
+                {
+                    ISSUING.lock().expect("not poisoned").remove(&previous);
+                }
+
                 // The handle labels the payment in the node's records; the
                 // node has no offer of its own to name.
                 lnrpc
-                    .register_bolt12_payment(
-                        sha256::Hash::from_byte_array(payment_hash),
-                        amount,
-                        &invoice_request,
-                        handle,
-                    )
+                    .register_bolt12_payment(payment_hash, amount, &invoice_request, handle)
                     .await
                     .map_err(anyhow::Error::from)
             }
@@ -242,6 +272,42 @@ impl Gateway {
             .await?;
 
         request.respond(invoice)?;
+
+        Ok(())
+    }
+
+    /// Reserve `payment_hash` for issuing an invoice for `federation_id`, or
+    /// fail if another federation is issuing or has issued one for it.
+    async fn claim_bolt12_hash(
+        &self,
+        federation_id: FederationId,
+        payment_hash: sha256::Hash,
+    ) -> anyhow::Result<()> {
+        for client in self.federation_manager.read().await.clients() {
+            let Ok(module) = client.value().get_first_module::<GatewayClientModuleV2>() else {
+                continue;
+            };
+
+            ensure!(
+                module.federation_id == federation_id
+                    || module
+                        .bolt12_reservation_for_hash(payment_hash)
+                        .await
+                        .is_none(),
+                "Another federation already issued an invoice for this payment hash"
+            );
+        }
+
+        let mut issuing = ISSUING.lock().expect("not poisoned");
+
+        ensure!(
+            issuing
+                .get(&payment_hash)
+                .is_none_or(|issuer| *issuer == federation_id),
+            "Another federation is issuing an invoice for this payment hash"
+        );
+
+        issuing.insert(payment_hash, federation_id);
 
         Ok(())
     }

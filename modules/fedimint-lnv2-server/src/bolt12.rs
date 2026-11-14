@@ -28,11 +28,11 @@ use futures::StreamExt;
 
 use crate::db::{
     Bolt12ContractIndexKey, Bolt12ContractKey, Bolt12DecryptionSharesKey, Bolt12ExpiryKey,
-    Bolt12ExpiryPrefix, Bolt12GatewayPendingKey, Bolt12GatewayVoteGatewayPrefix,
-    Bolt12GatewayVoteKey, Bolt12HandleKey, Bolt12OfferPendingKey, Bolt12PaymentHashKey,
-    Bolt12PoolItemKey, Bolt12PoolPendingKey, Bolt12RecipientKey, Bolt12RegistrationCountKey,
-    Bolt12RegistrationKey, Bolt12ReservationKey, Bolt12StockKey, Bolt12StockRegistrationPrefix,
-    Bolt12StreamIndexKey, Bolt12StreamKey,
+    Bolt12ExpiryPrefix, Bolt12GatewayApprovalCountKey, Bolt12GatewayPendingKey,
+    Bolt12GatewayVoteGatewayPrefix, Bolt12GatewayVoteKey, Bolt12HandleKey, Bolt12OfferPendingKey,
+    Bolt12PaymentHashKey, Bolt12PoolItemKey, Bolt12PoolPendingKey, Bolt12RecipientKey,
+    Bolt12RegistrationCountKey, Bolt12RegistrationKey, Bolt12ReservationKey, Bolt12StockKey,
+    Bolt12StockRegistrationPrefix, Bolt12StreamIndexKey, Bolt12StreamKey,
 };
 
 /// What an accepted output moves and costs.
@@ -174,8 +174,10 @@ async fn prune_expired_registrations(dbtx: &mut DatabaseTransaction<'_>, now: u6
 
         dbtx.remove_entry(&Bolt12HandleKey(registration.policy.handle))
             .await;
-        dbtx.remove_entry(&Bolt12RecipientKey(registration.policy.claim_pk))
-            .await;
+
+        // The recipient index outlives the registration: claim keys are
+        // never reused, and a wallet restored from its seed finds which offer
+        // indices it used by them.
 
         let stock = dbtx
             .find_by_prefix(&Bolt12StockRegistrationPrefix(id))
@@ -626,6 +628,9 @@ pub async fn process_input(
     })
 }
 
+/// The most gateways one guardian may approve at once.
+pub const MAX_APPROVALS_PER_GUARDIAN: u64 = 256;
+
 /// Record a guardian's vote. Repeating the stored vote is rejected so it is
 /// not ordered again.
 pub async fn process_gateway_vote(
@@ -640,12 +645,35 @@ pub async fn process_gateway_vote(
         "federated BOLT12 is disabled"
     );
 
-    let previous = dbtx
-        .insert_entry(&Bolt12GatewayVoteKey(gateway, peer), &approve)
-        .await
-        .unwrap_or(false);
+    let count_key = Bolt12GatewayApprovalCountKey(peer);
+    let count = dbtx.get_value(&count_key).await.unwrap_or(0);
 
-    ensure!(previous != approve, "gateway vote is redundant");
+    // Only approvals are stored, so withdrawn and never-approved gateways
+    // leave nothing behind, and each guardian's approvals are bounded.
+    if approve {
+        ensure!(
+            count < MAX_APPROVALS_PER_GUARDIAN,
+            "the guardian approves too many gateways"
+        );
+        ensure!(
+            dbtx.insert_entry(&Bolt12GatewayVoteKey(gateway, peer), &true)
+                .await
+                .is_none(),
+            "gateway vote is redundant"
+        );
+
+        dbtx.insert_entry(&count_key, &(count + 1)).await;
+    } else {
+        ensure!(
+            dbtx.remove_entry(&Bolt12GatewayVoteKey(gateway, peer))
+                .await
+                .is_some(),
+            "gateway vote is redundant"
+        );
+
+        dbtx.insert_entry(&count_key, &count.saturating_sub(1))
+            .await;
+    }
 
     Ok(())
 }

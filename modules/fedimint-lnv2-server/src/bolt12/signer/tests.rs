@@ -539,7 +539,15 @@ async fn guardians_refuse_invoices_the_recipient_did_not_register() -> Result<()
 }
 
 fn approval(digest: [u8; 32]) -> Approval {
+    approval_for(
+        PublicKey::from_secret_key(SECP256K1, &SecretKey::from_slice(&[1; 32]).expect("valid")),
+        digest,
+    )
+}
+
+fn approval_for(gateway: PublicKey, digest: [u8; 32]) -> Approval {
     Approval {
+        gateway,
         digest,
         expires_at: NOW + INVOICE_LIFETIME,
     }
@@ -738,6 +746,9 @@ async fn the_attempt_budget_survives_a_restart() -> Result<()> {
                 NOW,
             )
             .await?;
+
+        // Each attempt's nonce is used or lost before the next one starts.
+        signer.tickets.clear();
     }
 
     assert!(
@@ -764,6 +775,122 @@ async fn the_attempt_budget_survives_a_restart() -> Result<()> {
         .await?;
 
     assert_eq!(signer.tickets.len(), 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_gateway_cannot_take_all_signing_capacity() -> Result<()> {
+    let scenario = Scenario::new()?;
+    let cfg = &scenario.cfgs[&PeerId::from(0)];
+    let db = scenario.database().await;
+    let mut signer = Signer::default();
+    let gateway = scenario.gateway.public_key();
+
+    // Live reservations of one gateway.
+    let reservations: Vec<ReservationId> = (0..10u8)
+        .map(|i| ReservationId(sha256::Hash::hash(&[i])))
+        .collect();
+
+    let mut dbtx = db.begin_transaction().await;
+
+    for id in &reservations {
+        dbtx.insert_entry(&Bolt12ReservationKey(*id), &scenario.reservation)
+            .await;
+    }
+
+    dbtx.commit_tx().await;
+
+    // At most two attempts are open per reservation.
+    signer
+        .prepare(
+            cfg,
+            &db,
+            (reservations[0], [0; 32]),
+            approval_for(gateway, [7; 32]),
+            NOW,
+        )
+        .await?;
+    signer
+        .prepare(
+            cfg,
+            &db,
+            (reservations[0], [1; 32]),
+            approval_for(gateway, [7; 32]),
+            NOW,
+        )
+        .await?;
+
+    assert!(
+        signer
+            .prepare(
+                cfg,
+                &db,
+                (reservations[0], [2; 32]),
+                approval_for(gateway, [7; 32]),
+                NOW
+            )
+            .await
+            .is_err()
+    );
+
+    // At most sixteen are open per gateway.
+    for id in &reservations[1..8] {
+        for attempt in 0..2u8 {
+            signer
+                .prepare(
+                    cfg,
+                    &db,
+                    (*id, [attempt; 32]),
+                    approval_for(gateway, [7; 32]),
+                    NOW,
+                )
+                .await?;
+        }
+    }
+
+    assert!(
+        signer
+            .prepare(
+                cfg,
+                &db,
+                (reservations[8], [0; 32]),
+                approval_for(gateway, [7; 32]),
+                NOW
+            )
+            .await
+            .is_err()
+    );
+
+    // Other gateways still get nonces.
+    let other = Keypair::new(SECP256K1, &mut OsRng).public_key();
+
+    signer
+        .prepare(
+            cfg,
+            &db,
+            (reservations[9], [0; 32]),
+            approval_for(other, [7; 32]),
+            NOW,
+        )
+        .await?;
+
+    // Once a reservation is funded its nonces are reclaimed.
+    let mut dbtx = db.begin_transaction().await;
+
+    dbtx.remove_entry(&Bolt12ReservationKey(reservations[1]))
+        .await;
+    dbtx.commit_tx().await;
+
+    signer
+        .prepare(
+            cfg,
+            &db,
+            (reservations[8], [0; 32]),
+            approval_for(gateway, [7; 32]),
+            NOW,
+        )
+        .await?;
 
     Ok(())
 }

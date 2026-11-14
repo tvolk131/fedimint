@@ -937,6 +937,7 @@ async fn registrations_are_validated() -> Result<()> {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One scenario, end to end.
 async fn expired_registrations_are_pruned_with_their_unused_stock() -> Result<()> {
     let mut fed = Federation::new();
     let key = Keypair::new(SECP256K1, &mut OsRng);
@@ -1011,13 +1012,27 @@ async fn expired_registrations_are_pruned_with_their_unused_stock() -> Result<()
 
     drop(dbtx);
 
-    // The pruned offer's key and handle can be registered again. Its unused
-    // hash can be uploaded again; the one that reached a reservation cannot.
-    let renewed = policy(&offer.key, after + 1_000);
+    // The pruned offer's claim key stays taken, so a restored wallet still
+    // sees that index as used; its handle is free again. Its unused hash can
+    // be uploaded again; the one that reached a reservation cannot.
+    assert!(
+        fed.apply(
+            Bolt12Output::Register(Register::new(policy(&offer.key, after + 1_000), &offer.key)),
+            after,
+        )
+        .await
+        .is_err()
+    );
+
+    let renewed_key = Keypair::new(SECP256K1, &mut OsRng);
+    let mut renewed = policy(&renewed_key, after + 1_000);
+
+    renewed.handle = offer.policy.handle;
+
     let renewed_id = renewed.id();
 
     fed.apply(
-        Bolt12Output::Register(Register::new(renewed, &offer.key)),
+        Bolt12Output::Register(Register::new(renewed, &renewed_key)),
         after,
     )
     .await?;
@@ -1040,7 +1055,7 @@ async fn expired_registrations_are_pruned_with_their_unused_stock() -> Result<()
                 renewed_id,
                 0,
                 vec![reserved_hash],
-                &offer.key
+                &renewed_key
             )),
             after,
         )
@@ -1049,7 +1064,12 @@ async fn expired_registrations_are_pruned_with_their_unused_stock() -> Result<()
     );
 
     fed.apply(
-        Bolt12Output::AddStock(AddStock::new(renewed_id, 0, vec![unused_hash], &offer.key)),
+        Bolt12Output::AddStock(AddStock::new(
+            renewed_id,
+            0,
+            vec![unused_hash],
+            &renewed_key,
+        )),
         after,
     )
     .await?;
@@ -1087,4 +1107,59 @@ async fn outputs_are_rejected_when_the_feature_is_disabled() {
 
     assert!(fed.apply(output, NOW).await.is_err());
     assert!(fed.vote(0, key.public_key(), true).await.is_err());
+}
+
+#[tokio::test]
+async fn gateway_votes_leave_no_rows_behind_and_are_bounded() -> Result<()> {
+    use futures::StreamExt as _;
+
+    use crate::db::{Bolt12GatewayVoteKey, Bolt12GatewayVotePrefix};
+
+    let fed = Federation::new();
+    let rows = || async {
+        fed.db
+            .begin_transaction_nc()
+            .await
+            .find_by_prefix(&Bolt12GatewayVotePrefix)
+            .await
+            .count()
+            .await
+    };
+
+    let gateway = gateway();
+
+    fed.vote(0, gateway.public_key(), true).await?;
+    fed.vote(0, gateway.public_key(), false).await?;
+
+    assert_eq!(rows().await, 0);
+
+    // A guardian cannot track fresh keys without bound.
+    for _ in 0..super::MAX_APPROVALS_PER_GUARDIAN {
+        fed.vote(1, Keypair::new(SECP256K1, &mut OsRng).public_key(), true)
+            .await?;
+    }
+
+    assert!(
+        fed.vote(1, Keypair::new(SECP256K1, &mut OsRng).public_key(), true)
+            .await
+            .is_err()
+    );
+
+    // Withdrawing one frees a slot.
+    let (key, _) = fed
+        .db
+        .begin_transaction_nc()
+        .await
+        .find_by_prefix(&Bolt12GatewayVotePrefix)
+        .await
+        .next()
+        .await
+        .expect("approvals exist");
+    let Bolt12GatewayVoteKey(approved, _) = key;
+
+    fed.vote(1, approved, false).await?;
+    fed.vote(1, Keypair::new(SECP256K1, &mut OsRng).public_key(), true)
+        .await?;
+
+    Ok(())
 }
