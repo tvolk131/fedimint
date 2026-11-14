@@ -285,10 +285,10 @@ impl ConsensusApi {
                 &transaction,
                 self.cfg.consensus.version,
                 TxProcessingMode::Submission,
-            fedimint_server_core::TransactionConsensusContext {
-                federation_id: self.cfg.calculate_federation_id(),
-                session_index: validation_session,
-            },
+                fedimint_server_core::TransactionConsensusContext {
+                    federation_id: self.cfg.calculate_federation_id(),
+                    session_index: validation_session,
+                },
             )
             .await
             .inspect_err(|err| {

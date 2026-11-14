@@ -862,9 +862,8 @@ where
                 Box::new(move |update| {
                     // The update was serialized from a `U` moments ago in this
                     // process, so deserialization only fails if `U` is not
-                    // round-trip-safe; treat that conservatively as
-                    // non-terminal (skip caching) rather
-                    // than panicking inside the stream.
+                    // round-trip-safe; treat that conservatively as non-terminal
+                    // (skip caching) rather than panicking inside the stream.
                     serde_json::from_value::<U>(update.clone())
                         .map(|update| is_terminal(&update))
                         .unwrap_or(false)
