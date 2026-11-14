@@ -2,12 +2,13 @@
 
 ## Current guidance
 
-- [Module protocol and limits](../fedimint-simplicity-common/README.md).
-- [Guardian and native SDK runbook](RUNBOOK.md): builds, fresh deployment,
-  recovery, backup/restoration and operational diagnostics.
-- [Beta checklist](BETA-CHECKLIST.md): open gates for the chosen candidate.
-- [Test layers and release checks](../fedimint-simplicity-server/TESTING.md).
-- [Resource harness methodology](../fedimint-simplicity-server/benches/resources/README.md).
+- [Module README](../../../modules/fedimint-simplicity-common/README.md):
+  protocol, API, limits, test layers and release checks.
+- [Operator runbook](../../../modules/fedimint-simplicity-client/RUNBOOK.md):
+  builds, fresh deployment, recovery, backup/restoration and diagnostics.
+- [Beta checklist](beta-checklist.md): open gates for the chosen candidate.
+- [Resource harness methodology](../../../modules/fedimint-simplicity-server/benches/resources/README.md).
+- [October 2026 macOS AddressSanitizer notes](asan-macos-2026-10.md).
 
 The current candidate is a fresh execution-version-1 deployment on Fedimint
 v0.13.0, not a migration from disposable prototypes. It has not been publicly
@@ -120,8 +121,8 @@ bundles or expired artifacts.
 For new qualification, use the current checklist and release driver. Retain the
 exact source/lockfile/compiler and feature manifests, artifact checksums,
 workflow outcomes, test-selection inventories/results and exclusions outside
-build caches and expiring CI storage. Add a revision-bound record here rather
-than updating a historical result to sound current. Preserve guardian identities,
+build caches and expiring CI storage. Add a revision-bound record to this
+directory, linked from this index, rather than updating a historical result to sound current. Preserve guardian identities,
 databases, mnemonics, wallet material and credentials privately; public evidence
 must contain only safe reports and metadata.
 

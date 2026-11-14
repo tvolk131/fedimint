@@ -1,22 +1,16 @@
 # REQ-simplicity-recovery: Wallet and confirmed activity recovery
 
-## Status
-
-These are the agreed requirements for the persistent Simplicity wallet. The
-prototype implements a persistent client wallet using encrypted per-output
-descriptors and an ordered federation-history scan. Four-guardian tests discard
-the client database and recover holdings, authority ownership, spendability, and
-confirmed activity, including a fully drained wallet. The architecture is described in
-[ARCH-simplicity](ARCH-simplicity.md).
-
 ## Source and purpose
 
 The project owner requires recovery into the same wallet software using only
 the mnemonic and the original federation, without a separately maintained file
 or external backup service. Recovery must preserve confirmed contract activity,
 including interactions whose contracts have all been spent. These are product
-requirements; the encoding and retrieval mechanism may vary while preserving
-them.
+requirements for the persistent Simplicity wallet; the encoding and retrieval
+mechanism may vary while preserving them.
+[ARCH-simplicity](ARCH-simplicity.md#wallet-recovery) describes the current
+design, and the [module README](../modules/fedimint-simplicity-common/README.md#testing)
+maps the acceptance conditions below to tests.
 
 ## Recovery contract
 

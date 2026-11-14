@@ -2,10 +2,11 @@
 
 This checklist governs the fresh execution-version-1 candidate on Fedimint
 v0.13.0. There is no deployed prototype state to migrate and no public
-real-money release. Use test funds throughout. The [runbook](RUNBOOK.md)
-covers deployment and recovery; the
-[module documentation](../fedimint-simplicity-common/README.md) describes the
-protocol and limits. The [evidence index](EVIDENCE.md) preserves earlier
+real-money release. Use test funds throughout. The
+[runbook](../../../modules/fedimint-simplicity-client/RUNBOOK.md) covers
+deployment and recovery; the
+[module documentation](../../../modules/fedimint-simplicity-common/README.md)
+describes the protocol and limits. The [evidence index](evidence-index.md) preserves earlier
 release-line, Mac/Pi, CI and resource observations at their original revisions.
 Those results do not qualify this candidate or complete any box below.
 
@@ -50,16 +51,16 @@ material private.
   focused behavior/network checks, docs and guardian builds. Required filtered
   regressions must exist and execute. Record ignored/filtered coverage and do
   not claim full-workspace, live-backend, Pi or WASM qualification from the
-  [focused workflow](../fedimint-simplicity-server/TESTING.md#release-qualification).
+  [focused workflow](../../../modules/fedimint-simplicity-common/README.md#release-qualification).
 - [ ] **Qualify target resources and storage.** Repeat the
-  [resource benchmarks](../fedimint-simplicity-server/benches/resources/README.md)
+  [resource benchmarks](../../../modules/fedimint-simplicity-server/benches/resources/README.md)
   on the intended guardian hardware, including cold-cache and mixed admission/
   consensus traffic. Run sustained valid/invalid submissions with growing
   recovery history, including unpaid validation near policy deadlines and after
   spend paths reopen. Measure ordinary-payment latency, memory, disk writes/growth,
   checkpoint restoration and recovery. Record storage, cooling, competing
   workloads and the observation window.
-  [Earlier Mac measurements](EVIDENCE.md#resource-measurements) are not Pi 5,
+  [Earlier Mac measurements](evidence-index.md#resource-measurements) are not Pi 5,
   storage-endurance or full admission/consensus qualification. Select suitable
   deployment storage and a longer pilot window; bounded bursts do not establish
   saturated throughput or DoS immunity.
@@ -72,7 +73,7 @@ material private.
   Disposable prototype migration and rolling mixed-version upgrades are not
   release gates for this fresh deployment.
 - [ ] **Rehearse operator backup, restore and halt.** Assign operators and
-  validate the [backup/restore and halt procedures](RUNBOOK.md#backup-restoration-and-coordinated-halt)
+  validate the [backup/restore and halt procedures](../../../modules/fedimint-simplicity-client/RUNBOOK.md#backup-restoration-and-coordinated-halt)
   on candidate artifacts. Record off-host backup verification, guardian identity
   handling, authenticated-history retention, quorum/failure domains, restoration
   results and who authorizes reopening. Do not mark this complete from written
@@ -89,5 +90,5 @@ material private.
 Broader coverage-guided fuzzing and longer campaigns remain ongoing hardening;
 historical bounded native/ASan passes are not memory-safety or consensus proofs.
 Keep reproducible checks and necessary fixtures in the repository. Add new
-revision-bound evidence through the index rather than copying historical completed
+revision-bound evidence through the [index](evidence-index.md) rather than copying historical completed
 checkboxes or maintaining another release narrative.

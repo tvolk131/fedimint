@@ -1,18 +1,20 @@
 # Simplicity resource measurements
 
 This is a data-gathering harness, not a fee policy or a throughput guarantee.
-It does not change consensus limits, fees, or guardian execution. It uses Divan,
-as do existing Fedimint benchmarks. No benchmark is added to PR CI.
+It does not change the [consensus limits and fees](../../../fedimint-simplicity-common/src/limits.rs)
+or guardian execution. It uses Divan, as do existing Fedimint benchmarks. No
+benchmark is added to PR CI. Fee or limit changes should be reviewed separately
+after examining the measurements.
 
-The minimum guardian performance target is **Raspberry Pi 5**. Calibration needs
-measurements on that hardware, including the full admission/consensus path. Record
-RAM, storage, cooling, clock settings and thermal throttling alongside each Pi
-run. Results from faster machines establish comparisons, not Pi latency or safe
-production limits.
+Calibration needs measurements on the minimum guardian target, Raspberry Pi 5,
+including the full admission/consensus path. Record RAM, storage, cooling, clock
+settings and thermal throttling with each Pi run. Results from faster machines
+establish comparisons, not Pi latency or safe production limits.
 
-See the [evidence index](../../../fedimint-simplicity-client/EVIDENCE.md#resource-measurements)
-for revision-pinned results and raw archives. Historical timings, counts and
-fee comparisons do not qualify this checkout's execution path or corpus.
+The [evidence index](../../../../docs/simplicity/release/evidence-index.md#resource-measurements)
+holds revision-pinned results, raw archives and their retrieval commands.
+Historical timings, counts and fee comparisons do not qualify this checkout's
+execution path or corpus.
 
 ## Running
 
@@ -38,7 +40,7 @@ cargo bench --locked -p fedimint-simplicity-server --bench resources \
   --features bench-alloc -- \
   --sample-count 100 --sample-size 1 --color never > allocations.txt
 
-# Focus on the aggregate caps and complete in-memory submission checks.
+# Focus on the cost/byte budgets and complete in-memory submission checks.
 cargo bench --locked -p fedimint-simplicity-server --bench resources -- \
   'transaction_preflight|core_submission' \
   --sample-count 100 --sample-size 1 --color never > caps-timing.txt
@@ -186,7 +188,12 @@ setup, oracle comparisons and post-recovery spend checks. Checkpoint bytes are
 flushed snapshots, not compacted steady-state or lifetime storage bounds. Use the
 normal allocator and run cells sequentially without competing builds. Keep raw
 JSON outside the branch; add a revision-bound record to the
-[evidence index](../../../fedimint-simplicity-client/EVIDENCE.md#resource-measurements).
+[evidence index](../../../../docs/simplicity/release/evidence-index.md#resource-measurements).
+
+The scale probe walks recovered records in pages of 256 before exercising the
+full-list helpers. It compares counts and ordered encoding digests between both
+paths, then checks the independent oracle. Pagination and full enumeration RSS
+are successive process high-water marks, not isolated allocation measurements.
 
 ## What each stage measures
 
@@ -197,9 +204,9 @@ JSON outside the branch; add a revision-bound record to the
 | `runtime_execute` | Production `execute`, including decode, CMR/version checks, VM allocation/execution and fee calculation. |
 | `intent_hash` | One production v1 transaction intent hash. |
 | `environment_clone` | Clone and drop one already constructed environment. Shares immutable input/output/action data through `Arc` and copies the current contract snapshot. It is **not** a measurement of the entire context-building path. The first baseline predates sharing and copied the full context. |
-| `guardian_validation` | The production structural, state-resolution, kind-preparation and instance-validation hooks: limits, decoding/commitments, output hashing, conservation, clocks, intent hashes, environments and VM execution. Includes current-thread executor entry and dropping preparations/results. |
+| `guardian_validation` | The production `validate_transaction` hook for the Simplicity instance, through all four phases (structure, resolve, prepare, validate): limits, decoding/commitments, output hashing, conservation, clocks, intent hashes, environments and VM execution. Includes current-thread executor entry and dropping preparations/results. |
 | `transaction_preflight` | Production `resources::check_transaction`: combined byte/count checks, creation-signature charges, structural checks and sequential redemption decoding/static cost accumulation. This unsigned client preflight omits the outer signature envelope. Stops on the first error, before VM execution or database access. |
-| `core_submission` | Production `process_transaction_with_dbtx` in submission mode: kind-wide preflight, input verification, module validation, outer signatures, native funding checks and processing hooks. Includes creation of a fresh warm MemDatabase transaction and dropping all writes after each iteration. |
+| `core_submission` | Production `process_transaction_with_dbtx` in submission mode: input verification, each touched instance's `validate_transaction`, outer signatures, native funding checks and processing hooks. Includes creation of a fresh warm MemDatabase transaction and dropping all writes after each iteration. |
 | `adversarial_preflight` | Production `resources::check_signed_structure`: cheap structural checks and signature scheme/count, without decoding or database access. |
 | `retained_decode` | Decode all inputs of each adversarial case's unmutated workload and retain every graph until the end, then drop them. An allocation probe for the retention decision, not production cache behavior or full guardian memory. |
 | `adversarial_core` | The same core submission path and rollback methodology, on the adversarial matrix. Invalid cases must fail for their explicitly asserted reason. |
@@ -223,8 +230,9 @@ commit writes, exercise RocksDB, mint funding, network admission or consensus.
 Accepted fixtures are rolled back between iterations. The schema-2 manifest
 records both the original and funded transaction hashes/sizes and the expected
 preflight error. The isolated runtime stages retain over-budget workloads for
-historical comparisons. The guardian stage now includes preparation and therefore enforces
-the aggregate caps; its scope differs from reports before preparation was added.
+historical comparisons. The guardian stage includes program preparation and
+therefore enforces the cost and byte budgets; its scope differs from reports made
+before preparation was part of guardian validation.
 
 The helper environment is for isolated runtime/clone measurements. The guardian
 measurement constructs its own context using production code; it does not use
@@ -277,8 +285,9 @@ workloads remain in core.
   192 valid BIP340 checks against a fixed message, at a similar static bound.
   These synthetic policies are workload probes, not usable authorization
   contracts. `cost_32` and `signature_cost_32` put 32 copies of each workload in
-  one transaction, respectively. All four exceed the new 2,000,000 milliweight
-  transaction budget and are rejected by preflight.
+  one transaction, respectively. All four exceed the 2,000,000 milliweight
+  per-instance budget (`MAX_TRANSACTION_MILLIWEIGHT`) and are rejected by
+  preflight.
 - `signature_budget` executes 32 valid signature checks in one input;
   `signature_split_budget` spreads those checks over four inputs. Both fit the
   shared budget. `signature_budget_over` doubles the single-input workload and
@@ -305,7 +314,8 @@ workloads remain in core.
 
 The separate `adversarial` manifest array pins 34 cases' submitted transaction
 hashes, outer/redemption sizes, per-input cost/cell/frame bounds and expected
-outcomes. Their unmutated workloads all fit both aggregate caps. Cases cover:
+outcomes. Their unmutated workloads all fit both the cost and redemption-byte
+budgets. Cases cover:
 
 - Constants packed to exactly 16 KiB, plus different constant sizes/input counts.
 - Deep composition chains and balanced graphs with unique constants, separately
@@ -343,15 +353,5 @@ guardian-class Linux hardware and concurrent invalid-submission load.
 
 Keep the harness, fixtures and methodology as regression tools. Retain key
 comparisons with exact source and workload identities in the
-[evidence index](../../../fedimint-simplicity-client/EVIDENCE.md#resource-measurements);
+[evidence index](../../../../docs/simplicity/release/evidence-index.md#resource-measurements);
 routine raw runs need not all be committed.
-The scale probe walks recovered records in pages of 256 before exercising the
-full-list helpers. It compares counts and ordered encoding digests between both
-paths, then checks the independent oracle. Pagination and full enumeration RSS
-are successive process high-water marks, not isolated allocation measurements.
-
-Fee coefficients or limit changes should be reviewed separately after examining
-the measurements.
-
-Archive identities and retrieval commands live in the evidence index rather
-than alongside the current harness commands.
