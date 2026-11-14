@@ -1,7 +1,6 @@
 //! Two instances in the real core transaction processor, sharing one database.
 use fedimint_core::db::IDatabaseTransactionOpsCore;
 use fedimint_simplicity_client::assets;
-use fedimint_simplicity_common::ContractOutput;
 use fedimint_simplicity_common::assets::{AssetActions, AssetBundle, AssetId, namespace};
 use futures::StreamExt;
 
@@ -19,7 +18,7 @@ pub(super) fn harness() -> Harness {
         modules.register_module(
             id,
             fedimint_simplicity_common::KIND,
-            DynServerModule::from(Simplicity::new_for_testing(vec![PeerId::from(0)]).unwrap()),
+            DynServerModule::from(Simplicity::new_for_testing(NumPeers::from(1))),
         );
     }
     decoders.register_module(DUMMY, fedimint_dummy_common::KIND, Dummy::decoder());
@@ -48,8 +47,8 @@ pub(super) async fn snapshot(fed: &Harness) -> Vec<(Vec<u8>, Vec<u8>)> {
         .await
 }
 
-fn output(module: u16, contract: ContractOutput) -> DynOutput {
-    DynOutput::from_typed(module, contract)
+fn output(module: u16, output: impl Into<SimplicityOutput>) -> DynOutput {
+    DynOutput::from_typed(module, output.into())
 }
 
 struct Pair {
@@ -263,8 +262,8 @@ async fn two_instances_have_separate_contexts_namespaces_and_atomic_funding() {
             .await
             .unwrap();
         assert_eq!(
-            contract.output.bundle().unwrap(),
-            &bundle(&[(pair.ids[i], 9)], &[pair.ids[i]])
+            contract.output.assets,
+            bundle(&[(pair.ids[i], 9)], &[pair.ids[i]])
         );
         assert_eq!(contract.creation_session, 1);
     }
@@ -314,7 +313,8 @@ async fn cross_instance_substitutions_and_bad_second_witness_leave_both_unchange
     let mut changed = issue.clone();
     let mut other = changed.outputs[2]
         .as_any()
-        .downcast_ref::<ContractOutput>()
+        .downcast_ref::<SimplicityOutput>()
+        .and_then(SimplicityOutput::contract)
         .unwrap()
         .clone();
     other.state = [1; 32];

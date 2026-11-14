@@ -1,9 +1,8 @@
 use fedimint_core::TransactionId;
 use fedimint_core::module::{ApiEndpointContext, ApiRequestErased};
-use fedimint_simplicity_common::assets::{
-    AssetAmount, AssetBundle, AssetExtension, AssetId, AssetRecord, MAX_ASSETS,
-};
-use fedimint_simplicity_common::{ContractOutput, resources};
+use fedimint_simplicity_common::assets::{AssetAmount, AssetBundle, AssetId, AssetRecord};
+use fedimint_simplicity_common::limits::MAX_ASSETS;
+use fedimint_simplicity_common::resources;
 
 use super::*;
 use crate::db::{AssetKey, insert_contract, remove_contract};
@@ -13,8 +12,8 @@ use crate::db::{AssetKey, insert_contract, remove_contract};
 // transport's JSON parser or a bound on simultaneous requests.
 #[tokio::test]
 async fn point_queries_bound_records_and_handle_spent_contracts() {
-    let peers = vec![0.into(), 1.into(), 2.into(), 3.into()];
-    let module = Simplicity::new_for_testing(peers.clone()).unwrap();
+    let peers = NumPeers::from(4);
+    let module = Simplicity::new_for_testing(peers);
     let db = Database::new(MemDatabase::new(), ModuleDecoderRegistry::default());
     let point = OutPoint {
         txid: TransactionId::from_raw_hash(sha256::Hash::hash(b"maximum-record")),
@@ -33,7 +32,7 @@ async fn point_queries_bound_records_and_handle_spent_contracts() {
         cmr: [255; 32],
         state: [255; 32],
         recovery: vec![255; MAX_RECOVERY_BYTES],
-        extension: Some(AssetExtension::Bundle(AssetBundle {
+        assets: AssetBundle {
             balances: ids
                 .iter()
                 .map(|asset| AssetAmount {
@@ -42,9 +41,9 @@ async fn point_queries_bound_records_and_handle_spent_contracts() {
                 })
                 .collect(),
             authorities: ids.clone(),
-        })),
+        },
     };
-    resources::check_output(&output).unwrap();
+    resources::check_output(&SimplicityOutput::from(output.clone())).unwrap();
     let stored = StoredContract {
         output,
         creation_session: u64::MAX,
@@ -62,7 +61,7 @@ async fn point_queries_bound_records_and_handle_spent_contracts() {
         .await
         .unwrap();
     dbtx.insert_new_entry(&AssetKey(ids[0]), &origin).await;
-    for peer in peers {
+    for peer in peers.peer_ids() {
         module
             .process_consensus_item(
                 &mut dbtx.to_ref_nc(),

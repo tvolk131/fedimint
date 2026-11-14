@@ -312,8 +312,8 @@ impl Federation {
             "expected {expected:?}, got {error}"
         );
     }
-    fn output(&self, output: ContractOutput) -> DynOutput {
-        DynOutput::from_typed(self.simplicity, output)
+    fn output(&self, output: impl Into<SimplicityOutput>) -> DynOutput {
+        DynOutput::from_typed(self.simplicity, output.into())
     }
     fn sponsored(&self, inputs: Vec<DynInput>, outputs: Vec<DynOutput>) -> (Transaction, Keypair) {
         let key = key();

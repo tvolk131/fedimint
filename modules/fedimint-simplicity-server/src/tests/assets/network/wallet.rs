@@ -5,8 +5,9 @@ use fedimint_core::db::mem_impl::MemDatabase;
 use fedimint_derive_secret::DerivableSecret;
 use fedimint_dummy_client::{DummyClientInit, DummyClientModule};
 use fedimint_simplicity_client::descriptor::ContractDescriptor;
+use fedimint_simplicity_client::receipt::SenderReceipt;
 use fedimint_simplicity_client::{
-    SimplicityClientInit, SimplicityClientModule, SpendIntent, compiler,
+    SimplicityClientInit, SimplicityClientModule, SpendIntent, TransactionPlan, compiler,
 };
 
 use super::*;
@@ -82,11 +83,19 @@ async fn funds(client: &ClientHandle) {
 }
 async fn submit(
     wallet: &SimplicityClientModule,
-    inputs: Vec<SpendIntent>,
-    outputs: Vec<ContractOutput>,
+    spends: Vec<SpendIntent>,
+    outputs: Vec<SimplicityOutput>,
     creations: Vec<Keypair>,
 ) -> TransactionId {
-    let (operation, txid) = wallet.submit(inputs, outputs, creations).await.unwrap();
+    let (operation, txid) = wallet
+        .submit_plan(TransactionPlan {
+            spends,
+            outputs,
+            creations,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     wallet.await_operation(operation).await.unwrap();
     txid
 }
@@ -110,7 +119,13 @@ async fn run() {
         .unwrap();
     // The executor is stopped: this must persist the submission before any
     // guardian can see it, then finish after reopening the same database.
-    let (operation, deposit_id) = wallet.submit(vec![], vec![deposit], vec![]).await.unwrap();
+    let (operation, deposit_id) = wallet
+        .submit_plan(TransactionPlan {
+            outputs: vec![deposit.into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     assert_eq!(
         wallet.operation_status(operation).await,
         Some(fedimint_simplicity_client::states::OperationStatus::Submitted)
@@ -138,7 +153,7 @@ async fn run() {
             AssetBundle::default(),
         )
         .unwrap();
-    let id = submit(&wallet, vec![], vec![top_up], vec![]).await;
+    let id = submit(&wallet, vec![], vec![top_up.into()], vec![]).await;
     let top_up = wallet
         .output(
             &descriptor,
@@ -155,7 +170,13 @@ async fn run() {
         witnesses: compiler::witnesses([("RELEASE", Value::from(release))]),
         signature_witness: Some("SIGNATURE".to_owned()),
     };
-    let id = submit(&wallet, vec![top_up_spend(id, false)], vec![top_up], vec![]).await;
+    let id = submit(
+        &wallet,
+        vec![top_up_spend(id, false)],
+        vec![top_up.into()],
+        vec![],
+    )
+    .await;
     let before_rejection = wallet.history().await;
     let invalid_successor = wallet
         .output(
@@ -167,11 +188,11 @@ async fn run() {
         .unwrap();
     assert!(
         wallet
-            .submit(
-                vec![top_up_spend(id, false)],
-                vec![invalid_successor],
-                vec![],
-            )
+            .submit_plan(TransactionPlan {
+                spends: vec![top_up_spend(id, false)],
+                outputs: vec![invalid_successor.into()],
+                ..Default::default()
+            })
             .await
             .is_err(),
         "pruning rejects a currently invalid covenant before submission"
@@ -191,12 +212,13 @@ async fn run() {
         &wallet,
         vec![],
         vec![
-            authority_output,
+            authority_output.into(),
             assets::action_output(AssetActions {
                 creations: vec![creation],
                 ..Default::default()
             })
-            .unwrap(),
+            .unwrap()
+            .into(),
         ],
         vec![creator],
     )
@@ -215,7 +237,7 @@ async fn run() {
             out_idx: 0,
         })],
         vec![
-            wallet.receive(Amount::ZERO, authorities).unwrap(),
+            wallet.receive(Amount::ZERO, authorities).unwrap().into(),
             wallet
                 .receive(
                     Amount::ZERO,
@@ -224,12 +246,14 @@ async fn run() {
                         authorities: vec![],
                     },
                 )
-                .unwrap(),
+                .unwrap()
+                .into(),
             assets::action_output(AssetActions {
                 issuance: quantities.clone(),
                 ..Default::default()
             })
-            .unwrap(),
+            .unwrap()
+            .into(),
         ],
         vec![],
     )
@@ -247,7 +271,10 @@ async fn run() {
         )
         .unwrap();
     let (unbacked, _) = wallet
-        .submit(vec![], vec![bob_output.clone()], vec![])
+        .submit_plan(TransactionPlan {
+            outputs: vec![bob_output.clone().into()],
+            ..Default::default()
+        })
         .await
         .unwrap();
     assert!(wallet.await_operation(unbacked).await.is_err());
@@ -263,7 +290,7 @@ async fn run() {
             txid: issuance_id,
             out_idx: 1,
         })],
-        vec![bob_output],
+        vec![bob_output.into()],
         vec![],
     )
     .await;
@@ -300,7 +327,7 @@ async fn run() {
     submit(
         &bob_wallet,
         vec![SpendIntent::owner(bob_expected[0].0)],
-        vec![burn],
+        vec![burn.into()],
         vec![],
     )
     .await;
@@ -369,7 +396,7 @@ async fn direct_sender_receipts_restore_history_without_owning_recipient_contrac
         let received = recipient
             .receive(Amount::from_sats(10), AssetBundle::default())
             .unwrap();
-        let id = submit(&sender, vec![], vec![received], vec![]).await;
+        let id = submit(&sender, vec![], vec![received.into()], vec![]).await;
         recipient.sync().await.unwrap();
         assert!(sender.contracts().await.is_empty());
         let history = sender.history().await;
@@ -413,13 +440,14 @@ async fn direct_sender_receipts_restore_history_without_owning_recipient_contrac
         // ciphertext, but it must not become outgoing activity in her wallet.
         let copied = history[0].transaction.outputs[1]
             .as_any()
-            .downcast_ref::<ContractOutput>()
+            .downcast_ref::<SimplicityOutput>()
             .unwrap()
             .clone();
+        assert!(copied.actions().is_some());
         let unrelated = recipient
             .receive(Amount::from_sats(1), AssetBundle::default())
             .unwrap();
-        submit(&recipient, vec![], vec![unrelated, copied], vec![]).await;
+        submit(&recipient, vec![], vec![unrelated.into(), copied], vec![]).await;
         sender.sync().await.unwrap();
         assert_eq!(sender.history().await, history);
         let bob_contracts = recipient.contracts().await;
@@ -435,12 +463,18 @@ async fn direct_sender_receipts_restore_history_without_owning_recipient_contrac
             data: b"private note".to_vec(),
         };
         let (op, _) = sender
-            .submit_with_receipt(
-                vec![],
-                vec![own, assets::action_output(AssetActions::default()).unwrap()],
-                vec![],
-                Some(context.clone()),
-            )
+            .submit_plan(TransactionPlan {
+                outputs: vec![
+                    own.into(),
+                    assets::action_output(AssetActions::default())
+                        .unwrap()
+                        .into(),
+                ],
+                receipt: Some(SenderReceipt {
+                    context: Some(context.clone()),
+                }),
+                ..Default::default()
+            })
             .await
             .unwrap();
         sender.await_operation(op).await.unwrap();

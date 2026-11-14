@@ -22,7 +22,7 @@ use crate::db::VersionVoteKey;
 const NEXT: ModuleConsensusVersion = ModuleConsensusVersion::new(0, 2);
 
 fn module(supported: ModuleConsensusVersion) -> Simplicity {
-    let mut module = Simplicity::new_for_testing((0..4).map(PeerId::from).collect()).unwrap();
+    let mut module = Simplicity::new_for_testing(NumPeers::from(4));
     module.upgrades.supported = supported;
     module
 }
@@ -231,7 +231,7 @@ async fn checkpoint_restart_replay_and_downgrade_preserve_activation() {
         NEXT
     );
     // Original configurations remain the baseline after activation.
-    let cfg = crate::config(vec![0.into()]).to_erased();
+    let cfg = crate::config().to_erased();
     assert_eq!(cfg.consensus.version, BASE);
     crate::load_config(&cfg).unwrap();
 }
@@ -379,15 +379,19 @@ async fn existing_contracts_keep_their_commitments_and_fees_after_activation() {
         .fund(vec![
             DynOutput::from_typed(
                 SIMP,
-                program
-                    .output(Amount::from_sats(100), [0; 32], vec![])
-                    .unwrap(),
+                SimplicityOutput::from(
+                    program
+                        .output(Amount::from_sats(100), [0; 32], vec![])
+                        .unwrap(),
+                ),
             ),
             DynOutput::from_typed(
                 SIMP,
-                program
-                    .asset_output(Amount::from_sats(100), [0; 32], vec![], Default::default())
-                    .unwrap(),
+                SimplicityOutput::from(
+                    program
+                        .asset_output(Amount::from_sats(100), [0; 32], vec![], Default::default())
+                        .unwrap(),
+                ),
             ),
         ])
         .await;

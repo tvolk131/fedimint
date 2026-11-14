@@ -9,7 +9,7 @@ use fedimint_core::secp256k1::{SECP256K1, SecretKey};
 use fedimint_derive_secret::DerivableSecret;
 
 use super::*;
-use crate::common::StoredContract;
+use crate::common::{ActionOutput, ContractOutput, StoredContract};
 use crate::descriptor::{BuiltinTemplates, ContractDescriptor};
 use crate::receipt::ReceiptContext;
 
@@ -115,7 +115,7 @@ fn plan(spends: &[u32], outputs: Vec<ContractOutput>) -> TransactionPlan {
             .iter()
             .map(|index| SpendIntent::owner(point(*index)))
             .collect(),
-        outputs,
+        outputs: outputs.into_iter().map(SimplicityOutput::from).collect(),
         ..Default::default()
     }
 }
@@ -176,7 +176,10 @@ async fn output_only_quotes_need_no_spend_and_price_every_output() {
     assert!(prepared.inputs.is_empty());
     assert!(prepared.authorization.spends.is_empty());
     // An owned output already makes the transaction recoverable.
-    assert_eq!(prepared.outputs, vec![output.clone()]);
+    assert_eq!(
+        prepared.outputs,
+        vec![SimplicityOutput::from(output.clone())]
+    );
     assert!(prepared.authorization.receipt.is_none());
     let request = prepared.fee_request().unwrap();
     assert_eq!(request.input_amount, amounts(0));
@@ -184,7 +187,7 @@ async fn output_only_quotes_need_no_spend_and_price_every_output() {
     assert_eq!(request.output_amount, amounts(25_000));
     assert_eq!(
         request.output_fee,
-        Amounts::new_bitcoin(common::output_fee(&output))
+        Amounts::new_bitcoin(common::output_fee(&output.into()))
     );
 }
 
@@ -196,10 +199,13 @@ async fn direct_sends_to_unowned_outputs_include_the_automatic_receipt_in_the_qu
     let prepared = prepare(&store, &plan(&[], vec![output.clone()]), &holdings).unwrap();
     let receipt = prepared.authorization.receipt.as_ref().unwrap();
     assert_eq!(prepared.outputs.len(), 2);
-    assert_eq!(prepared.outputs[0], output);
+    assert_eq!(prepared.outputs[0], SimplicityOutput::from(output));
     assert_eq!(receipt.output_index, 1);
     assert!(prepared.outputs[1].actions().is_some());
-    assert_eq!(prepared.outputs[1].recovery, receipt.placeholder().unwrap());
+    assert_eq!(
+        prepared.outputs[1].recovery(),
+        receipt.placeholder().unwrap()
+    );
     let request = prepared.fee_request().unwrap();
     // The receipt output carries no value but pays for its reserved bytes.
     assert_eq!(request.output_amount, amounts(25_000));
@@ -309,7 +315,7 @@ async fn spends_are_priced_from_the_pruned_draft_and_never_authorize_the_final_n
     let mut tx = transaction(&prepared, [9; 8]);
     tx.outputs.push(DynOutput::from_typed(
         7,
-        ContractOutput::action_output(Default::default()),
+        SimplicityOutput::from(ActionOutput::default()),
     ));
     let finalized = prepared.authorization.finalize_inputs(&tx).unwrap();
     let draft_inputs = tx.inputs.clone();
@@ -510,10 +516,13 @@ async fn a_shared_snapshot_only_constrains_the_contracts_a_plan_spends() {
 async fn the_shared_resource_limit_rejects_oversized_drafts_before_funding() {
     let store = store().await;
     let holdings = Holdings::new();
-    for count in [common::MAX_CONTRACTS, common::MAX_CONTRACTS + 1] {
+    for count in [
+        common::limits::MAX_CONTRACTS,
+        common::limits::MAX_CONTRACTS + 1,
+    ] {
         let outputs = vec![owned_output(&store, 1, 1_000); count];
         let result = prepare(&store, &plan(&[], outputs), &holdings);
-        if count == common::MAX_CONTRACTS {
+        if count == common::limits::MAX_CONTRACTS {
             result.unwrap().fee_request().unwrap();
         } else {
             assert!(error(result).contains("resource limit"));

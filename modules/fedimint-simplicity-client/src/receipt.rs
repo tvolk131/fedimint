@@ -8,8 +8,8 @@ use fedimint_core::secp256k1::schnorr::Signature;
 use fedimint_core::transaction::Transaction;
 use serde::{Deserialize, Serialize};
 
-use crate::common::assets::AssetExtension;
-use crate::common::{ContractInput, ContractOutput, MAX_RECOVERY_BYTES};
+use crate::common::limits::MAX_RECOVERY_BYTES;
+use crate::common::{ActionOutput, ContractInput, ContractOutput, SimplicityOutput};
 use crate::descriptor::WalletKeys;
 use crate::wallet::WalletStore;
 
@@ -49,10 +49,10 @@ impl WalletStore {
     pub(crate) fn prepare_receipt(
         &self,
         mut recoverable: bool,
-        outputs: &mut Vec<ContractOutput>,
+        outputs: &mut Vec<SimplicityOutput>,
         requested: Option<SenderReceipt>,
     ) -> anyhow::Result<Option<ReceiptPlan>> {
-        for output in outputs.iter() {
+        for output in outputs.iter().filter_map(SimplicityOutput::contract) {
             recoverable |= self.has_recovery_descriptor(output)?;
         }
         if requested.is_none() && recoverable {
@@ -68,11 +68,14 @@ impl WalletStore {
         let output_index = if let Some(index) = action_indices.first() {
             *index
         } else {
-            outputs.push(ContractOutput::action_output(Default::default()));
+            outputs.push(ActionOutput::default().into());
             outputs.len() - 1
         };
+        let SimplicityOutput::Actions(action) = &mut outputs[output_index] else {
+            unreachable!("the receipt index selects an action output");
+        };
         ensure!(
-            outputs[output_index].recovery.is_empty(),
+            action.recovery.is_empty(),
             "action output already contains recovery metadata"
         );
         let plan = ReceiptPlan {
@@ -82,7 +85,7 @@ impl WalletStore {
             output_index,
             receipt: requested.unwrap_or(SenderReceipt { context: None }),
         };
-        outputs[output_index].recovery = plan.placeholder()?;
+        action.recovery = plan.placeholder()?;
         Ok(Some(plan))
     }
 }
@@ -119,17 +122,17 @@ pub fn commitment(
         .outputs
         .iter()
         .map(|output| {
-            let Some(contract) = output.as_any().downcast_ref::<ContractOutput>() else {
+            let Some(contract) = output.as_any().downcast_ref::<SimplicityOutput>() else {
                 return output.clone();
             };
             let mut contract = contract.clone();
-            if let Some(AssetExtension::Actions(actions)) = &mut contract.extension {
-                for creation in &mut actions.creations {
+            if let SimplicityOutput::Actions(action) = &mut contract {
+                for creation in &mut action.actions.creations {
                     creation.signature =
                         Signature::from_slice(&[0; 64]).expect("fixed signature length");
                 }
-                if contract.recovery.starts_with(ENVELOPE) {
-                    contract.recovery.clear();
+                if action.recovery.starts_with(ENVELOPE) {
+                    action.recovery.clear();
                 }
             }
             DynOutput::from_typed(output.module_instance_id(), contract)
@@ -178,15 +181,14 @@ impl ReceiptPlan {
             original.module_instance_id() == self.module,
             "wrong sender receipt module"
         );
-        let mut output = original
+        let SimplicityOutput::Actions(mut output) = original
             .as_any()
-            .downcast_ref::<ContractOutput>()
+            .downcast_ref::<SimplicityOutput>()
             .context("wrong receipt output type")?
-            .clone();
-        ensure!(
-            output.actions().is_some(),
-            "sender receipt requires an action output"
-        );
+            .clone()
+        else {
+            anyhow::bail!("sender receipt requires an action output");
+        };
         let plaintext = (
             commitment(self.federation, self.module, tx),
             VERSION,
@@ -200,7 +202,10 @@ impl ReceiptPlan {
             "sender receipt changed reserved size"
         );
         output.recovery = annotation;
-        Ok(DynOutput::from_typed(self.module, output))
+        Ok(DynOutput::from_typed(
+            self.module,
+            SimplicityOutput::Actions(output),
+        ))
     }
 
     pub fn verify(&self, tx: &Transaction) -> anyhow::Result<()> {
@@ -209,7 +214,7 @@ impl ReceiptPlan {
             .get(self.output_index)
             .context("missing receipt output")?
             .as_any()
-            .downcast_ref::<ContractOutput>()
+            .downcast_ref::<SimplicityOutput>()
             .context("wrong receipt output type")?;
         ensure!(
             read(
@@ -217,7 +222,7 @@ impl ReceiptPlan {
                 self.federation,
                 self.module,
                 tx,
-                &output.recovery
+                output.recovery()
             )?
             .as_ref()
                 == Some(&self.receipt),

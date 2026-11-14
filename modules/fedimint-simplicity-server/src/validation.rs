@@ -20,7 +20,7 @@ use fedimint_simplicity_common::runtime::{
     Environment, EnvironmentInput, EnvironmentOutput, execute_decoded,
 };
 use fedimint_simplicity_common::{
-    ContractError, ContractInput, ContractOutput, ContractOutputError, signature_hash,
+    ContractError, ContractInput, ContractOutputError, SimplicityOutput, signature_hash,
 };
 use simplicity::RedeemNode;
 
@@ -59,19 +59,25 @@ pub(crate) async fn validate(
     let mut has_actions = false;
     for output in &context.transaction.outputs {
         let contract = if output.module_instance_id() == context.module_instance_id {
-            let contract = output
+            let output = output
                 .as_any()
-                .downcast_ref::<ContractOutput>()
+                .downcast_ref::<SimplicityOutput>()
                 .ok_or_else(|| output_err(ContractError::Context))?;
-            check_output(contract).map_err(output_err)?;
-            if let Some(value) = contract.actions() {
-                if has_actions {
-                    return Err(output_err(ContractError::Assets));
+            check_output(output).map_err(output_err)?;
+            match output {
+                SimplicityOutput::Contract(contract) => Some(contract.clone()),
+                SimplicityOutput::Actions(action) => {
+                    if has_actions {
+                        return Err(output_err(ContractError::Assets));
+                    }
+                    has_actions = true;
+                    actions = action.actions.clone();
+                    None
                 }
-                has_actions = true;
-                actions = value.clone();
+                SimplicityOutput::Default { .. } => {
+                    return Err(output_err(ContractError::Version));
+                }
             }
-            Some(contract.clone())
         } else {
             None
         };

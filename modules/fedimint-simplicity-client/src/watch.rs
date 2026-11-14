@@ -8,7 +8,7 @@ use fedimint_core::encoding::Encodable as _;
 use fedimint_core::session_outcome::{ConsensusItem, SessionStatus};
 use futures::StreamExt as _;
 
-use crate::common::{ContractInput, ContractOutput};
+use crate::common::{ContractInput, SimplicityOutput};
 use crate::descriptor::ContractDescriptor;
 use crate::wallet::{HistoryEntry, SessionHistory, WalletContract, WalletStore, db};
 use crate::{LOG_CLIENT_SIMPLICITY_SYNC, SimplicityClientModule};
@@ -197,10 +197,15 @@ impl WalletStore {
                         txid,
                         out_idx: out_idx as u64,
                     };
-                    let output = output
+                    // Action outputs and unknown variants create no contract.
+                    let Some(output) = output
                         .as_any()
-                        .downcast_ref::<ContractOutput>()
-                        .ok_or_else(|| anyhow::anyhow!("wrong output decoder"))?;
+                        .downcast_ref::<SimplicityOutput>()
+                        .ok_or_else(|| anyhow::anyhow!("wrong output decoder"))?
+                        .contract()
+                    else {
+                        continue;
+                    };
                     let matching = predecessors
                         .iter()
                         .filter(|(input_index, previous)| {

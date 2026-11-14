@@ -21,8 +21,8 @@ fn balance_change(tx: &mut Transaction, input_msats: u64, change_index: usize) -
     let output_fees: u64 = tx
         .outputs
         .iter()
-        .filter_map(|output| output.as_any().downcast_ref::<ContractOutput>())
-        .map(|output| output_fee(output).msats)
+        .filter_map(|output| output.as_any().downcast_ref::<SimplicityOutput>())
+        .map(|output| fedimint_simplicity_common::output_fee(output).msats)
         .sum();
     let other_outputs: u64 = tx
         .outputs
@@ -30,8 +30,10 @@ fn balance_change(tx: &mut Transaction, input_msats: u64, change_index: usize) -
         .enumerate()
         .filter(|(index, _)| *index != change_index)
         .map(|(_, output)| {
-            if let Some(contract) = output.as_any().downcast_ref::<ContractOutput>() {
-                contract.amount.msats
+            if let Some(simplicity) = output.as_any().downcast_ref::<SimplicityOutput>() {
+                simplicity
+                    .contract()
+                    .map_or(0, |contract| contract.amount.msats)
             } else {
                 output
                     .as_any()
@@ -48,7 +50,8 @@ fn balance_change(tx: &mut Transaction, input_msats: u64, change_index: usize) -
     let fees = input_fees + output_fees; // This fixture configures zero mint fees.
     let mut change = tx.outputs[change_index]
         .as_any()
-        .downcast_ref::<ContractOutput>()
+        .downcast_ref::<SimplicityOutput>()
+        .and_then(SimplicityOutput::contract)
         .unwrap()
         .clone();
     change.amount = Amount::from_msats(input_msats.checked_sub(other_outputs + fees).unwrap());
@@ -86,7 +89,8 @@ async fn exact_ecash_funding_charges_static_fees_returns_change_and_rolls_back_s
     let mut short = deposit.clone();
     let mut change = short.outputs[1]
         .as_any()
-        .downcast_ref::<ContractOutput>()
+        .downcast_ref::<SimplicityOutput>()
+        .and_then(SimplicityOutput::contract)
         .unwrap()
         .clone();
     change.amount += Amount::from_msats(1);
@@ -186,12 +190,8 @@ async fn exact_ecash_funding_charges_static_fees_returns_change_and_rolls_back_s
         initial
     );
     assert_eq!(
-        fed.contract(point(&issue, 1))
-            .await
-            .unwrap()
-            .output
-            .bundle(),
-        Some(&bundle(&[(ids[0], 8), (ids[1], 8)], &[]))
+        fed.contract(point(&issue, 1)).await.unwrap().output.assets,
+        bundle(&[(ids[0], 8), (ids[1], 8)], &[])
     );
     assert!(fed.contract(authority).await.is_none());
 }

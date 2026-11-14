@@ -56,11 +56,15 @@ fn unknown_context_and_disallowed_core_jets_are_rejected() {
 }
 
 #[test]
-fn only_current_output_encoding_is_accepted() {
+fn output_encoding_fees_and_version_checks() {
     use fedimint_core::encoding::{Decodable, Encodable};
     use fedimint_core::module::registry::ModuleDecoderRegistry;
 
-    use crate::assets::{AssetBundle, AssetExtension};
+    use crate::assets::AssetBundle;
+    use crate::{ContractError, ContractOutput, SimplicityOutput};
+    let decode = |bytes: &[u8]| {
+        SimplicityOutput::consensus_decode_whole(bytes, &ModuleDecoderRegistry::default())
+    };
     let legacy = (
         0u32,
         fedimint_core::Amount::from_msats(42),
@@ -69,37 +73,32 @@ fn only_current_output_encoding_is_accepted() {
         vec![3u8],
     )
         .consensus_encode_to_vec();
-    assert!(
-        crate::ContractOutput::consensus_decode_whole(&legacy, &ModuleDecoderRegistry::default())
-            .is_err()
-    );
-    let output = crate::ContractOutput {
+    assert!(decode(&legacy).is_err());
+    let contract = ContractOutput {
         version: crate::EXECUTION_VERSION,
         amount: fedimint_core::Amount::from_msats(42),
         cmr: [1; 32],
         state: [2; 32],
         recovery: vec![3],
-        extension: Some(AssetExtension::Bundle(AssetBundle::default())),
+        assets: AssetBundle::default(),
     };
-    assert_eq!(crate::output_fee(&output).msats, 105);
-    let mut native = output.clone();
+    let output = SimplicityOutput::from(contract.clone());
+    // Base fee, one recovery byte and the two-byte empty bundle.
+    assert_eq!(crate::output_fee(&output).msats, 103);
+    let mut native = contract.clone();
     native.recovery.clear();
-    assert_eq!(crate::output_fee(&native).msats, 104);
-    let bytes = output.consensus_encode_to_vec();
-    assert_eq!(
-        crate::ContractOutput::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
-            .unwrap(),
-        output
-    );
+    assert_eq!(crate::output_fee(&native.into()).msats, 102);
+    assert_eq!(decode(&output.consensus_encode_to_vec()).unwrap(), output);
+    // Other versions decode, so guardians reject them as invalid outputs
+    // instead of failing to decode the transaction.
     for version in [0, 2, u32::MAX] {
-        let mut invalid = output.clone();
+        let mut invalid = contract.clone();
         invalid.version = version;
-        assert!(
-            crate::ContractOutput::consensus_decode_whole(
-                &invalid.consensus_encode_to_vec(),
-                &ModuleDecoderRegistry::default()
-            )
-            .is_err()
+        let invalid = SimplicityOutput::from(invalid);
+        assert_eq!(decode(&invalid.consensus_encode_to_vec()).unwrap(), invalid);
+        assert_eq!(
+            crate::resources::check_output(&invalid),
+            Err(ContractError::Version)
         );
     }
 }

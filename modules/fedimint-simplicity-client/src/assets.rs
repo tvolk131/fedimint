@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use anyhow::ensure;
 use common::assets::{
-    AssetActions, AssetAmount, AssetBundle, AssetCreation, AssetExtension, AssetId, AssetRecord,
-    asset_id, signature_hash, validate_amounts,
+    AssetActions, AssetAmount, AssetBundle, AssetCreation, AssetId, AssetRecord, asset_id,
+    signature_hash, validate_amounts,
 };
 use fedimint_api_client::api::FederationApiExt as _;
 use fedimint_core::config::FederationId;
@@ -41,12 +41,12 @@ impl ContractProgram {
         bundle.authorities.sort();
         validate_amounts(&bundle.balances)?;
         ensure!(
-            bundle.authorities.len() <= common::assets::MAX_ASSETS
+            bundle.authorities.len() <= common::limits::MAX_ASSETS
                 && bundle.authorities.windows(2).all(|pair| pair[0] < pair[1]),
             "invalid authority collection"
         );
         let mut output = self.output(bitcoin, state, recovery)?;
-        output.extension = Some(AssetExtension::Bundle(bundle));
+        output.assets = bundle;
         Ok(output)
     }
 }
@@ -60,7 +60,7 @@ pub fn creation(
     authority_outputs: Vec<u32>,
 ) -> anyhow::Result<(AssetCreation, Vec<AssetId>)> {
     ensure!(
-        !authority_outputs.is_empty() && authority_outputs.len() <= common::assets::MAX_ASSETS,
+        !authority_outputs.is_empty() && authority_outputs.len() <= common::limits::MAX_ASSETS,
         "invalid creation batch size"
     );
     let ids = (0..authority_outputs.len())
@@ -76,12 +76,15 @@ pub fn creation(
     ))
 }
 
-pub fn action_output(mut actions: AssetActions) -> anyhow::Result<common::ContractOutput> {
+pub fn action_output(mut actions: AssetActions) -> anyhow::Result<common::ActionOutput> {
     actions.issuance.sort_by_key(|value| value.asset);
     actions.burns.sort_by_key(|value| value.asset);
     validate_amounts(&actions.issuance)?;
     validate_amounts(&actions.burns)?;
-    Ok(common::ContractOutput::action_output(actions))
+    Ok(common::ActionOutput {
+        actions,
+        recovery: vec![],
+    })
 }
 
 /// Set creation signatures before applying outer transaction signatures.
@@ -101,11 +104,11 @@ pub fn sign_creation(
         }
         let mut contract = output
             .as_any()
-            .downcast_ref::<common::ContractOutput>()
+            .downcast_ref::<common::SimplicityOutput>()
             .ok_or_else(|| anyhow::anyhow!("wrong module output type"))?
             .clone();
-        if let Some(AssetExtension::Actions(actions)) = &mut contract.extension {
-            for creation in &mut actions.creations {
+        if let common::SimplicityOutput::Actions(action) = &mut contract {
+            for creation in &mut action.actions.creations {
                 if creation.key == key.public_key() {
                     creation.signature = signature;
                     found += 1;
@@ -137,9 +140,7 @@ pub fn select_assets<'a>(
     let mut seen = std::collections::BTreeSet::new();
     for (point, output) in available {
         ensure!(seen.insert(point), "duplicate available outpoint");
-        let Some(bundle) = output.bundle() else {
-            continue;
-        };
+        let bundle = &output.assets;
         if !bundle.authorities.is_empty()
             || !bundle.balances.iter().any(|value| {
                 targets

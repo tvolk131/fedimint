@@ -33,23 +33,27 @@ fn duplicate_references_are_scoped_to_instances_and_precede_decoding() {
 
 #[test]
 fn output_structure_is_checked_across_instances_before_decoding() {
-    let mut cases = vec![];
-    for (version, extension) in [
-        (2, None),
-        (1, None),
-        (0, Some(AssetExtension::Bundle(AssetBundle::default()))),
-    ] {
+    let mut cases: Vec<(SimplicityOutput, _)> = vec![(
+        SimplicityOutput::Default {
+            variant: 2,
+            bytes: vec![],
+        },
+        ContractError::Version,
+    )];
+    for version in [2, 0] {
         let mut output = bundle();
         output.version = version;
-        output.extension = extension;
-        cases.push((output, ContractError::Version));
+        cases.push((output.into(), ContractError::Version));
     }
     let mut output = bundle();
     output.recovery = vec![0; MAX_RECOVERY_BYTES + 1];
-    cases.push((output, ContractError::Limit));
+    cases.push((output.into(), ContractError::Limit));
+    let mut action = creations(1, 0);
+    action.recovery = vec![0; MAX_RECOVERY_BYTES + 1];
+    cases.push((action.into(), ContractError::Limit));
     let mut output = bundle();
     output.amount = fedimint_core::Amount::from_msats(2_100_000_000_000_000_001);
-    cases.push((output, ContractError::Limit));
+    cases.push((output.into(), ContractError::Limit));
     for balances in [
         vec![AssetAmount {
             asset: AssetId([1; 32]),
@@ -74,25 +78,16 @@ fn output_structure_is_checked_across_instances_before_decoding() {
         ],
     ] {
         let mut output = bundle();
-        output.extension = Some(AssetExtension::Bundle(AssetBundle {
-            balances,
-            authorities: vec![],
-        }));
-        cases.push((output, ContractError::Assets));
+        output.assets.balances = balances;
+        cases.push((output.into(), ContractError::Assets));
     }
     let mut output = bundle();
-    output.extension = Some(AssetExtension::Bundle(AssetBundle {
-        balances: vec![],
-        authorities: vec![AssetId([1; 32]); 2],
-    }));
-    cases.push((output, ContractError::Assets));
+    output.assets.authorities = vec![AssetId([1; 32]); 2];
+    cases.push((output.into(), ContractError::Assets));
     for (output, error) in cases {
         for instance in [4, 7] {
             let mut tx = malformed_program();
-            tx.outputs = vec![
-                DynOutput::from_typed(4, bundle()),
-                DynOutput::from_typed(instance, output.clone()),
-            ];
+            tx.outputs = vec![out(4, bundle()), out(instance, output.clone())];
             for _ in 0..2 {
                 assert_eq!(check_transaction(&tx), Err(error.clone()));
                 tx.outputs.reverse();
@@ -105,78 +100,49 @@ fn output_structure_is_checked_across_instances_before_decoding() {
 fn action_shape_and_creation_destinations_precede_decoding() {
     let mut tx = malformed_program();
     let action = creations(1, 1);
-    tx.outputs = vec![
-        DynOutput::from_typed(4, action.clone()),
-        DynOutput::from_typed(4, bundle()),
-    ];
+    tx.outputs = vec![out(4, action.clone()), out(4, bundle())];
     assert_eq!(check_transaction(&tx), Err(ContractError::Program));
 
     for (destination, expected) in [
         (None, ContractError::Assets),
+        (Some(out(7, bundle())), ContractError::Assets),
         (
-            Some(DynOutput::from_typed(7, bundle())),
-            ContractError::Assets,
-        ),
-        (
-            Some(DynOutput::from_typed(
+            Some(out(
                 4,
                 ContractOutput {
                     version: 0,
-                    extension: None,
                     ..bundle()
                 },
             )),
             ContractError::Version,
         ),
-        (
-            Some(DynOutput::from_typed(
-                4,
-                ContractOutput::action_output(AssetActions::default()),
-            )),
-            ContractError::Assets,
-        ),
+        (Some(out(4, ActionOutput::default())), ContractError::Assets),
     ] {
-        tx.outputs = vec![DynOutput::from_typed(4, action.clone())];
+        tx.outputs = vec![out(4, action.clone())];
         tx.outputs.extend(destination);
         assert_eq!(check_transaction(&tx), Err(expected));
     }
     let mut multiple = creations(1, 1);
-    let Some(AssetExtension::Actions(actions)) = &mut multiple.extension else {
-        unreachable!()
-    };
+    let actions = &mut multiple.actions;
     actions.creations[0].authority_outputs.push(1);
-    tx.outputs = vec![
-        DynOutput::from_typed(4, multiple.clone()),
-        DynOutput::from_typed(4, bundle()),
-    ];
+    tx.outputs = vec![out(4, multiple.clone()), out(4, bundle())];
     // Different asset ordinals may share one destination; no unique-index rule.
     assert_eq!(check_transaction(&tx), Err(ContractError::Program));
-    let Some(AssetExtension::Actions(actions)) = &mut multiple.extension else {
-        unreachable!()
-    };
+    let actions = &mut multiple.actions;
     actions.creations.push(actions.creations[0].clone());
-    tx.outputs[0] = DynOutput::from_typed(4, multiple);
+    tx.outputs[0] = out(4, multiple);
     assert_eq!(check_transaction(&tx), Err(ContractError::NamespaceUsed));
 
     let mut oversized = creations(1, 1);
-    let Some(AssetExtension::Actions(actions)) = &mut oversized.extension else {
-        unreachable!()
-    };
+    let actions = &mut oversized.actions;
     actions.creations[0].authority_outputs = vec![1; MAX_ASSETS + 1];
-    tx.outputs[0] = DynOutput::from_typed(4, oversized);
+    tx.outputs[0] = out(4, oversized);
     assert_eq!(check_transaction(&tx), Err(ContractError::Limit));
     let mut empty = creations(1, 1);
-    let Some(AssetExtension::Actions(actions)) = &mut empty.extension else {
-        unreachable!()
-    };
+    let actions = &mut empty.actions;
     actions.creations[0].authority_outputs.clear();
-    tx.outputs[0] = DynOutput::from_typed(4, empty);
+    tx.outputs[0] = out(4, empty);
     assert_eq!(check_transaction(&tx), Err(ContractError::Limit));
-
-    let mut valued_action = action;
-    valued_action.amount = fedimint_core::Amount::from_msats(1);
-    tx.outputs[0] = DynOutput::from_typed(4, valued_action);
-    assert_eq!(check_transaction(&tx), Err(ContractError::Assets));
 }
 
 #[test]
@@ -184,17 +150,14 @@ fn action_outputs_and_creation_keys_are_scoped_to_each_instance() {
     let mut tx = transaction(
         vec![],
         vec![
-            DynOutput::from_typed(4, creations(1, 1)),
-            DynOutput::from_typed(4, bundle()),
-            DynOutput::from_typed(7, creations(1, 3)),
-            DynOutput::from_typed(7, bundle()),
+            out(4, creations(1, 1)),
+            out(4, bundle()),
+            out(7, creations(1, 3)),
+            out(7, bundle()),
         ],
     );
     assert_eq!(check_transaction(&tx), Ok(()));
-    tx.outputs.push(DynOutput::from_typed(
-        4,
-        ContractOutput::action_output(AssetActions::default()),
-    ));
+    tx.outputs.push(out(4, ActionOutput::default()));
     assert_eq!(check_transaction(&tx), Err(ContractError::Assets));
 }
 

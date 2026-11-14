@@ -15,7 +15,9 @@ use serde::Serialize;
 
 use crate::common::assets::{self, AssetActions, accounting};
 use crate::common::consensus::{SUPPORTED_CONSENSUS_VERSION, check_execution_version};
-use crate::common::{self, ContractError, ContractInput, ContractOutput, resources, runtime};
+use crate::common::{
+    self, ContractError, ContractInput, ContractOutput, SimplicityOutput, resources, runtime,
+};
 use crate::pruning::PruningSnapshot;
 
 #[cfg(test)]
@@ -188,7 +190,7 @@ pub fn analyze(
         .filter_map(|(index, output)| {
             output
                 .as_any()
-                .downcast_ref::<ContractOutput>()
+                .downcast_ref::<SimplicityOutput>()
                 .map(|contract| (index, output.module_instance_id(), contract))
         })
         .collect();
@@ -197,12 +199,12 @@ pub fn analyze(
             .to_string()
             .parse()
             .expect("pinned Simplicity Cost displays integer milliweight"),
-        milliweight_limit: resources::MAX_TRANSACTION_MILLIWEIGHT,
+        milliweight_limit: common::limits::MAX_TRANSACTION_MILLIWEIGHT,
         redemption_bytes: inputs
             .iter()
             .map(|(_, _, input)| input.program.len() + input.witness.len())
             .sum(),
-        redemption_bytes_limit: resources::MAX_TRANSACTION_REDEMPTION_BYTES,
+        redemption_bytes_limit: common::limits::MAX_TRANSACTION_REDEMPTION_BYTES,
     });
     // Decoding already succeeded above; reuse the canonical fee implementation.
     report.simplicity_fees_msat = Some(
@@ -313,7 +315,8 @@ pub fn analyze(
             outputs
                 .iter()
                 .filter(|(_, id, _)| *id == module)
-                .try_for_each(|(_, _, output)| {
+                .filter_map(|(_, _, output)| output.contract())
+                .try_for_each(|output| {
                     check_execution_version(output.version, snapshot.consensus_version)
                 })
         };
@@ -330,21 +333,25 @@ pub fn analyze(
             report.record("resolved_inputs", Some(module), None, Outcome::NotChecked { reason: "One or more consumed contract records are missing; execution and asset accounting were skipped." });
             continue;
         }
-        let module_outputs: Vec<_> = transaction
+        let module_items: Vec<_> = transaction
             .outputs
             .iter()
             .map(|output| {
                 (output.module_instance_id() == module)
-                    .then(|| output.as_any().downcast_ref::<ContractOutput>())
+                    .then(|| output.as_any().downcast_ref::<SimplicityOutput>())
                     .flatten()
             })
             .collect();
+        let module_outputs: Vec<_> = module_items
+            .iter()
+            .map(|output| output.and_then(SimplicityOutput::contract))
+            .collect();
         let default_actions = AssetActions::default();
-        let actions = module_outputs
+        let actions = module_items
             .iter()
             .flatten()
             .find_map(|output| output.actions())
-            .unwrap_or(&default_actions);
+            .map_or(&default_actions, |action| &action.actions);
         let resolved: Vec<_> = module_inputs
             .iter()
             .map(|(_, _, input)| &snapshot.contracts[&input.outpoint].output)
@@ -363,9 +370,7 @@ pub fn analyze(
                 .iter()
                 .chain(module_outputs.iter().flatten())
                 .any(|output| {
-                    output.bundle().is_some_and(|bundle| {
-                        !bundle.balances.is_empty() || !bundle.authorities.is_empty()
-                    })
+                    !output.assets.balances.is_empty() || !output.assets.authorities.is_empty()
                 })
         {
             report.record("asset_registry", Some(module), None, Outcome::NotChecked { reason: "Asset existence and permanent namespace-use markers require guardian ledger state." });

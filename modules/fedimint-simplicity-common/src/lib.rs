@@ -7,6 +7,7 @@ pub mod compiler;
 pub mod config;
 pub mod consensus;
 pub mod jet;
+pub mod limits;
 pub mod resources;
 pub mod runtime;
 
@@ -30,25 +31,24 @@ pub const KIND: ModuleKind = ModuleKind::from_static_str("simplicity");
 /// Future activations must keep accepting configurations with this version.
 pub const MODULE_CONSENSUS_VERSION: ModuleConsensusVersion = ModuleConsensusVersion::new(0, 1);
 pub const EXECUTION_VERSION: u32 = 1;
-pub const MAX_CONTRACTS: usize = 32;
-pub const MAX_PROGRAM_BYTES: usize = 8_192;
-pub const MAX_WITNESS_BYTES: usize = 8_192;
-pub const MAX_RECOVERY_BYTES: usize = 1_024;
-/// Largest bit width of any single inferred type in a redemption program.
-pub const MAX_TYPE_BITS: usize = 1_048_576;
-/// Sum of every inferred source and target type width in a redemption program.
-pub const MAX_TOTAL_TYPE_BITS: usize = 16_777_216;
-/// Static cost bound of one redemption program. The transaction-wide budget,
-/// [`resources::MAX_TRANSACTION_MILLIWEIGHT`], is stricter.
-pub const MAX_PROGRAM_MILLIWEIGHT: u32 = 10_000_000;
-/// Bit machine memory bounds of one redemption program.
-pub const MAX_EXTRA_CELLS: usize = 1_048_576;
-pub const MAX_EXTRA_FRAMES: usize = 1_024;
-/// Fixed fee for every contract input or output, before size and cost terms.
-pub const BASE_ITEM_FEE_MSAT: u64 = 100;
 
-/// Bitcoin amounts remain millisatoshis; assets use an explicit extension.
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+/// One Simplicity output. Contracts are spendable; an action output only
+/// changes asset state and creates nothing to spend.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
+pub enum SimplicityOutput {
+    Contract(ContractOutput),
+    /// At most one per transaction and instance.
+    Actions(ActionOutput),
+    #[encodable_default]
+    Default {
+        variant: u64,
+        bytes: Vec<u8>,
+    },
+}
+
+/// A spendable contract. Bitcoin amounts are millisatoshis; assets are
+/// explicit.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
 pub struct ContractOutput {
     pub version: u32,
     pub amount: Amount,
@@ -56,7 +56,53 @@ pub struct ContractOutput {
     pub state: [u8; 32],
     /// Opaque client data. Removing the live output does not erase history.
     pub recovery: Vec<u8>,
-    pub extension: Option<assets::AssetExtension>,
+    pub assets: assets::AssetBundle,
+}
+
+/// Asset creations, issuance and burns for this instance's transaction.
+#[derive(
+    Debug, Clone, Default, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable,
+)]
+pub struct ActionOutput {
+    pub actions: assets::AssetActions,
+    /// Opaque client data, such as a sender receipt.
+    pub recovery: Vec<u8>,
+}
+
+impl SimplicityOutput {
+    pub fn contract(&self) -> Option<&ContractOutput> {
+        match self {
+            Self::Contract(contract) => Some(contract),
+            _ => None,
+        }
+    }
+
+    pub fn actions(&self) -> Option<&ActionOutput> {
+        match self {
+            Self::Actions(actions) => Some(actions),
+            _ => None,
+        }
+    }
+
+    pub fn recovery(&self) -> &[u8] {
+        match self {
+            Self::Contract(contract) => &contract.recovery,
+            Self::Actions(actions) => &actions.recovery,
+            Self::Default { .. } => &[],
+        }
+    }
+}
+
+impl From<ContractOutput> for SimplicityOutput {
+    fn from(contract: ContractOutput) -> Self {
+        Self::Contract(contract)
+    }
+}
+
+impl From<ActionOutput> for SimplicityOutput {
+    fn from(actions: ActionOutput) -> Self {
+        Self::Actions(actions)
+    }
 }
 
 /// Immutable contract context returned by the existing contract point query.
@@ -130,7 +176,7 @@ plugin_types_trait_impl_common!(
     SimplicityModuleTypes,
     config::SimplicityClientConfig,
     ContractInput,
-    ContractOutput,
+    SimplicityOutput,
     ContractOutcome,
     SimplicityConsensusItem,
     ContractError,
@@ -161,67 +207,30 @@ macro_rules! display_type {
 }
 display_type!(
     ContractInput,
-    ContractOutput,
+    SimplicityOutput,
     ContractOutcome,
     SimplicityConsensusItem,
     config::SimplicityClientConfig
 );
 
-pub fn output_fee(output: &ContractOutput) -> Amount {
-    let extra = output
-        .extension
-        .as_ref()
-        .map(|extension| extension.consensus_encode_to_vec().len() as u64)
-        .unwrap_or(0);
-    let creation = output
-        .actions()
-        .map(|actions| {
-            actions
+pub fn output_fee(output: &SimplicityOutput) -> Amount {
+    let (body, creation) = match output {
+        SimplicityOutput::Contract(contract) => {
+            (contract.assets.consensus_encode_to_vec().len(), 0)
+        }
+        SimplicityOutput::Actions(output) => (
+            output.actions.consensus_encode_to_vec().len(),
+            output
+                .actions
                 .creations
                 .iter()
                 .map(|creation| creation.authority_outputs.len() as u64)
                 .sum::<u64>()
-                * assets::CREATION_FEE_MSAT
-        })
-        .unwrap_or(0);
-    Amount::from_msats(BASE_ITEM_FEE_MSAT + output.recovery.len() as u64 + extra + creation)
-}
-
-impl Encodable for ContractOutput {
-    fn consensus_encode<W: std::io::Write>(&self, writer: &mut W) -> Result<(), std::io::Error> {
-        (
-            self.version,
-            self.amount,
-            self.cmr,
-            self.state,
-            &self.recovery,
-        )
-            .consensus_encode(writer)?;
-        self.extension.consensus_encode(writer)?;
-        Ok(())
-    }
-}
-
-impl Decodable for ContractOutput {
-    fn consensus_decode_partial_from_finite_reader<R: std::io::Read>(
-        reader: &mut R,
-        modules: &fedimint_core::module::registry::ModuleDecoderRegistry,
-    ) -> Result<Self, fedimint_core::encoding::DecodeError> {
-        let (version, amount, cmr, state, recovery) =
-            Decodable::consensus_decode_partial_from_finite_reader(reader, modules)?;
-        if version != EXECUTION_VERSION {
-            return Err(fedimint_core::encoding::DecodeError::from_str(
-                "unknown Simplicity output version",
-            ));
-        }
-        let extension = Decodable::consensus_decode_partial_from_finite_reader(reader, modules)?;
-        Ok(Self {
-            version,
-            amount,
-            cmr,
-            state,
-            recovery,
-            extension,
-        })
-    }
+                * limits::CREATION_FEE_MSAT,
+        ),
+        SimplicityOutput::Default { .. } => (0, 0),
+    };
+    Amount::from_msats(
+        limits::BASE_ITEM_FEE_MSAT + output.recovery().len() as u64 + body as u64 + creation,
+    )
 }

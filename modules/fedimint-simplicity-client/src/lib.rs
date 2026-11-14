@@ -58,7 +58,7 @@ impl ContractProgram {
         recovery: Vec<u8>,
     ) -> anyhow::Result<common::ContractOutput> {
         ensure!(
-            recovery.len() <= common::MAX_RECOVERY_BYTES,
+            recovery.len() <= common::limits::MAX_RECOVERY_BYTES,
             "recovery annotation is too large"
         );
         Ok(common::ContractOutput {
@@ -67,9 +67,7 @@ impl ContractProgram {
             cmr: self.cmr(),
             state,
             recovery,
-            extension: Some(common::assets::AssetExtension::Bundle(
-                common::assets::AssetBundle::default(),
-            )),
+            assets: common::assets::AssetBundle::default(),
         })
     }
 

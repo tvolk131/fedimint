@@ -4,7 +4,7 @@ use fedimint_core::secp256k1::{Keypair, SecretKey};
 
 use super::*;
 use crate::EXECUTION_VERSION;
-use crate::assets::{AssetBundle, AssetExtension};
+use crate::assets::AssetBundle;
 
 const MODULE: ModuleInstanceId = 4;
 const INTENT: [u8; 32] = [9; 32];
@@ -28,10 +28,10 @@ fn authority_output(authorities: Vec<AssetId>) -> ContractOutput {
         cmr: [1; 32],
         state: [2; 32],
         recovery: vec![],
-        extension: Some(AssetExtension::Bundle(AssetBundle {
+        assets: AssetBundle {
             balances: vec![],
             authorities,
-        })),
+        },
     }
 }
 
@@ -93,18 +93,12 @@ fn authority_must_be_a_resolved_bundle_carrying_the_derived_id() {
     let creation = creation(INTENT, vec![0, 1]);
     let valid = [authority_output(vec![id(0)]), authority_output(vec![id(1)])];
     assert!(check(&creation, INTENT, &valid).is_ok());
-    let mut action = authority_output(vec![]);
-    action.extension = Some(AssetExtension::Actions(AssetActions::default()));
-    let mut bare = authority_output(vec![]);
-    bare.extension = None;
     for invalid in [
         // Unresolved index, such as a foreign module's output.
         vec![authority_output(vec![id(0)])],
         vec![authority_output(vec![id(0)]), authority_output(vec![])],
         // The ID derives from the ordinal, not from the output position.
         vec![authority_output(vec![id(1)]), authority_output(vec![id(0)])],
-        vec![authority_output(vec![id(0)]), action],
-        vec![authority_output(vec![id(0)]), bare],
     ] {
         assert_eq!(
             check(&creation, INTENT, &invalid).unwrap_err(),

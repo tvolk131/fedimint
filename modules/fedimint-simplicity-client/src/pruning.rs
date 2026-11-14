@@ -16,7 +16,7 @@ use futures::{StreamExt as _, TryStreamExt as _, stream};
 
 use crate::SimplicityClientModule;
 use crate::common::runtime::{Environment, EnvironmentInput, EnvironmentOutput};
-use crate::common::{self, ContractInput, ContractOutput, StoredContract};
+use crate::common::{self, ContractInput, SimplicityOutput, StoredContract};
 
 /// Applications may reuse a snapshot across many local quotes. Supplying
 /// already authenticated metadata avoids contract-specific network queries.
@@ -80,15 +80,19 @@ impl PruningSnapshot {
         let mut outputs = Vec::new();
         for output in &tx.outputs {
             let contract = if output.module_instance_id() == module {
-                let contract = output
+                match output
                     .as_any()
-                    .downcast_ref::<ContractOutput>()
-                    .context("invalid Simplicity output")?;
-                if let Some(value) = contract.actions() {
-                    ensure!(actions.is_none(), "multiple action outputs");
-                    actions = Some(value.clone());
+                    .downcast_ref::<SimplicityOutput>()
+                    .context("invalid Simplicity output")?
+                {
+                    SimplicityOutput::Contract(contract) => Some(contract.clone()),
+                    SimplicityOutput::Actions(action) => {
+                        ensure!(actions.is_none(), "multiple action outputs");
+                        actions = Some(action.actions.clone());
+                        None
+                    }
+                    SimplicityOutput::Default { .. } => anyhow::bail!("unknown Simplicity output"),
                 }
-                Some(contract.clone())
             } else {
                 None
             };
@@ -141,7 +145,7 @@ impl SimplicityClientModule {
     ) -> anyhow::Result<PruningSnapshot> {
         let points: BTreeSet<_> = points.into_iter().collect();
         ensure!(
-            points.len() <= common::MAX_CONTRACTS,
+            points.len() <= common::limits::MAX_CONTRACTS,
             InvalidPruningPlan::TooManyInputs
         );
         let consensus_version = self.active_consensus_version().await?;

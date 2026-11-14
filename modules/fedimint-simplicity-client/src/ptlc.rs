@@ -93,7 +93,7 @@ impl Ptlc {
     pub fn validate_output(&self, output: &ContractOutput) -> anyhow::Result<()> {
         ensure!(
             output.version == crate::common::EXECUTION_VERSION
-                && output.bundle() == Some(&AssetBundle::default())
+                && output.assets == AssetBundle::default()
                 && output.cmr == self.program()?.cmr()
                 && output.state == self.payment_commitment()
                 && output.amount == self.amount,

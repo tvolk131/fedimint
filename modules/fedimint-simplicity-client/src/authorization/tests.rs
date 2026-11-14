@@ -185,7 +185,7 @@ fn a_funding_dependent_branch_cannot_silently_change_pruning_fees() {
     );
     tx.outputs.push(DynOutput::from_typed(
         7,
-        common::ContractOutput::action_output(Default::default()),
+        common::SimplicityOutput::from(common::ActionOutput::default()),
     ));
     let result: Result<_, ClientModuleError> = authorization.finalize_inputs(&tx);
     assert!(

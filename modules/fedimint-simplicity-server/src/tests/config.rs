@@ -20,9 +20,9 @@ fn fresh_database_baseline_has_no_prototype_migrations() {
 #[test]
 fn supported_configuration_loads_and_exports_client_config() {
     let peer = PeerId::from(0);
-    let config = config(vec![peer]).to_erased();
+    let config = config().to_erased();
     assert_eq!(config.consensus.version, MODULE_CONSENSUS_VERSION);
-    assert_eq!(load_config(&config).unwrap().consensus.peers, vec![peer]);
+    load_config(&config).unwrap();
     SimplicityInit.get_client_config(&config.consensus).unwrap();
     SimplicityInit.validate_config(&peer, config).unwrap();
 }
@@ -37,10 +37,11 @@ fn incompatible_versions_fail_before_decoding_the_payload() {
     ] {
         for valid_payload in [true, false] {
             let peer = PeerId::from(0);
-            let mut config = config(vec![peer]).to_erased();
+            let mut config = config().to_erased();
             config.consensus.version = version;
             if !valid_payload {
-                config.consensus.config.clear();
+                // The unit payload encodes to no bytes; any byte is invalid.
+                config.consensus.config.push(0);
             }
             for result in [
                 load_config(&config).map(|_| ()),
@@ -59,24 +60,16 @@ fn incompatible_versions_fail_before_decoding_the_payload() {
 }
 
 #[test]
-fn version_guard_does_not_bypass_payload_and_peer_validation() {
+fn version_guard_does_not_bypass_payload_validation() {
     let peer = PeerId::from(0);
-    let mut invalid = config(vec![peer]).to_erased();
-    invalid.consensus.config.clear();
+    let mut invalid = config().to_erased();
+    // The unit payload encodes to no bytes; trailing bytes are malformed.
+    invalid.consensus.config.push(0);
     assert!(load_config(&invalid).is_err());
-    for peers in [vec![], vec![peer, peer], vec![PeerId::from(1), peer]] {
-        let invalid = config(peers).to_erased();
-        assert!(load_config(&invalid).is_err());
-        assert!(
-            SimplicityInit
-                .get_client_config(&invalid.consensus)
-                .is_err()
-        );
-        assert!(SimplicityInit.validate_config(&peer, invalid).is_err());
-    }
     assert!(
         SimplicityInit
-            .validate_config(&PeerId::from(1), config(vec![peer]).to_erased())
+            .get_client_config(&invalid.consensus)
             .is_err()
     );
+    assert!(SimplicityInit.validate_config(&peer, invalid).is_err());
 }

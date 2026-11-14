@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::TransactionPlan;
 use crate::client::{SimplicityClientModule, SpendIntent};
-use crate::common::ContractOutput;
+use crate::common::SimplicityOutput;
 use crate::wallet::{WalletContract, db};
 
 mod driver;
@@ -175,7 +175,7 @@ pub struct IntentPlan {
     /// Useful when fees must fit inside an all-in purchase budget.
     pub max_fee: Option<Amount>,
     pub spends: Vec<SpendIntent>,
-    pub outputs: Vec<ContractOutput>,
+    pub outputs: Vec<SimplicityOutput>,
     /// Only conflicts on these inputs authorize a rebuild. Ordinary owned
     /// inputs disappearing is not automatically a retryable shared-state race.
     pub shared_inputs: Vec<OutPoint>,

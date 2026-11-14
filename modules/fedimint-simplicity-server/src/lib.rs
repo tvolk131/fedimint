@@ -24,7 +24,7 @@ use fedimint_core::module::{
     Amounts, ApiEndpoint, ApiVersion, CoreConsensusVersion, InputMeta, ModuleConsensusVersion,
     ModuleInit, TransactionItemAmounts, public_api_endpoint,
 };
-use fedimint_core::{InPoint, NumPeersExt, OutPoint, PeerId};
+use fedimint_core::{InPoint, NumPeers, OutPoint, PeerId};
 use fedimint_server_core::bitcoin_rpc::ServerBitcoinRpcMonitor;
 use fedimint_server_core::config::PeerHandleOps;
 use fedimint_server_core::{
@@ -38,10 +38,11 @@ use fedimint_simplicity_common::config::{
 use fedimint_simplicity_common::consensus::{
     ACTIVE_CONSENSUS_VERSION_ENDPOINT, SUPPORTED_CONSENSUS_VERSION_ENDPOINT,
 };
+use fedimint_simplicity_common::limits::{MAX_CONTRACTS, MAX_TRANSACTION_OUTPUTS};
 use fedimint_simplicity_common::{
-    ContractError, ContractInput, ContractOutcome, ContractOutput, ContractOutputError,
-    MAX_CONTRACTS, MODULE_CONSENSUS_VERSION, SimplicityCommonInit, SimplicityConsensusItem,
-    SimplicityModuleTypes, output_fee,
+    ContractError, ContractInput, ContractOutcome, ContractOutputError, MODULE_CONSENSUS_VERSION,
+    SimplicityCommonInit, SimplicityConsensusItem, SimplicityModuleTypes, SimplicityOutput,
+    output_fee,
 };
 use futures::StreamExt;
 
@@ -89,10 +90,10 @@ impl ServerModuleInit for SimplicityInit {
         &[MODULE_CONSENSUS_VERSION]
     }
     async fn init(&self, args: &ServerModuleInitArgs<Self>) -> anyhow::Result<Simplicity> {
-        let cfg = load_config(args.cfg())?;
+        load_config(args.cfg())?;
         executor::start()?;
         let mut module = Simplicity {
-            cfg,
+            num_peers: args.num_peers(),
             monitor: Some(args.server_bitcoin_rpc_monitor()),
             upgrades: upgrades::Upgrades::new(args.our_peer_id()),
         };
@@ -113,31 +114,26 @@ impl ServerModuleInit for SimplicityInit {
     ) -> BTreeMap<PeerId, ServerModuleConfig> {
         peers
             .iter()
-            .map(|peer| (*peer, config(peers.to_vec()).to_erased()))
+            .map(|peer| (*peer, config().to_erased()))
             .collect()
     }
     async fn distributed_gen(
         &self,
-        peers: &(dyn PeerHandleOps + Send + Sync),
+        _peers: &(dyn PeerHandleOps + Send + Sync),
         _args: &ConfigGenModuleArgs,
     ) -> anyhow::Result<ServerModuleConfig> {
-        Ok(config(peers.num_peers().peer_ids().collect()).to_erased())
+        Ok(config().to_erased())
     }
     fn get_client_config(
         &self,
         cfg: &ServerModuleConsensusConfig,
     ) -> anyhow::Result<SimplicityClientConfig> {
         validate_consensus_version(cfg.version)?;
-        validate_peers(&SimplicityConfigConsensus::from_erased(cfg)?.peers)?;
+        SimplicityConfigConsensus::from_erased(cfg)?;
         Ok(SimplicityClientConfig)
     }
-    fn validate_config(&self, identity: &PeerId, cfg: ServerModuleConfig) -> anyhow::Result<()> {
-        let cfg = load_config(&cfg)?;
-        ensure!(
-            cfg.consensus.peers.contains(identity),
-            "guardian missing from configured peers"
-        );
-        Ok(())
+    fn validate_config(&self, _identity: &PeerId, cfg: ServerModuleConfig) -> anyhow::Result<()> {
+        load_config(&cfg).map(|_| ())
     }
 }
 
@@ -153,30 +149,19 @@ fn validate_consensus_version(version: ModuleConsensusVersion) -> anyhow::Result
 
 fn load_config(cfg: &ServerModuleConfig) -> anyhow::Result<SimplicityConfig> {
     validate_consensus_version(cfg.consensus.version)?;
-    let cfg: SimplicityConfig = cfg.to_typed()?;
-    validate_peers(&cfg.consensus.peers)?;
-    Ok(cfg)
+    Ok(cfg.to_typed()?)
 }
 
-fn config(peers: Vec<PeerId>) -> SimplicityConfig {
+fn config() -> SimplicityConfig {
     SimplicityConfig {
         private: SimplicityConfigPrivate,
-        consensus: SimplicityConfigConsensus { peers },
+        consensus: SimplicityConfigConsensus,
     }
-}
-
-fn validate_peers(peers: &[PeerId]) -> anyhow::Result<()> {
-    ensure!(!peers.is_empty(), "empty guardian set");
-    ensure!(
-        peers.windows(2).all(|pair| pair[0] < pair[1]),
-        "guardian set must be sorted and unique"
-    );
-    Ok(())
 }
 
 #[derive(Debug)]
 pub struct Simplicity {
-    cfg: SimplicityConfig,
+    num_peers: NumPeers,
     monitor: Option<ServerBitcoinRpcMonitor>,
     upgrades: upgrades::Upgrades,
 }
@@ -184,13 +169,12 @@ pub struct Simplicity {
 impl Simplicity {
     /// Construct an instance with manually supplied consensus votes, for tests
     /// and embedded prototypes. Production initialization uses the RPC monitor.
-    pub fn new_for_testing(peers: Vec<PeerId>) -> anyhow::Result<Self> {
-        validate_peers(&peers)?;
-        Ok(Self {
-            upgrades: upgrades::Upgrades::new(peers[0]),
-            cfg: config(peers),
+    pub fn new_for_testing(num_peers: NumPeers) -> Self {
+        Self {
+            upgrades: upgrades::Upgrades::new(PeerId::from(0)),
+            num_peers,
             monitor: None,
-        })
+        }
     }
 
     pub async fn consensus_block_count(&self, dbtx: &mut DatabaseTransaction<'_>) -> u64 {
@@ -202,7 +186,7 @@ impl Simplicity {
             .await;
         votes.sort_unstable_by(|a, b| b.cmp(a));
         votes
-            .get(self.cfg.consensus.peers.to_num_peers().threshold() - 1)
+            .get(self.num_peers.threshold() - 1)
             .copied()
             .unwrap_or(0)
     }
@@ -234,7 +218,10 @@ impl ServerModule for Simplicity {
         peer: PeerId,
     ) -> anyhow::Result<()> {
         self.assert_supported(dbtx).await;
-        ensure!(self.cfg.consensus.peers.contains(&peer), "unknown guardian");
+        ensure!(
+            self.num_peers.peer_ids().any(|id| id == peer),
+            "unknown guardian"
+        );
         match item {
             SimplicityConsensusItem::BlockCount(count) => {
                 let previous = dbtx.get_value(&BlockVoteKey(peer)).await.unwrap_or(0);
@@ -291,7 +278,7 @@ impl ServerModule for Simplicity {
     async fn process_output<'a, 'b>(
         &'a self,
         _dbtx: &mut DatabaseTransaction<'b>,
-        _output: &'a ContractOutput,
+        _output: &'a SimplicityOutput,
         _point: OutPoint,
     ) -> Result<TransactionItemAmounts, ContractOutputError> {
         Err(ContractError::MissingContext.into())
@@ -337,39 +324,45 @@ impl ServerModule for Simplicity {
     async fn process_output_with_context<'a, 'b>(
         &'a self,
         dbtx: &mut DatabaseTransaction<'b>,
-        output: &'a ContractOutput,
+        output: &'a SimplicityOutput,
         point: OutPoint,
         context: &ModuleTransactionContext<'_>,
     ) -> Result<TransactionItemAmounts, ContractOutputError> {
         let validated = validated(context)?;
-        if output.actions().is_some() {
-            for namespace in &validated.namespaces {
-                if dbtx.get_value(&NamespaceKey(*namespace)).await.is_some() {
-                    return Err(ContractError::NamespaceUsed.into());
+        let amounts = TransactionItemAmounts {
+            amounts: Amounts::new_bitcoin(
+                output
+                    .contract()
+                    .map_or(fedimint_core::Amount::ZERO, |contract| contract.amount),
+            ),
+            fees: Amounts::new_bitcoin(output_fee(output)),
+        };
+        let contract = match output {
+            SimplicityOutput::Contract(contract) => contract,
+            SimplicityOutput::Actions(_) => {
+                for namespace in &validated.namespaces {
+                    if dbtx.get_value(&NamespaceKey(*namespace)).await.is_some() {
+                        return Err(ContractError::NamespaceUsed.into());
+                    }
+                    dbtx.insert_new_entry(&NamespaceKey(*namespace), &()).await;
                 }
-                dbtx.insert_new_entry(&NamespaceKey(*namespace), &()).await;
+                for (id, record) in &validated.creations {
+                    dbtx.insert_new_entry(&AssetKey(*id), record).await;
+                }
+                return Ok(amounts);
             }
-            for (id, record) in &validated.creations {
-                dbtx.insert_new_entry(&AssetKey(*id), record).await;
-            }
-            return Ok(TransactionItemAmounts {
-                amounts: Amounts::new_bitcoin(output.amount),
-                fees: Amounts::new_bitcoin(output_fee(output)),
-            });
-        }
+            SimplicityOutput::Default { .. } => return Err(ContractError::Version.into()),
+        };
         if dbtx.get_value(&ContractKey(point)).await.is_some() {
             return Err(ContractError::DuplicateOutput.into());
         }
         let stored = StoredContract {
-            output: output.clone(),
+            output: contract.clone(),
             creation_session: context.consensus.session_index,
             creation_block_count: self.consensus_block_count(dbtx).await,
         };
         insert_contract(dbtx, point, &stored).await?;
-        Ok(TransactionItemAmounts {
-            amounts: Amounts::new_bitcoin(output.amount),
-            fees: Amounts::new_bitcoin(output_fee(output)),
-        })
+        Ok(amounts)
     }
     async fn output_status(
         &self,
@@ -427,8 +420,7 @@ impl ServerModule for Simplicity {
 }
 
 fn validate_shape(context: &ModuleTransactionContext<'_>) -> Result<(), ContractError> {
-    if context.transaction.outputs.len()
-        > fedimint_simplicity_common::resources::MAX_TRANSACTION_OUTPUTS
+    if context.transaction.outputs.len() > MAX_TRANSACTION_OUTPUTS
         || context
             .transaction
             .inputs

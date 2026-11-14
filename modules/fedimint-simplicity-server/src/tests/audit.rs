@@ -1,5 +1,5 @@
 use fedimint_core::TransactionId;
-use fedimint_simplicity_common::{ContractOutput, resources};
+use fedimint_simplicity_common::resources;
 use futures::StreamExt;
 
 use super::*;
@@ -65,13 +65,15 @@ async fn unfunded_outputs_cannot_overflow_the_live_contract_total() {
             .map(|index| {
                 DynOutput::from_typed(
                     SIMP,
-                    program
-                        .output(
-                            Amount::from_msats(2_100_000_000_000_000_000),
-                            [index; 32],
-                            vec![],
-                        )
-                        .unwrap(),
+                    SimplicityOutput::from(
+                        program
+                            .output(
+                                Amount::from_msats(2_100_000_000_000_000_000),
+                                [index; 32],
+                                vec![],
+                            )
+                            .unwrap(),
+                    ),
                 )
             })
             .collect(),
@@ -88,7 +90,8 @@ async fn unfunded_outputs_cannot_overflow_the_live_contract_total() {
             u128::from(
                 output
                     .as_any()
-                    .downcast_ref::<ContractOutput>()
+                    .downcast_ref::<SimplicityOutput>()
+                    .and_then(SimplicityOutput::contract)
                     .unwrap()
                     .amount
                     .msats,
@@ -139,7 +142,7 @@ async fn funding_failure_rolls_back_contracts_and_live_total() {
     let funding = fed
         .fund(vec![DynOutput::from_typed(
             SIMP,
-            program.output(amount, [0; 32], vec![]).unwrap(),
+            SimplicityOutput::from(program.output(amount, [0; 32], vec![]).unwrap()),
         )])
         .await;
     let input = OutPoint {
@@ -154,9 +157,11 @@ async fn funding_failure_rolls_back_contracts_and_live_total() {
         true,
         vec![DynOutput::from_typed(
             SIMP,
-            program
-                .output(Amount::from_sats(101), [1; 32], vec![])
-                .unwrap(),
+            SimplicityOutput::from(
+                program
+                    .output(Amount::from_sats(101), [1; 32], vec![])
+                    .unwrap(),
+            ),
         )],
     );
     authorize(&fed, &mut tx, &program, input, &owner, true, &[]).await;
@@ -193,7 +198,9 @@ async fn audit_total_follows_contract_creation_and_spends() {
                 .map(|(index, amount)| {
                     DynOutput::from_typed(
                         SIMP,
-                        program.output(amount, [index as u8; 32], vec![]).unwrap(),
+                        SimplicityOutput::from(
+                            program.output(amount, [index as u8; 32], vec![]).unwrap(),
+                        ),
                     )
                 })
                 .collect(),
@@ -231,7 +238,10 @@ async fn audit_total_follows_contract_creation_and_spends() {
         created(1),
         &owner,
         true,
-        vec![DynOutput::from_typed(SIMP, successor)],
+        vec![DynOutput::from_typed(
+            SIMP,
+            SimplicityOutput::from(successor),
+        )],
     );
     authorize(&fed, &mut respend, &program, created(1), &owner, true, &[]).await;
     fed.process(&respend, 0).await.unwrap();
@@ -240,7 +250,7 @@ async fn audit_total_follows_contract_creation_and_spends() {
 
 #[tokio::test]
 async fn audit_reads_one_total_regardless_of_contract_count() {
-    let module = Simplicity::new_for_testing(vec![PeerId::from(0)]).unwrap();
+    let module = Simplicity::new_for_testing(NumPeers::from(1));
     let db = Database::new(MemDatabase::new(), ModuleDecoderRegistry::default());
     let output = contract_program(&key(), 0, 0)
         .output(Amount::ZERO, [0; 32], vec![])

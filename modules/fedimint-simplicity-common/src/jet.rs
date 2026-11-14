@@ -284,7 +284,6 @@ impl JetEnvironment for Environment {
                         .outputs
                         .get(read_index(src))
                         .and_then(|o| o.contract.as_ref())
-                        .filter(|output| output.actions().is_none())
                     else {
                         return false;
                     };
@@ -295,7 +294,6 @@ impl JetEnvironment for Environment {
                         .outputs
                         .get(read_index(src))
                         .and_then(|o| o.contract.as_ref())
-                        .filter(|output| output.actions().is_none())
                     else {
                         return false;
                     };
@@ -306,7 +304,6 @@ impl JetEnvironment for Environment {
                         .outputs
                         .get(read_index(src))
                         .and_then(|o| o.contract.as_ref())
-                        .filter(|output| output.actions().is_none())
                     else {
                         return false;
                     };
@@ -406,7 +403,6 @@ fn asset_jet(
         env.outputs
             .get(index)
             .and_then(|output| output.contract.as_ref())
-            .filter(|output| output.actions().is_none())
     } else {
         input.map(|input| &input.contract)
     };
@@ -421,48 +417,36 @@ fn asset_jet(
         InputAssetQuantity | OutputAssetQuantity => {
             let id = AssetId(read_bytes::<32>(&mut src));
             let quantity = output
-                .bundle()
-                .and_then(|bundle| bundle.balances.iter().find(|value| value.asset == id))
+                .assets
+                .balances
+                .iter()
+                .find(|value| value.asset == id)
                 .map(|value| value.quantity)
                 .unwrap_or(0);
             write_bytes(dst, &quantity.to_be_bytes())
         }
         InputAuthority | OutputAuthority => {
             let id = AssetId(read_bytes::<32>(&mut src));
-            let present = output
-                .bundle()
-                .is_some_and(|bundle| bundle.authorities.contains(&id));
+            let present = output.assets.authorities.contains(&id);
             // SAFETY: authority membership jets have a one-bit target.
             unsafe {
                 c_writeBit(dst, present);
             }
             true
         }
-        InputAssetCount | OutputAssetCount => write_bytes(
-            dst,
-            &(output
-                .bundle()
-                .map(|bundle| bundle.balances.len())
-                .unwrap_or(0) as u32)
-                .to_be_bytes(),
-        ),
-        InputAuthorityCount | OutputAuthorityCount => write_bytes(
-            dst,
-            &(output
-                .bundle()
-                .map(|bundle| bundle.authorities.len())
-                .unwrap_or(0) as u32)
-                .to_be_bytes(),
-        ),
+        InputAssetCount | OutputAssetCount => {
+            write_bytes(dst, &(output.assets.balances.len() as u32).to_be_bytes())
+        }
+        InputAuthorityCount | OutputAuthorityCount => {
+            write_bytes(dst, &(output.assets.authorities.len() as u32).to_be_bytes())
+        }
         InputAssetId | OutputAssetId | InputAuthorityId | OutputAuthorityId => {
             let entry = u32::from_be_bytes(read_bytes::<4>(&mut src)) as usize;
-            let id = output.bundle().and_then(|bundle| {
-                if matches!(jet, InputAssetId | OutputAssetId) {
-                    bundle.balances.get(entry).map(|value| value.asset)
-                } else {
-                    bundle.authorities.get(entry).copied()
-                }
-            });
+            let id = if matches!(jet, InputAssetId | OutputAssetId) {
+                output.assets.balances.get(entry).map(|value| value.asset)
+            } else {
+                output.assets.authorities.get(entry).copied()
+            };
             id.is_some_and(|id| write_bytes(dst, &id.0))
         }
         _ => false,

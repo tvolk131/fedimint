@@ -33,7 +33,14 @@ fn competing() -> BTreeMap<OutPoint, WalletContract> {
     BTreeMap::from([(
         point(1),
         WalletContract {
-            output: ContractOutput::action_output(Default::default()),
+            output: crate::common::ContractOutput {
+                version: crate::common::EXECUTION_VERSION,
+                amount: Amount::ZERO,
+                cmr: [0; 32],
+                state: [0; 32],
+                recovery: vec![],
+                assets: Default::default(),
+            },
             descriptor: crate::descriptor::ContractDescriptor::owner([0; 32]),
             creation_session: 0,
             spent_by: Some(txid(3)),

@@ -19,7 +19,7 @@ use fedimint_core::transaction::{Transaction, TransactionSignature};
 use fedimint_core::{Amount, OutPoint};
 
 use crate::authorization::{Authorization, PreparedSpend};
-use crate::common::{ContractInput, ContractOutput};
+use crate::common::{ContractInput, SimplicityOutput};
 use crate::compiler::{TemplateProgramWitness, WitnessNameToValueMap, WitnessValues};
 use crate::pruning::PruningSnapshot;
 use crate::receipt::SenderReceipt;
@@ -37,9 +37,10 @@ mod tests;
 pub struct TransactionPlan {
     /// Contracts to spend. An empty list is a direct send of owned funding.
     pub spends: Vec<SpendIntent>,
-    /// Explicit outputs. A sender receipt output is added automatically when
-    /// no owned contract makes the transaction recoverable.
-    pub outputs: Vec<ContractOutput>,
+    /// Explicit outputs, including at most one action output. A sender
+    /// receipt output is added automatically when no owned contract makes the
+    /// transaction recoverable.
+    pub outputs: Vec<SimplicityOutput>,
     /// Fresh asset-creation keys. Only submission signs with them, after
     /// funding fixes the transaction; quotes never use them.
     pub creations: Vec<Keypair>,
@@ -97,7 +98,7 @@ pub(crate) struct PreparedTransaction {
     /// Pruned draft inputs in spend order, each with its claim key and amount.
     pub inputs: Vec<ClientInput<ContractInput>>,
     /// Explicit outputs including any sender receipt output.
-    pub outputs: Vec<ContractOutput>,
+    pub outputs: Vec<SimplicityOutput>,
     pub authorization: Authorization,
 }
 
@@ -118,7 +119,11 @@ impl PreparedTransaction {
         let mut output_fee = 0u64;
         for output in &self.outputs {
             output_amount = output_amount
-                .checked_add(output.amount.msats)
+                .checked_add(
+                    output
+                        .contract()
+                        .map_or(0, |contract| contract.amount.msats),
+                )
                 .context("quote amount overflow")?;
             output_fee = output_fee
                 .checked_add(common::output_fee(output).msats)
@@ -158,7 +163,7 @@ impl WalletStore {
                 "contract is spent twice in one transaction"
             );
         }
-        for output in &plan.outputs {
+        for output in plan.outputs.iter().filter_map(SimplicityOutput::contract) {
             common::consensus::check_execution_version(output.version, snapshot.consensus_version)?;
         }
         let mut inputs = vec![];

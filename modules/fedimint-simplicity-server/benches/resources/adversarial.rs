@@ -80,7 +80,7 @@ fn packed() -> Fixture {
     let mut fixture = constant(4096);
     fixture.inputs.clear();
     fixture.consumed.clear();
-    let mut remaining = resources::MAX_TRANSACTION_REDEMPTION_BYTES;
+    let mut remaining = MAX_TRANSACTION_REDEMPTION_BYTES;
     for exponent in (0..=12).rev() {
         let part = constant(1 << exponent);
         while part.inputs[0].program.len() <= remaining && fixture.inputs.len() < 32 {
@@ -153,7 +153,7 @@ fn mixed(bad: bool) -> Fixture {
         .iter()
         .map(|input| input.program.len())
         .sum::<usize>();
-    while bytes + signature.inputs[0].program.len() > resources::MAX_TRANSACTION_REDEMPTION_BYTES {
+    while bytes + signature.inputs[0].program.len() > MAX_TRANSACTION_REDEMPTION_BYTES {
         bytes -= fixture
             .inputs
             .pop()
@@ -234,20 +234,22 @@ fn context_access(name: &str) -> Fixture {
     for value in &balances {
         fixture.records.insert(value.asset, record(value.asset));
     }
-    fixture.consumed[0].extension = Some(AssetExtension::Bundle(AssetBundle {
+    fixture.consumed[0].assets = AssetBundle {
         authorities: balances.iter().map(|value| value.asset).collect(),
         balances: balances.clone(),
-    }));
+    };
     fixture.transaction.outputs = vec![
-        DynOutput::from_typed(MODULE, fixture.consumed[0].clone()),
+        DynOutput::from_typed(MODULE, SimplicityOutput::from(fixture.consumed[0].clone())),
         DynOutput::from_typed(
             MODULE,
-            assets::action_output(AssetActions {
-                issuance: balances.clone(),
-                burns: balances,
-                creations: vec![],
-            })
-            .expect("bounded actions"),
+            SimplicityOutput::from(
+                assets::action_output(AssetActions {
+                    issuance: balances.clone(),
+                    burns: balances,
+                    creations: vec![],
+                })
+                .expect("bounded actions"),
+            ),
         ),
     ];
     fixture
@@ -307,10 +309,10 @@ pub fn build_case(name: &str) -> Case {
         output.amount = Amount::from_msats(
             100_000_000 + fixture.consumed.iter().map(|o| o.amount.msats).sum::<u64>(),
         );
-        fixture
-            .transaction
-            .outputs
-            .push(DynOutput::from_typed(MODULE, output));
+        fixture.transaction.outputs.push(DynOutput::from_typed(
+            MODULE,
+            SimplicityOutput::from(output),
+        ));
     }
     fixture.finish();
     let mut transaction = fixture.funded_transaction();
@@ -340,9 +342,10 @@ pub fn build_case(name: &str) -> Case {
         "packed_bad_output" => {
             let mut output = fixture.consumed[0].clone();
             output.version = 2;
-            transaction
-                .outputs
-                .push(DynOutput::from_typed(MODULE, output));
+            transaction.outputs.push(DynOutput::from_typed(
+                MODULE,
+                SimplicityOutput::from(output),
+            ));
             preflight = Outcome::Module(ContractError::Version);
             Outcome::Module(ContractError::Version)
         }
@@ -374,10 +377,10 @@ pub fn build_case(name: &str) -> Case {
         "creations_19_bad_first" | "creations_19_bad_last" | "creations_19_bad_destination" => {
             let mut output = transaction.outputs[1]
                 .as_any()
-                .downcast_ref::<ContractOutput>()
+                .downcast_ref::<SimplicityOutput>()
                 .expect("actions")
                 .clone();
-            let Some(AssetExtension::Actions(actions)) = &mut output.extension else {
+            let SimplicityOutput::Actions(ActionOutput { actions, .. }) = &mut output else {
                 panic!("actions")
             };
             let index = if name.ends_with("first") { 0 } else { 18 };
@@ -463,7 +466,7 @@ pub fn check_cases(names: &[&str]) {
             .map(|i| i.program.len() + i.witness.len())
             .sum();
         assert!(
-            bytes <= resources::MAX_TRANSACTION_REDEMPTION_BYTES,
+            bytes <= MAX_TRANSACTION_REDEMPTION_BYTES,
             "{name}: redemption size"
         );
         assert_eq!(

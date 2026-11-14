@@ -6,22 +6,19 @@ use fedimint_core::core::{DynInputError, ModuleInstanceId};
 use fedimint_core::transaction::{Transaction, TransactionError, TransactionSignature};
 use simplicity::Cost;
 
-use crate::assets::{MAX_ASSETS, validate_amounts};
+use crate::assets::validate_amounts;
+use crate::limits::{
+    CREATION_SIGNATURE_MILLIWEIGHT, MAX_ASSETS, MAX_CONTRACTS, MAX_PROGRAM_BYTES,
+    MAX_RECOVERY_BYTES, MAX_TRANSACTION_MILLIWEIGHT, MAX_TRANSACTION_OUTPUTS,
+    MAX_TRANSACTION_REDEMPTION_BYTES, MAX_WITNESS_BYTES,
+};
 use crate::{
-    ContractError, ContractInput, ContractOutput, EXECUTION_VERSION, MAX_CONTRACTS,
-    MAX_PROGRAM_BYTES, MAX_RECOVERY_BYTES, MAX_WITNESS_BYTES, runtime,
+    ActionOutput, ContractError, ContractInput, ContractOutput, EXECUTION_VERSION,
+    SimplicityOutput, runtime,
 };
 
 #[cfg(test)]
 mod tests;
-
-pub const MAX_TRANSACTION_MILLIWEIGHT: u32 = 2_000_000;
-pub const MAX_TRANSACTION_REDEMPTION_BYTES: usize = 16_384;
-/// Outputs of any kind in an outer transaction with Simplicity items.
-pub const MAX_TRANSACTION_OUTPUTS: usize = 128;
-/// Creation authorization runs outside the VM. Charge it conservatively in
-/// the same budget; this is a resource charge, not a change to the asset fee.
-pub const CREATION_SIGNATURE_MILLIWEIGHT: u32 = 100_000;
 
 /// Check a transaction under construction, before outer signatures exist.
 /// Counts, bytes and structural faults are checked before decoding redemption
@@ -101,16 +98,16 @@ fn check_structure(transaction: &Transaction) -> Result<Cost, ContractError> {
     counts.clear();
     let mut has_outputs = false;
     for output in &transaction.outputs {
-        if let Some(contract) = output.as_any().downcast_ref::<ContractOutput>() {
+        if let Some(simplicity) = output.as_any().downcast_ref::<SimplicityOutput>() {
             has_outputs = true;
             let count = counts.entry(output.module_instance_id()).or_insert(0usize);
             *count += 1;
             if *count > MAX_CONTRACTS {
                 return Err(ContractError::Limit);
             }
-            if let Some(actions) = contract.actions() {
-                let signatures =
-                    u32::try_from(actions.creations.len()).map_err(|_| ContractError::Limit)?;
+            if let Some(action) = simplicity.actions() {
+                let signatures = u32::try_from(action.actions.creations.len())
+                    .map_err(|_| ContractError::Limit)?;
                 let charge = signatures
                     .checked_mul(CREATION_SIGNATURE_MILLIWEIGHT)
                     .ok_or(ContractError::Limit)?;
@@ -135,9 +132,10 @@ fn check_structure(transaction: &Transaction) -> Result<Cost, ContractError> {
     }
     let mut action_instances = BTreeSet::new();
     for output in &transaction.outputs {
-        if let Some(contract) = output.as_any().downcast_ref::<ContractOutput>() {
-            check_output(contract)?;
-            if contract.actions().is_some() && !action_instances.insert(output.module_instance_id())
+        if let Some(simplicity) = output.as_any().downcast_ref::<SimplicityOutput>() {
+            check_output(simplicity)?;
+            if simplicity.actions().is_some()
+                && !action_instances.insert(output.module_instance_id())
             {
                 return Err(ContractError::Assets);
             }
@@ -146,13 +144,13 @@ fn check_structure(transaction: &Transaction) -> Result<Cost, ContractError> {
     // Destination indices are outer indices, but authorities must remain in
     // their own instance. Several ordinals may deliberately share one output.
     for output in &transaction.outputs {
-        if let Some(actions) = output
+        if let Some(action) = output
             .as_any()
-            .downcast_ref::<ContractOutput>()
-            .and_then(ContractOutput::actions)
+            .downcast_ref::<SimplicityOutput>()
+            .and_then(SimplicityOutput::actions)
         {
             let mut creation_keys = BTreeSet::new();
-            for creation in &actions.creations {
+            for creation in &action.actions.creations {
                 if !creation_keys.insert(creation.key) {
                     return Err(ContractError::NamespaceUsed);
                 }
@@ -164,9 +162,9 @@ fn check_structure(transaction: &Transaction) -> Result<Cost, ContractError> {
                             destination.module_instance_id() == output.module_instance_id()
                         })
                         .and_then(|destination| {
-                            destination.as_any().downcast_ref::<ContractOutput>()
+                            destination.as_any().downcast_ref::<SimplicityOutput>()
                         });
-                    if destination.is_none_or(|destination| destination.bundle().is_none()) {
+                    if destination.is_none_or(|destination| destination.contract().is_none()) {
                         return Err(ContractError::Assets);
                     }
                 }
@@ -192,42 +190,54 @@ fn check_programs(transaction: &Transaction, mut cost: Cost) -> Result<Cost, Con
 /// Output-only structural rules, shared with snapshot-dependent guardian
 /// validation. Asset conservation, namespace existence and creation signatures
 /// are checked by the guardian later.
-pub fn check_output(output: &ContractOutput) -> Result<(), ContractError> {
-    if output.version != EXECUTION_VERSION || output.extension.is_none() {
+pub fn check_output(output: &SimplicityOutput) -> Result<(), ContractError> {
+    match output {
+        SimplicityOutput::Contract(contract) => check_contract_output(contract),
+        SimplicityOutput::Actions(action) => check_action_output(action),
+        SimplicityOutput::Default { .. } => Err(ContractError::Version),
+    }
+}
+
+fn check_contract_output(output: &ContractOutput) -> Result<(), ContractError> {
+    if output.version != EXECUTION_VERSION {
         return Err(ContractError::Version);
     }
     if output.recovery.len() > MAX_RECOVERY_BYTES || output.amount.msats > 2_100_000_000_000_000_000
     {
         return Err(ContractError::Limit);
     }
-    if let Some(bundle) = output.bundle() {
-        validate_amounts(&bundle.balances)?;
-        if bundle.authorities.len() > MAX_ASSETS
-            || !bundle.authorities.windows(2).all(|pair| pair[0] < pair[1])
-        {
-            return Err(ContractError::Assets);
-        }
+    validate_amounts(&output.assets.balances)?;
+    if output.assets.authorities.len() > MAX_ASSETS
+        || !output
+            .assets
+            .authorities
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+    {
+        return Err(ContractError::Assets);
     }
-    if let Some(actions) = output.actions() {
-        if output.amount.msats != 0 || output.cmr != [0; 32] || output.state != [0; 32] {
-            return Err(ContractError::Assets);
-        }
-        validate_amounts(&actions.issuance)?;
-        validate_amounts(&actions.burns)?;
-        if actions.creations.len() > MAX_ASSETS
-            || actions.creations.iter().any(|creation| {
-                creation.authority_outputs.is_empty()
-                    || creation.authority_outputs.len() > MAX_ASSETS
-            })
-            || actions
-                .creations
-                .iter()
-                .map(|creation| creation.authority_outputs.len())
-                .sum::<usize>()
-                > MAX_ASSETS
-        {
-            return Err(ContractError::Limit);
-        }
+    Ok(())
+}
+
+fn check_action_output(output: &ActionOutput) -> Result<(), ContractError> {
+    if output.recovery.len() > MAX_RECOVERY_BYTES {
+        return Err(ContractError::Limit);
+    }
+    let actions = &output.actions;
+    validate_amounts(&actions.issuance)?;
+    validate_amounts(&actions.burns)?;
+    if actions.creations.len() > MAX_ASSETS
+        || actions.creations.iter().any(|creation| {
+            creation.authority_outputs.is_empty() || creation.authority_outputs.len() > MAX_ASSETS
+        })
+        || actions
+            .creations
+            .iter()
+            .map(|creation| creation.authority_outputs.len())
+            .sum::<usize>()
+            > MAX_ASSETS
+    {
+        return Err(ContractError::Limit);
     }
     Ok(())
 }

@@ -187,7 +187,7 @@ impl WalletKeys {
     pub fn encrypt(&self, descriptor: &ContractDescriptor) -> anyhow::Result<Vec<u8>> {
         let plaintext = (DESCRIPTOR_VERSION, descriptor.clone()).consensus_encode_to_vec();
         ensure!(
-            plaintext.len() + ENVELOPE.len() + 12 + 16 <= common::MAX_RECOVERY_BYTES,
+            plaintext.len() + ENVELOPE.len() + 12 + 16 <= common::limits::MAX_RECOVERY_BYTES,
             "descriptor exceeds the recovery annotation limit"
         );
         let mut annotation = ENVELOPE.to_vec();
@@ -199,7 +199,9 @@ impl WalletKeys {
     /// and is ignored. Once authenticated, an unknown or malformed descriptor
     /// is an error: do not silently finish recovery with missing owned state.
     pub fn decrypt(&self, annotation: &[u8]) -> anyhow::Result<Option<ContractDescriptor>> {
-        if annotation.len() > common::MAX_RECOVERY_BYTES || !annotation.starts_with(ENVELOPE) {
+        if annotation.len() > common::limits::MAX_RECOVERY_BYTES
+            || !annotation.starts_with(ENVELOPE)
+        {
             return Ok(None);
         }
         let mut ciphertext = annotation[ENVELOPE.len()..].to_vec();
@@ -241,10 +243,6 @@ pub fn preserves_authorities(
 ) -> bool {
     before.cmr == after.cmr
         && before.version == after.version
-        && before.bundle().is_some_and(|old| {
-            !old.authorities.is_empty()
-                && after
-                    .bundle()
-                    .is_some_and(|new| old.authorities == new.authorities)
-        })
+        && !before.assets.authorities.is_empty()
+        && before.assets.authorities == after.assets.authorities
 }

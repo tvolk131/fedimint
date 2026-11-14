@@ -33,9 +33,9 @@ pub(super) fn write_report(name: &str, value: &serde_json::Value) {
 fn consensus_observation_report() {
     let (federation, tx) = super::wire::transaction();
     let wire = json!({
-        "native": native().consensus_encode_to_vec(),
-        "asset": asset().consensus_encode_to_vec(),
-        "actions": ContractOutput::action_output(actions()).consensus_encode_to_vec(),
+        "native": SimplicityOutput::from(native()).consensus_encode_to_vec(),
+        "asset": SimplicityOutput::from(asset()).consensus_encode_to_vec(),
+        "actions": action_output().consensus_encode_to_vec(),
         "outer_outputs": tx.outputs.consensus_encode_to_vec(),
         "namespace": namespace(federation, 4, key()),
         "asset_id_0": asset_id(federation, 4, key(), 0).0,

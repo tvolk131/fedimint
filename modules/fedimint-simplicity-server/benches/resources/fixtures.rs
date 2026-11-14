@@ -11,7 +11,7 @@ use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::module::{AmountUnit, CoreConsensusVersion};
 use fedimint_core::secp256k1::{Keypair, Message, SECP256K1, SecretKey};
 use fedimint_core::transaction::{Transaction, TransactionError, TransactionSignature};
-use fedimint_core::{Amount, OutPoint, TransactionId};
+use fedimint_core::{Amount, NumPeers, OutPoint, TransactionId};
 use fedimint_dummy_common::config::{DummyConfig, DummyConfigConsensus, DummyConfigPrivate};
 use fedimint_dummy_common::{DummyInput, DummyOutput};
 use fedimint_dummy_server::Dummy;
@@ -25,13 +25,17 @@ use fedimint_simplicity_client::{
     ContractProgram, assets, owner_program, placeholder_signature, sign_transaction,
 };
 use fedimint_simplicity_common::assets::{
-    AssetActions, AssetAmount, AssetBundle, AssetExtension, AssetId, AssetRecord,
+    AssetActions, AssetAmount, AssetBundle, AssetId, AssetRecord,
 };
 use fedimint_simplicity_common::jet::FedimintJet;
+use fedimint_simplicity_common::limits::{
+    CREATION_SIGNATURE_MILLIWEIGHT, MAX_PROGRAM_BYTES, MAX_TRANSACTION_MILLIWEIGHT,
+    MAX_TRANSACTION_REDEMPTION_BYTES, MAX_WITNESS_BYTES,
+};
 use fedimint_simplicity_common::runtime::{self, Environment, EnvironmentInput, EnvironmentOutput};
 use fedimint_simplicity_common::{
-    ContractError, ContractInput, ContractOutput, ContractOutputError, MAX_PROGRAM_BYTES,
-    MAX_WITNESS_BYTES, output_fee, resources,
+    ActionOutput, ContractError, ContractInput, ContractOutput, ContractOutputError,
+    SimplicityOutput, output_fee, resources,
 };
 use fedimint_simplicity_server::Simplicity;
 use fedimint_simplicity_server::db::{
@@ -246,20 +250,18 @@ impl Fixture {
             .map(|output| EnvironmentOutput {
                 module_id: output.module_instance_id(),
                 hash: output.consensus_hash_sha256().to_byte_array(),
-                contract: (output.module_instance_id() == MODULE).then(|| {
-                    output
-                        .as_any()
-                        .downcast_ref::<ContractOutput>()
-                        .expect("own output")
-                        .clone()
-                }),
+                contract: (output.module_instance_id() == MODULE)
+                    .then(|| own_output(output).contract().cloned())
+                    .flatten(),
             })
             .collect();
-        let actions: Arc<AssetActions> = outputs
+        let actions: Arc<AssetActions> = self
+            .transaction
+            .outputs
             .iter()
-            .filter_map(|output| output.contract.as_ref()?.actions())
-            .next()
-            .cloned()
+            .filter(|output| output.module_instance_id() == MODULE)
+            .find_map(|output| own_output(output).actions())
+            .map(|action| action.actions.clone())
             .unwrap_or_default()
             .into();
         let inputs: Arc<[_]> = self
@@ -292,6 +294,13 @@ impl Fixture {
     }
 }
 
+fn own_output(output: &DynOutput) -> &SimplicityOutput {
+    output
+        .as_any()
+        .downcast_ref::<SimplicityOutput>()
+        .expect("own output")
+}
+
 fn empty(program: Vec<u8>, witness: Vec<u8>, cmr: [u8; 32]) -> Fixture {
     Fixture {
         transaction: Transaction {
@@ -312,7 +321,7 @@ fn empty(program: Vec<u8>, witness: Vec<u8>, cmr: [u8; 32]) -> Fixture {
             cmr,
             state: [0; 32],
             recovery: vec![],
-            extension: Some(AssetExtension::Bundle(AssetBundle::default())),
+            assets: AssetBundle::default(),
         }],
         environments: vec![],
         records: BTreeMap::new(),
@@ -345,7 +354,7 @@ fn duplicate(fixture: &mut Fixture, count: usize, outputs: bool) {
             .consumed
             .iter()
             .cloned()
-            .map(|output| DynOutput::from_typed(MODULE, output))
+            .map(|output| DynOutput::from_typed(MODULE, SimplicityOutput::from(output)))
             .collect();
     }
 }
@@ -594,10 +603,10 @@ pub fn build(name: &str) -> Fixture {
                 for value in &balances {
                     fixture.records.insert(value.asset, record(value.asset));
                 }
-                fixture.consumed[0].extension = Some(AssetExtension::Bundle(AssetBundle {
+                fixture.consumed[0].assets = AssetBundle {
                     balances,
                     authorities: vec![],
-                }));
+                };
             }
             duplicate(&mut fixture, 32, true);
             if name == "asset_failure" {
@@ -678,19 +687,21 @@ fn creation_case(count: u8) -> Fixture {
     ids.sort();
     let mut authority = fixture.consumed[0].clone();
     authority.amount = Amount::ZERO;
-    authority.extension = Some(AssetExtension::Bundle(AssetBundle {
+    authority.assets = AssetBundle {
         balances: vec![],
         authorities: ids,
-    }));
+    };
     fixture.transaction.outputs = vec![
-        DynOutput::from_typed(MODULE, authority),
+        DynOutput::from_typed(MODULE, SimplicityOutput::from(authority)),
         DynOutput::from_typed(
             MODULE,
-            assets::action_output(AssetActions {
-                creations,
-                ..Default::default()
-            })
-            .expect("creation action"),
+            SimplicityOutput::from(
+                assets::action_output(AssetActions {
+                    creations,
+                    ..Default::default()
+                })
+                .expect("creation action"),
+            ),
         ),
     ];
     fixture.finish();
@@ -749,7 +760,7 @@ fn owner(late_failure: bool) -> Fixture {
 
 pub fn check_all() {
     let rt = executor();
-    let module = Simplicity::new_for_testing(vec![0.into()]).expect("one guardian");
+    let module = Simplicity::new_for_testing(NumPeers::from(1));
     for (name, fixture) in FIXTURES.iter() {
         assert_eq!(
             resources::check_transaction(&fixture.transaction).err(),
@@ -821,9 +832,9 @@ pub fn manifest() -> serde_json::Value {
         "schema": 2,
         "allocation_profiler": cfg!(feature = "bench-alloc"),
         "max_transaction_bytes": Transaction::MAX_TX_SIZE,
-        "max_redemption_bytes": resources::MAX_TRANSACTION_REDEMPTION_BYTES,
-        "max_transaction_milliweight": resources::MAX_TRANSACTION_MILLIWEIGHT,
-        "creation_signature_milliweight": resources::CREATION_SIGNATURE_MILLIWEIGHT,
+        "max_redemption_bytes": MAX_TRANSACTION_REDEMPTION_BYTES,
+        "max_transaction_milliweight": MAX_TRANSACTION_MILLIWEIGHT,
+        "creation_signature_milliweight": CREATION_SIGNATURE_MILLIWEIGHT,
         "fixtures": FIXTURES.iter().map(|(name, fixture)| {
             let program = runtime::decode_program(&fixture.inputs[0]).ok();
             let bounds = program.as_ref().map(|program| program.bounds());
@@ -840,7 +851,7 @@ pub fn manifest() -> serde_json::Value {
                 "first_extra_cells": bounds.map(|bounds| bounds.extra_cells),
                 "first_extra_frames": bounds.map(|bounds| bounds.extra_frames),
                 "input_fee_msat": fixture.inputs.iter().map(runtime::input_fee).collect::<Result<Vec<_>, _>>().ok().map(|fees| fees.iter().map(|fee| fee.msats).sum::<u64>()),
-                "output_fee_msat": fixture.transaction.outputs.iter().filter_map(|output| output.as_any().downcast_ref::<ContractOutput>()).map(|output| output_fee(output).msats).sum::<u64>(),
+                "output_fee_msat": fixture.transaction.outputs.iter().filter_map(|output| output.as_any().downcast_ref::<SimplicityOutput>()).map(|output| output_fee(output).msats).sum::<u64>(),
                 "decode_error": fixture.decode_error.as_ref().map(ToString::to_string),
                 "validation_error": fixture.preflight_error.as_ref().or(fixture.validation_error.as_ref()).map(ToString::to_string),
                 "preflight_error": fixture.preflight_error.as_ref().map(ToString::to_string),
@@ -922,9 +933,7 @@ pub fn core_modules() -> ServerModuleRegistry {
         (
             MODULE,
             fedimint_simplicity_common::KIND,
-            DynServerModule::from(
-                Simplicity::new_for_testing(vec![0.into()]).expect("one guardian"),
-            ),
+            DynServerModule::from(Simplicity::new_for_testing(NumPeers::from(1))),
         ),
         (
             FUNDING_MODULE,

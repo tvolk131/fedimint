@@ -134,11 +134,11 @@ pub(super) async fn check(client: &ClientHandle) {
     // A direct send with no spend is quoted by the core funding dry run too,
     // and submitting the same plan prepares the same transaction.
     let direct = TransactionPlan {
-        outputs: vec![output.clone()],
+        outputs: vec![output.clone().into()],
         ..Default::default()
     };
     let direct_fee = wallet.quote_transaction(&direct).await.unwrap();
-    assert!(direct_fee >= fedimint_simplicity_common::output_fee(&output));
+    assert!(direct_fee >= fedimint_simplicity_common::output_fee(&output.into()));
     let (operation, txid) = wallet.submit_plan(direct).await.unwrap();
     wallet.await_operation(operation).await.unwrap();
     client.await_no_active_states(operation).await;
@@ -157,7 +157,7 @@ pub(super) async fn check(client: &ClientHandle) {
     let snapshot = wallet.pruning_snapshot([point]).await.unwrap();
     let plan = TransactionPlan {
         spends: vec![spend(false)],
-        outputs: vec![destination.clone()],
+        outputs: vec![destination.clone().into()],
         ..Default::default()
     };
     let request = wallet
@@ -183,7 +183,10 @@ pub(super) async fn check(client: &ClientHandle) {
         .unwrap();
     let tx = Transaction {
         inputs: vec![DynInput::from_typed(module, raw.clone())],
-        outputs: vec![DynOutput::from_typed(module, destination.clone())],
+        outputs: vec![DynOutput::from_typed(
+            module,
+            SimplicityOutput::from(destination.clone()),
+        )],
         nonce: [0; 8],
         signatures: TransactionSignature::NaiveMultisig(vec![]),
     };
@@ -211,7 +214,11 @@ pub(super) async fn check(client: &ClientHandle) {
     let balance = client.get_balance_for_btc().await.unwrap();
     let history = wallet.history().await;
     let error = wallet
-        .submit(vec![spend(true)], vec![destination.clone()], vec![])
+        .submit_plan(TransactionPlan {
+            spends: vec![spend(true)],
+            outputs: vec![destination.clone().into()],
+            ..Default::default()
+        })
         .await
         .unwrap_err();
     assert!(
@@ -227,7 +234,11 @@ pub(super) async fn check(client: &ClientHandle) {
     assert_eq!(wallet.history().await, history);
     // The same input remains spendable with a funding-independent branch.
     let (operation, _) = wallet
-        .submit(vec![spend(false)], vec![destination], vec![])
+        .submit_plan(TransactionPlan {
+            spends: vec![spend(false)],
+            outputs: vec![destination.into()],
+            ..Default::default()
+        })
         .await
         .unwrap();
     wallet.await_operation(operation).await.unwrap();

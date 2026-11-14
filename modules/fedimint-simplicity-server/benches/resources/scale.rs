@@ -170,7 +170,10 @@ async fn generate(path: &Path, count: u32, stride: u32) {
                 bundle.clone(),
             )
             .expect("output");
-        let mut outputs = vec![DynOutput::from_typed(MODULE, output.clone())];
+        let mut outputs = vec![DynOutput::from_typed(
+            MODULE,
+            SimplicityOutput::from(output.clone()),
+        )];
         let sent = (kind == 2).then(|| SenderReceipt {
             context: Some(ReceiptContext {
                 application: "scale".to_owned(),
@@ -183,7 +186,10 @@ async fn generate(path: &Path, count: u32, stride: u32) {
             if let Some(receipt) = &sent {
                 action.recovery = receipt_placeholder(receipt);
             }
-            outputs.push(DynOutput::from_typed(MODULE, action));
+            outputs.push(DynOutput::from_typed(
+                MODULE,
+                SimplicityOutput::from(action),
+            ));
         }
         let mut tx = funded(vec![], outputs, 0, index);
         if let Some(creator) = creator {
@@ -236,22 +242,26 @@ async fn generate(path: &Path, count: u32, stride: u32) {
                 vec![
                     DynOutput::from_typed(
                         MODULE,
-                        program
-                            .asset_output(
-                                Amount::from_sats(1),
-                                [0; 32],
-                                own.encrypt(&descriptor).expect("successor annotation"),
-                                bundle,
-                            )
-                            .expect("successor"),
+                        SimplicityOutput::from(
+                            program
+                                .asset_output(
+                                    Amount::from_sats(1),
+                                    [0; 32],
+                                    own.encrypt(&descriptor).expect("successor annotation"),
+                                    bundle,
+                                )
+                                .expect("successor"),
+                        ),
                     ),
                     DynOutput::from_typed(
                         MODULE,
-                        assets::action_output(AssetActions {
-                            issuance: amounts,
-                            ..Default::default()
-                        })
-                        .expect("issue"),
+                        SimplicityOutput::from(
+                            assets::action_output(AssetActions {
+                                issuance: amounts,
+                                ..Default::default()
+                            })
+                            .expect("issue"),
+                        ),
                     ),
                 ]
             } else {
@@ -286,7 +296,8 @@ async fn generate(path: &Path, count: u32, stride: u32) {
                     WalletContract {
                         output: tx.outputs[0]
                             .as_any()
-                            .downcast_ref::<ContractOutput>()
+                            .downcast_ref::<SimplicityOutput>()
+                            .and_then(SimplicityOutput::contract)
                             .expect("successor")
                             .clone(),
                         descriptor: descriptor.clone(),
@@ -346,15 +357,15 @@ fn funded(
         .sum::<u64>()
         + outputs
             .iter()
-            .filter_map(|o| o.as_any().downcast_ref::<ContractOutput>())
+            .filter_map(|o| o.as_any().downcast_ref::<SimplicityOutput>())
             .map(|o| output_fee(o).msats)
             .sum::<u64>();
     let out: u64 = outputs
         .iter()
         .map(|o| {
             o.as_any()
-                .downcast_ref::<ContractOutput>()
-                .map(|o| o.amount.msats)
+                .downcast_ref::<SimplicityOutput>()
+                .map(|o| o.contract().map_or(0, |contract| contract.amount.msats))
                 .or_else(|| {
                     o.as_any()
                         .downcast_ref::<DummyOutput>()
@@ -439,11 +450,14 @@ fn attach_receipt(tx: &mut Transaction, receipt: &SenderReceipt) {
         receipt,
     )
         .consensus_encode_to_vec();
-    let mut output = tx.outputs[1]
+    let SimplicityOutput::Actions(mut output) = tx.outputs[1]
         .as_any()
-        .downcast_ref::<ContractOutput>()
+        .downcast_ref::<SimplicityOutput>()
         .expect("receipt output")
-        .clone();
+        .clone()
+    else {
+        panic!("receipt output is an action output");
+    };
     let mut bytes = b"FMR1".to_vec();
     bytes.extend(
         fedimint_aead::encrypt(
@@ -454,7 +468,7 @@ fn attach_receipt(tx: &mut Transaction, receipt: &SenderReceipt) {
     );
     assert_eq!(bytes.len(), output.recovery.len());
     output.recovery = bytes;
-    tx.outputs[1] = DynOutput::from_typed(MODULE, output);
+    tx.outputs[1] = DynOutput::from_typed(MODULE, SimplicityOutput::from(output));
 }
 
 async fn recover(path: &Path, phase: &str) {
@@ -597,7 +611,7 @@ async fn recover(path: &Path, phase: &str) {
         if contract.spent_by.is_some() {
             continue;
         }
-        let bundle = contract.output.bundle().expect("bundle");
+        let bundle = &contract.output.assets;
         let index = usize::from(!bundle.authorities.is_empty());
         if checked[index] {
             continue;
@@ -612,11 +626,13 @@ async fn recover(path: &Path, phase: &str) {
         if !bundle.balances.is_empty() {
             outputs.push(DynOutput::from_typed(
                 MODULE,
-                assets::action_output(AssetActions {
-                    burns: bundle.balances.clone(),
-                    ..Default::default()
-                })
-                .expect("burn"),
+                SimplicityOutput::from(
+                    assets::action_output(AssetActions {
+                        burns: bundle.balances.clone(),
+                        ..Default::default()
+                    })
+                    .expect("burn"),
+                ),
             ));
         }
         let tx = spend(*point, contract, outputs, u32::MAX);
