@@ -25,6 +25,7 @@ use fedimint_lnv2_common::endpoint_constants::{BOLT12_NONCE_ENDPOINT, BOLT12_SIG
 use frost_secp256k1_tr as frost;
 use futures::future::join_all;
 use lightning::offers::invoice::Bolt12Invoice;
+use rand::seq::SliceRandom as _;
 
 /// How long one guardian may take to answer one signing round.
 const ROUND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -91,7 +92,7 @@ pub async fn sign_invoice(
     // Each failed attempt excludes at least one guardian, so this many
     // attempts exhaust every set that could still reach quorum.
     for _ in 0..=cfg.tpe_pks.len() - quorum {
-        let peers: Vec<PeerId> = cfg
+        let mut peers: Vec<PeerId> = cfg
             .tpe_pks
             .keys()
             .filter(|peer| !excluded.contains(*peer))
@@ -102,6 +103,12 @@ pub async fn sign_invoice(
             peers.len() >= quorum,
             "too few responsive guardians to sign the invoice"
         );
+
+        // Ask exactly a quorum, picked at random: a guardian asked for a
+        // nonce holds it until the reservation ends, and each guardian holds
+        // only a few per gateway, so spares would use up that allowance.
+        peers.shuffle(&mut rand::thread_rng());
+        peers.truncate(quorum);
 
         let attempt: [u8; 32] = rand::random();
 
@@ -137,12 +144,10 @@ pub async fn sign_invoice(
             };
 
             match commitment {
-                Some(commitment) if signers.len() < quorum => {
+                Some(commitment) => {
                     commitments.insert(identifier(*peer)?, commitment);
                     signers.push(*peer);
                 }
-                // A spare guardian keeps its unused nonce; it expires.
-                Some(_) => {}
                 None => {
                     excluded.insert(*peer);
                 }
