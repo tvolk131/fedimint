@@ -20,6 +20,11 @@ use crate::wallet::{WalletContract, db};
 mod driver;
 use driver::IntentWait;
 
+/// Local bounds on persisted intents; guardians never see these records.
+const MAX_INTENT_ATTEMPTS: u32 = 100;
+const MAX_INTENT_DATA_BYTES: usize = 16_384;
+const MAX_INTENT_TEMPLATE_BYTES: usize = 128;
+
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize, Encodable, Decodable)]
 pub struct Intent {
     pub template: String,
@@ -300,11 +305,12 @@ impl SimplicityClientModule {
         policy: IntentPolicy,
     ) -> anyhow::Result<OperationId> {
         ensure!(
-            (1..=100).contains(&policy.max_attempts),
-            "expected 1..=100 attempts"
+            (1..=MAX_INTENT_ATTEMPTS).contains(&policy.max_attempts),
+            "expected 1..={MAX_INTENT_ATTEMPTS} attempts"
         );
         ensure!(
-            intent.data.len() <= 16_384 && intent.template.len() <= 128,
+            intent.data.len() <= MAX_INTENT_DATA_BYTES
+                && intent.template.len() <= MAX_INTENT_TEMPLATE_BYTES,
             "intent too large"
         );
         ensure!(

@@ -17,6 +17,8 @@ mod tests;
 
 pub const MAX_TRANSACTION_MILLIWEIGHT: u32 = 2_000_000;
 pub const MAX_TRANSACTION_REDEMPTION_BYTES: usize = 16_384;
+/// Outputs of any kind in an outer transaction with Simplicity items.
+pub const MAX_TRANSACTION_OUTPUTS: usize = 128;
 /// Creation authorization runs outside the VM. Charge it conservatively in
 /// the same budget; this is a resource charge, not a change to the asset fee.
 pub const CREATION_SIGNATURE_MILLIWEIGHT: u32 = 100_000;
@@ -119,7 +121,7 @@ fn check_structure(transaction: &Transaction) -> Result<Cost, ContractError> {
             }
         }
     }
-    if (has_inputs || has_outputs) && transaction.outputs.len() > 128 {
+    if (has_inputs || has_outputs) && transaction.outputs.len() > MAX_TRANSACTION_OUTPUTS {
         return Err(ContractError::Limit);
     }
     // Check all cheap bounds first, even when an earlier input is malformed.
