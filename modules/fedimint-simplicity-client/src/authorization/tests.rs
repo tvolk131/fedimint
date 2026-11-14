@@ -4,12 +4,28 @@ use fedimint_core::secp256k1::{SECP256K1, SecretKey};
 use fedimint_core::transaction::TransactionSignature;
 
 use super::*;
-use crate::compiler::witnesses;
+use crate::compiler::{ValueConstructible as _, witnesses};
 
 #[test]
-fn finalization_checks_the_combined_resource_budget_before_submission() {
+fn finalization_checks_each_instances_resource_budget_before_submission() {
     let owner = Keypair::from_secret_key(SECP256K1, &SecretKey::from_slice(&[1; 32]).unwrap());
-    let program = crate::owner_program(owner.x_only_public_key().0).unwrap();
+    // Two signature checks cost 110,030 milliweight, so 18 fit in one
+    // instance's budget and 19 do not, while staying under the contract count.
+    let program = ContractProgram::compile(
+        "fn main() {
+            let message: u256 = jet::fm_sig_hash_all();
+            let signature: [u8; 64] = witness::SIGNATURE;
+            jet::bip_0340_verify((param::OWNER, message), signature);
+            jet::bip_0340_verify((param::OWNER, message), signature);
+        }",
+        crate::compiler::arguments([(
+            "OWNER",
+            crate::compiler::Value::u256(crate::compiler::U256::from_byte_array(
+                owner.x_only_public_key().0.serialize(),
+            )),
+        )]),
+    )
+    .unwrap();
     let authorization = Authorization {
         federation: FederationId(Hash::all_zeros()),
         module: 4,
@@ -19,7 +35,9 @@ fn finalization_checks_the_combined_resource_budget_before_submission() {
         max_fee: None,
         snapshot: Default::default(),
     };
-    for count in [32, 38] {
+    // Inputs alternate between two instances, which each have their own
+    // budget: together they may exceed what one instance could spend.
+    for count in [36, 38] {
         let tx = Transaction {
             inputs: (0..count)
                 .map(|index| {
@@ -43,7 +61,7 @@ fn finalization_checks_the_combined_resource_budget_before_submission() {
             signatures: TransactionSignature::NaiveMultisig(vec![]),
         };
         let result: Result<(), ClientModuleError> = authorization.verify_finalized(&tx);
-        if count == 32 {
+        if count == 36 {
             result.unwrap();
         } else {
             assert!(result.unwrap_err().to_string().contains("resource limit"));

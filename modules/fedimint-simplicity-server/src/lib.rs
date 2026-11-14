@@ -10,6 +10,7 @@ mod upgrades;
 mod validation;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use anyhow::ensure;
 use async_trait::async_trait;
@@ -28,8 +29,8 @@ use fedimint_core::{InPoint, NumPeers, OutPoint, PeerId};
 use fedimint_server_core::bitcoin_rpc::ServerBitcoinRpcMonitor;
 use fedimint_server_core::config::PeerHandleOps;
 use fedimint_server_core::{
-    ConfigGenModuleArgs, ModuleTransactionContext, ModuleTransactionValidation, ServerModule,
-    ServerModuleInit, ServerModuleInitArgs,
+    ConfigGenModuleArgs, ModuleTransactionContext, ServerModule, ServerModuleInit,
+    ServerModuleInitArgs,
 };
 use fedimint_simplicity_common::assets::{AssetId, AssetRecord};
 use fedimint_simplicity_common::config::{
@@ -38,11 +39,10 @@ use fedimint_simplicity_common::config::{
 use fedimint_simplicity_common::consensus::{
     ACTIVE_CONSENSUS_VERSION_ENDPOINT, SUPPORTED_CONSENSUS_VERSION_ENDPOINT,
 };
-use fedimint_simplicity_common::limits::{MAX_CONTRACTS, MAX_TRANSACTION_OUTPUTS};
 use fedimint_simplicity_common::{
     ContractError, ContractInput, ContractOutcome, ContractOutputError, MODULE_CONSENSUS_VERSION,
     SimplicityCommonInit, SimplicityConsensusItem, SimplicityModuleTypes, SimplicityOutput,
-    output_fee,
+    output_fee, resources,
 };
 use futures::StreamExt;
 
@@ -50,7 +50,7 @@ use crate::db::{
     AssetKey, BlockVoteKey, BlockVotePrefix, ContractKey, ContractPrefix, LiveContractTotalPrefix,
     NamespaceKey, StoredContract, insert_contract, remove_contract,
 };
-use crate::validation::ValidatedTransaction;
+pub use crate::validation::ValidatedTransaction;
 
 #[derive(Debug, Clone)]
 pub struct SimplicityInit;
@@ -91,8 +91,9 @@ impl ServerModuleInit for SimplicityInit {
     }
     async fn init(&self, args: &ServerModuleInitArgs<Self>) -> anyhow::Result<Simplicity> {
         load_config(args.cfg())?;
-        executor::start()?;
         let mut module = Simplicity {
+            executor: executor::Executor::new()?,
+            programs: Arc::new(preparation::ProgramCache::new()),
             num_peers: args.num_peers(),
             monitor: Some(args.server_bitcoin_rpc_monitor()),
             upgrades: upgrades::Upgrades::new(args.our_peer_id()),
@@ -161,6 +162,8 @@ fn config() -> SimplicityConfig {
 
 #[derive(Debug)]
 pub struct Simplicity {
+    executor: Arc<executor::Executor>,
+    programs: Arc<preparation::ProgramCache>,
     num_peers: NumPeers,
     monitor: Option<ServerBitcoinRpcMonitor>,
     upgrades: upgrades::Upgrades,
@@ -171,6 +174,8 @@ impl Simplicity {
     /// and embedded prototypes. Production initialization uses the RPC monitor.
     pub fn new_for_testing(num_peers: NumPeers) -> Self {
         Self {
+            executor: executor::Executor::new().expect("the OS can start worker threads"),
+            programs: Arc::new(preparation::ProgramCache::new()),
             upgrades: upgrades::Upgrades::new(PeerId::from(0)),
             num_peers,
             monitor: None,
@@ -196,6 +201,7 @@ impl Simplicity {
 impl ServerModule for Simplicity {
     type Common = SimplicityModuleTypes;
     type Init = SimplicityInit;
+    type TransactionValidation = ValidatedTransaction;
 
     async fn consensus_proposal(
         &self,
@@ -237,36 +243,6 @@ impl ServerModule for Simplicity {
         }
         Ok(())
     }
-    fn verify_transaction(
-        context: &ModuleTransactionContext<'_>,
-    ) -> Result<(), fedimint_core::transaction::TransactionError> {
-        let call = metrics::VALIDATION.start(metrics::Phase::Structure);
-        // State resolution and kind-wide decoding follow these cheap checks.
-        call.finish(
-            fedimint_simplicity_common::resources::check_signed_structure(
-                context.transaction,
-                context.module_instance_id,
-            )
-            .map(|_| ()),
-        )
-    }
-    async fn prepare_transaction(
-        &self,
-        dbtx: &mut DatabaseTransaction<'_>,
-        context: &ModuleTransactionContext<'_>,
-    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
-        let call = metrics::VALIDATION.start(metrics::Phase::Resolve);
-        self.assert_supported(dbtx).await;
-        let active = self.active_consensus_version(dbtx).await;
-        call.finish(preparation::resolve(dbtx, context, active).await)
-    }
-    async fn prepare_kind_transaction(
-        context: &ModuleTransactionContext<'_>,
-        instances: BTreeMap<ModuleInstanceId, ModuleTransactionValidation>,
-    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
-        let call = metrics::VALIDATION.start(metrics::Phase::Prepare);
-        call.finish(preparation::prepare(context, instances).await)
-    }
     async fn process_input<'a, 'b, 'c>(
         &'a self,
         _dbtx: &mut DatabaseTransaction<'c>,
@@ -287,14 +263,25 @@ impl ServerModule for Simplicity {
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
         context: &ModuleTransactionContext<'_>,
-    ) -> Result<ModuleTransactionValidation, fedimint_core::transaction::TransactionError> {
-        let call = metrics::VALIDATION.start(metrics::Phase::Validate);
+    ) -> Result<ValidatedTransaction, fedimint_core::transaction::TransactionError> {
+        // Cheap checks first, then state resolution, then decoding. No program
+        // runs until every one of this instance's programs passes its checks.
+        let cost = metrics::VALIDATION
+            .start(metrics::Phase::Structure)
+            .finish(resources::check_signed_structure(
+                context.transaction,
+                context.module_instance_id,
+            ))?;
         self.assert_supported(dbtx).await;
-        call.finish(
-            validation::validate(self, dbtx, context)
-                .await
-                .map(ModuleTransactionValidation::new),
-        )
+        let call = metrics::VALIDATION.start(metrics::Phase::Resolve);
+        let active = self.active_consensus_version(dbtx).await;
+        let contracts = call.finish(preparation::resolve(dbtx, context, active).await)?;
+        let prepared = metrics::VALIDATION.start(metrics::Phase::Prepare).finish(
+            preparation::prepare(&self.executor, &self.programs, context, contracts, cost).await,
+        )?;
+        metrics::VALIDATION
+            .start(metrics::Phase::Validate)
+            .finish(validation::validate(self, dbtx, context, &prepared).await)
     }
     async fn process_input_with_context<'a, 'b, 'c>(
         &'a self,
@@ -302,8 +289,8 @@ impl ServerModule for Simplicity {
         input: &'b ContractInput,
         point: InPoint,
         context: &ModuleTransactionContext<'_>,
+        validated: &ValidatedTransaction,
     ) -> Result<InputMeta, ContractError> {
-        let validated = validated(context)?;
         let index = context
             .transaction
             .inputs
@@ -327,8 +314,8 @@ impl ServerModule for Simplicity {
         output: &'a SimplicityOutput,
         point: OutPoint,
         context: &ModuleTransactionContext<'_>,
+        validated: &ValidatedTransaction,
     ) -> Result<TransactionItemAmounts, ContractOutputError> {
-        let validated = validated(context)?;
         let amounts = TransactionItemAmounts {
             amounts: Amounts::new_bitcoin(
                 output
@@ -417,39 +404,4 @@ impl ServerModule for Simplicity {
             },
         ]
     }
-}
-
-fn validate_shape(context: &ModuleTransactionContext<'_>) -> Result<(), ContractError> {
-    if context.transaction.outputs.len() > MAX_TRANSACTION_OUTPUTS
-        || context
-            .transaction
-            .inputs
-            .iter()
-            .filter(|input| input.module_instance_id() == context.module_instance_id)
-            .count()
-            > MAX_CONTRACTS
-        || context
-            .transaction
-            .outputs
-            .iter()
-            .filter(|output| output.module_instance_id() == context.module_instance_id)
-            .count()
-            > MAX_CONTRACTS
-    {
-        return Err(ContractError::Limit);
-    }
-    Ok(())
-}
-
-fn validated<'a>(
-    context: &'a ModuleTransactionContext<'_>,
-) -> Result<&'a ValidatedTransaction, ContractError> {
-    let validated = context
-        .validation
-        .and_then(|validation| validation.get::<ValidatedTransaction>())
-        .ok_or(ContractError::MissingContext)?;
-    if validated.txid != context.transaction.tx_hash() {
-        return Err(ContractError::Context);
-    }
-    Ok(validated)
 }

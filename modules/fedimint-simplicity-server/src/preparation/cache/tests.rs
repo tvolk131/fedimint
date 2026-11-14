@@ -6,8 +6,7 @@ use fedimint_simplicity_common::compiler::ValueConstructible as _;
 
 use super::*;
 
-/// Bytes no other test decodes, so assertions about this entry hold while
-/// other tests use the shared cache.
+/// A distinct program per tag, so each test decodes its own bytes.
 fn input(tag: u64) -> ContractInput {
     let owner = Keypair::from_secret_key(
         SECP256K1,
@@ -31,27 +30,30 @@ fn input(tag: u64) -> ContractInput {
 
 #[test]
 fn programs_are_cached_only_when_kept_and_then_shared() {
+    let cache = ProgramCache::new();
     let input = input(0xcac4_e000_0001);
-    let fresh = decode(&input).expect("program decodes");
+    let fresh = cache.decode(&input).expect("program decodes");
     assert!(fresh.fresh.is_some());
-    assert!(!contains(&input));
-    let (kept, charge) = fresh.keep();
+    assert!(!cache.contains(&input));
+    let (kept, charge) = cache.keep(fresh);
     assert!(charge.is_some());
-    let cached = decode(&input).expect("program decodes");
+    assert!(cache.contains(&input));
+    let cached = cache.decode(&input).expect("program decodes");
     assert!(cached.fresh.is_none());
     assert_eq!(cached.charge, charge);
     assert!(Arc::ptr_eq(&kept, &cached.program));
-    assert!(Arc::ptr_eq(&kept, &cached.keep().0));
+    assert!(Arc::ptr_eq(&kept, &cache.keep(cached).0));
 }
 
 #[test]
 fn concurrent_decodings_share_the_first_cached_copy() {
+    let cache = ProgramCache::new();
     let input = input(0xcac4_e000_0002);
-    let first = decode(&input).expect("program decodes");
-    let second = decode(&input).expect("program decodes");
+    let first = cache.decode(&input).expect("program decodes");
+    let second = cache.decode(&input).expect("program decodes");
     assert!(!Arc::ptr_eq(&first.program, &second.program));
-    let (first, _) = first.keep();
-    let (second, _) = second.keep();
+    let (first, _) = cache.keep(first);
+    let (second, _) = cache.keep(second);
     assert!(Arc::ptr_eq(&first, &second));
 }
 
@@ -71,10 +73,11 @@ fn keys_cover_program_and_witness() {
 
 #[test]
 fn failures_are_not_cached() {
+    let cache = ProgramCache::new();
     let mut malformed = input(0xcac4_e000_0005);
     malformed.program.truncate(1);
-    assert_eq!(decode(&malformed).err(), Some(ContractError::Program));
-    assert!(!contains(&malformed));
+    assert_eq!(cache.decode(&malformed).err(), Some(ContractError::Program));
+    assert!(!cache.contains(&malformed));
 }
 
 #[test]

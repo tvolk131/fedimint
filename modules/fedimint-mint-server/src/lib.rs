@@ -541,6 +541,7 @@ pub struct Mint {
 impl ServerModule for Mint {
     type Common = MintModuleTypes;
     type Init = MintInit;
+    type TransactionValidation = ();
 
     async fn consensus_proposal(
         &self,

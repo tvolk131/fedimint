@@ -161,6 +161,7 @@ impl ServerModule for Empty {
     /// Define the consensus types
     type Common = EmptyModuleTypes;
     type Init = EmptyInit;
+    type TransactionValidation = ();
 
     async fn consensus_proposal(
         &self,

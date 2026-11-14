@@ -12,7 +12,7 @@
 //! do not bound this, because API requests outlive their connections.
 
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use fedimint_server_core::TxProcessingMode;
@@ -25,23 +25,27 @@ use crate::metrics;
 /// thread touches.
 const STACK_BYTES: usize = 64 * 1024 * 1024;
 
-static POOLS: OnceLock<Pools> = OnceLock::new();
-
-struct Pools {
+/// One module instance's worker threads. The threads exit once the module
+/// and every admission referring to it are dropped.
+#[derive(Debug)]
+pub(crate) struct Executor {
     /// Consensus applies one transaction at a time.
     consensus: rayon::ThreadPool,
     submission: rayon::ThreadPool,
     admission: Arc<Semaphore>,
 }
 
-impl Pools {
-    fn new() -> anyhow::Result<Self> {
+impl Executor {
+    /// Start the worker threads. Module start-up calls this, so a failure
+    /// stops the guardian there instead of at its first Simplicity
+    /// transaction.
+    pub(crate) fn new() -> anyhow::Result<Arc<Self>> {
         let threads = submission_threads();
-        Ok(Self {
+        Ok(Arc::new(Self {
             consensus: pool("simplicity-consensus", 1)?,
             submission: pool("simplicity-submission", threads)?,
             admission: Arc::new(Semaphore::new(admission_permits(threads))),
-        })
+        }))
     }
 
     fn pool(&self, mode: TxProcessingMode) -> &rayon::ThreadPool {
@@ -49,6 +53,38 @@ impl Pools {
             TxProcessingMode::Consensus => &self.consensus,
             TxProcessingMode::Submission => &self.submission,
         }
+    }
+
+    /// Wait until an attempt in `mode` may hold decoded programs.
+    /// Submissions are admitted in arrival order. Dropping the future gives up
+    /// the place in line without taking a permit.
+    pub(crate) async fn admit(self: &Arc<Self>, mode: TxProcessingMode) -> Admission {
+        Admission::acquire_from(self, &self.admission, mode).await
+    }
+
+    /// Admit an attempt that decodes nothing, such as a transaction without
+    /// Simplicity inputs.
+    pub(crate) fn unlimited(self: &Arc<Self>, mode: TxProcessingMode) -> Admission {
+        Admission {
+            executor: self.clone(),
+            mode,
+            _permit: None,
+        }
+    }
+
+    /// Hold every submission permit but `free`, so tests can observe
+    /// submissions waiting.
+    #[cfg(test)]
+    pub(crate) async fn hold_permits(&self, free: usize) -> OwnedSemaphorePermit {
+        // The pool's actual size, in case the available parallelism has changed.
+        let held = admission_permits(self.submission.current_num_threads())
+            .checked_sub(free)
+            .expect("tests leave fewer permits free than exist");
+        self.admission
+            .clone()
+            .acquire_many_owned(u32::try_from(held).expect("at most 16 permits"))
+            .await
+            .expect("the admission semaphore is never closed")
     }
 }
 
@@ -74,40 +110,23 @@ fn pool(name: &'static str, threads: usize) -> anyhow::Result<rayon::ThreadPool>
         .with_context(|| format!("failed to start the {name} worker threads"))
 }
 
-/// Start the worker threads during module start-up, so a failure stops the
-/// guardian there instead of at its first Simplicity transaction.
-pub(crate) fn start() -> anyhow::Result<()> {
-    if POOLS.get().is_none() {
-        // If another caller won the race, its pools are kept and these exit.
-        let _ = POOLS.set(Pools::new()?);
-    }
-    Ok(())
-}
-
-fn pools() -> &'static Pools {
-    // Module start-up has already started them, except in tests and benchmarks.
-    POOLS.get_or_init(|| Pools::new().expect("the OS can start the Simplicity worker threads"))
-}
-
 /// Permission for one transaction attempt to decode and execute programs on
 /// its mode's pool. A submission's admission holds a permit, which is released
 /// when the last clone drops. Consensus is never limited.
 #[derive(Clone)]
 pub(crate) struct Admission {
+    executor: Arc<Executor>,
     mode: TxProcessingMode,
     /// Held only to be released on drop.
     _permit: Option<Arc<OwnedSemaphorePermit>>,
 }
 
 impl Admission {
-    /// Wait until this attempt may hold decoded programs. Submissions are
-    /// admitted in arrival order. Dropping the future gives up the place in
-    /// line without taking a permit.
-    pub(crate) async fn acquire(mode: TxProcessingMode) -> Self {
-        Self::acquire_from(&pools().admission, mode).await
-    }
-
-    async fn acquire_from(permits: &Arc<Semaphore>, mode: TxProcessingMode) -> Self {
+    async fn acquire_from(
+        executor: &Arc<Executor>,
+        permits: &Arc<Semaphore>,
+        mode: TxProcessingMode,
+    ) -> Self {
         let permit = match mode {
             TxProcessingMode::Consensus => None,
             TxProcessingMode::Submission => {
@@ -121,17 +140,9 @@ impl Admission {
             }
         };
         Self {
+            executor: executor.clone(),
             mode,
             _permit: permit,
-        }
-    }
-
-    /// For an attempt that decodes nothing, such as a transaction without
-    /// Simplicity inputs.
-    pub(crate) fn unlimited(mode: TxProcessingMode) -> Self {
-        Self {
-            mode,
-            _permit: None,
         }
     }
 
@@ -145,7 +156,7 @@ impl Admission {
     {
         let (sender, receiver) = futures::channel::oneshot::channel();
         let admission = self.clone();
-        pools().pool(self.mode).spawn_fifo(move || {
+        self.executor.pool(self.mode).spawn_fifo(move || {
             // Skip work nobody waits for anymore, e.g. after a websocket
             // request timed out. A client disconnecting does not cancel it.
             if sender.is_canceled() {
@@ -169,7 +180,8 @@ impl Admission {
     /// deeply nested program recurses, and worker threads have much larger
     /// stacks than the async runtime's.
     pub(crate) fn release<T: Send + 'static>(self, value: T) {
-        pools().pool(self.mode).spawn_fifo(move || {
+        let executor = self.executor.clone();
+        executor.pool(self.mode).spawn_fifo(move || {
             drop(value);
             drop(self);
         });
@@ -189,38 +201,6 @@ impl Waiting {
 impl Drop for Waiting {
     fn drop(&mut self) {
         metrics::ADMISSION_WAITING.dec();
-    }
-}
-
-/// Every submission permit but a few, held so tests can observe submissions
-/// waiting.
-#[cfg(test)]
-pub(crate) struct HeldPermits {
-    _permits: OwnedSemaphorePermit,
-    _turn: tokio::sync::OwnedMutexGuard<()>,
-}
-
-/// Hold every submission permit but `free`. Callers take turns, so two tests
-/// cannot each hold part of the permits while waiting for the rest.
-#[cfg(test)]
-pub(crate) async fn hold_permits(free: usize) -> HeldPermits {
-    static TURN: std::sync::LazyLock<Arc<tokio::sync::Mutex<()>>> =
-        std::sync::LazyLock::new(Arc::default);
-    let turn = TURN.clone().lock_owned().await;
-    let pools = pools();
-    // The pool's actual size, in case the available parallelism has changed.
-    let held = admission_permits(pools.submission.current_num_threads())
-        .checked_sub(free)
-        .expect("tests leave fewer permits free than exist");
-    let permits = pools
-        .admission
-        .clone()
-        .acquire_many_owned(u32::try_from(held).expect("at most 16 permits"))
-        .await
-        .expect("the admission semaphore is never closed");
-    HeldPermits {
-        _permits: permits,
-        _turn: turn,
     }
 }
 

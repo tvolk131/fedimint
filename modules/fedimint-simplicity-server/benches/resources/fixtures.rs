@@ -37,10 +37,10 @@ use fedimint_simplicity_common::{
     ActionOutput, ContractError, ContractInput, ContractOutput, ContractOutputError,
     SimplicityOutput, output_fee, resources,
 };
-use fedimint_simplicity_server::Simplicity;
 use fedimint_simplicity_server::db::{
     AssetKey, BlockVoteKey, ContractKey, StoredContract, insert_contract, remove_contract,
 };
+use fedimint_simplicity_server::{Simplicity, ValidatedTransaction};
 use simplicity::jet::Core;
 use simplicity::node::CoreConstructible;
 use simplicity::{BitWriter, ConstructNode, encode};
@@ -905,8 +905,8 @@ pub async fn validate_module(
     module: &Simplicity,
     dbtx: &mut fedimint_core::db::DatabaseTransaction<'_>,
     fixture: &Fixture,
-) -> Result<fedimint_server_core::ModuleTransactionValidation, TransactionError> {
-    let mut context = ModuleTransactionContext {
+) -> Result<ValidatedTransaction, TransactionError> {
+    let context = ModuleTransactionContext {
         transaction: &fixture.transaction,
         consensus: TransactionConsensusContext {
             federation_id: federation(),
@@ -914,17 +914,7 @@ pub async fn validate_module(
         },
         mode: TxProcessingMode::Consensus,
         module_instance_id: MODULE,
-        preparation: None,
-        validation: None,
     };
-    <Simplicity as ServerModule>::verify_transaction(&context)?;
-    let resolved = module.prepare_transaction(dbtx, &context).await?;
-    let prepared = <Simplicity as ServerModule>::prepare_kind_transaction(
-        &context,
-        BTreeMap::from([(MODULE, resolved)]),
-    )
-    .await?;
-    context.preparation = Some(&prepared);
     module.validate_transaction(dbtx, &context).await
 }
 
