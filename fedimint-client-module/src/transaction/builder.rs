@@ -547,8 +547,7 @@ where
     // binary-search it for free to find that fundable ceiling and seed the real
     // (fee-quoting) search there. This peels off the gateway fee — usually the
     // larger of the two — for free, leaving the expensive quotes to probe only
-    // the small window the federation fee opens up, instead of the whole
-    // balance.
+    // the small window the federation fee opens up, instead of the whole balance.
     if gross_up(Amount::from_msats(lo_bound)).msats > balance.msats {
         // The balance can't even fund the smallest amount's gross-up.
         return Ok(None);
@@ -722,11 +721,10 @@ impl TransactionBuilder {
     where
         C: secp256k1::Signing + secp256k1::Verification,
     {
-        // `input_idx_to_bundle_idx[input_idx]` stores the index of a bundle the
-        // input at `input_idx` comes from, so we can call state
-        // machines of the corresponding bundle for every input bundle.
-        // It is always monotonically increasing, e.g. `[0, 0, 1, 2, 2,
-        // 2, 4]`
+        // `input_idx_to_bundle_idx[input_idx]` stores the index of a bundle the input
+        // at `input_idx` comes from, so we can call state machines of the
+        // corresponding bundle for every input bundle. It is always
+        // monotonically increasing, e.g. `[0, 0, 1, 2, 2, 2, 4]`
         let (input_idx_to_bundle_idx, inputs, input_keys): (Vec<_>, Vec<_>, Vec<_>) = multiunzip(
             self.inputs
                 .iter()
@@ -738,8 +736,8 @@ impl TransactionBuilder {
                         .map(move |input| (bundle_idx, input.input.clone(), input.keys.clone()))
                 }),
         );
-        // `output_idx_to_bundle` works exactly like `input_idx_to_bundle_idx`
-        // above, but for outputs.
+        // `output_idx_to_bundle` works exactly like `input_idx_to_bundle_idx` above,
+        // but for outputs.
         let (output_idx_to_bundle_idx, outputs): (Vec<_>, Vec<_>) = multiunzip(
             self.outputs
                 .iter()

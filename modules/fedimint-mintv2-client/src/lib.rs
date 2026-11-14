@@ -748,6 +748,8 @@ impl MintClientModule {
         }
 
         let requested_amount = output_amount.saturating_sub(input_amount);
+        // `select_funding_input` only reads notes, so the balance it left behind is
+        // still accurate for reporting a total below.
         let Some(funding_notes) = self.select_funding_input(dbtx, requested_amount).await else {
             let total_amount = self.get_balance(dbtx, unit).await;
             return Err(InsufficientBalanceError {
@@ -1232,9 +1234,8 @@ impl MintClientModule {
         ecash: &ECash,
     ) -> Result<FeeQuote, TransactionSubmitError> {
         // A receive submits the ecash notes as explicit inputs and no explicit
-        // outputs; the shared, module-agnostic fee quote runs the
-        // primary-module balancing (rebalancing + minting change) over
-        // the real inventory.
+        // outputs; the shared, module-agnostic fee quote runs the primary-module
+        // balancing (rebalancing + minting change) over the real inventory.
         let notes = ecash.notes();
         let input_amount: Amount = notes.iter().map(SpendableNote::amount).sum();
         let input_fee: Amount = notes
@@ -1277,8 +1278,8 @@ impl MintClientModule {
         }
 
         // Reissue path: the send mints itself `represent_amount(amount)` as
-        // explicit outputs (no explicit inputs) and the primary module funds
-        // and balances it. Quote that exact transaction.
+        // explicit outputs (no explicit inputs) and the primary module funds and
+        // balances it. Quote that exact transaction.
         let denominations = represent_amount(amount);
         let output_amount: Amount = denominations.iter().map(|d| d.amount()).sum();
         let output_fee: Amount = denominations

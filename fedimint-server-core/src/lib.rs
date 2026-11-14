@@ -96,8 +96,8 @@ pub trait ServerModule: Debug + Sized {
     type Init: ServerModuleInit;
 
     fn module_kind() -> ModuleKind {
-        // Note: All modules should define kinds as &'static str, so this
-        // doesn't allocate
+        // Note: All modules should define kinds as &'static str, so this doesn't
+        // allocate
         <Self::Init as ModuleInit>::Common::KIND
     }
 

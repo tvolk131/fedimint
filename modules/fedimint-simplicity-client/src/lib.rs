@@ -1,17 +1,20 @@
 //! Experimental contract builders and a persistent, history-recoverable wallet.
+pub mod assets;
 mod authorization;
 pub mod capabilities;
 pub mod client;
-pub mod states;
-pub mod status;
-pub use client::{SimplicityClientInit, SimplicityClientModule, SpendIntent};
-pub mod assets;
 pub mod descriptor;
+pub mod intent;
 mod owner;
-pub use owner::owner_program;
+pub mod preflight;
+mod preparation;
+pub mod pruning;
 #[cfg(feature = "ptlc")]
 pub mod ptlc;
+mod quote;
 pub mod receipt;
+pub mod states;
+pub mod status;
 pub mod wallet;
 mod watch;
 
@@ -22,6 +25,7 @@ mod tests;
 
 use anyhow::{anyhow, ensure};
 use bitcoin::hashes::Hash;
+pub use client::{SimplicityClientInit, SimplicityClientModule, SpendIntent};
 pub use common::compiler;
 use common::compiler::{Arguments, CompiledProgram, Value, ValueConstructible, WitnessValues};
 use fedimint_core::config::FederationId;
@@ -30,6 +34,8 @@ use fedimint_core::secp256k1::{Keypair, Message, PublicKey, SECP256K1};
 use fedimint_core::transaction::{Transaction, TransactionSignature};
 use fedimint_core::{Amount, OutPoint};
 pub use fedimint_simplicity_common as common;
+pub use owner::owner_program;
+pub use preparation::TransactionPlan;
 
 #[derive(Debug, Clone)]
 pub struct ContractProgram(CompiledProgram);
@@ -143,14 +149,6 @@ pub fn sign_transaction(transaction: &mut Transaction, keys: &[Keypair]) -> anyh
     );
     Ok(())
 }
-
-pub mod intent;
-
-pub mod preflight;
-mod preparation;
-pub mod pruning;
-mod quote;
-pub use preparation::TransactionPlan;
 
 const LOG_CLIENT_SIMPLICITY: &str = "fm::client::module::simplicity";
 const LOG_CLIENT_SIMPLICITY_SYNC: &str = "fm::client::module::simplicity::sync";

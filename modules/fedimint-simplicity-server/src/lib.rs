@@ -427,7 +427,8 @@ impl ServerModule for Simplicity {
 }
 
 fn validate_shape(context: &ModuleTransactionContext<'_>) -> Result<(), ContractError> {
-    if context.transaction.outputs.len() > 128
+    if context.transaction.outputs.len()
+        > fedimint_simplicity_common::resources::MAX_TRANSACTION_OUTPUTS
         || context
             .transaction
             .inputs

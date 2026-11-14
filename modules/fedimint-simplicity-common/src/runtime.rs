@@ -6,7 +6,11 @@ use simplicity::dag::{DagLike, InternalSharing};
 use simplicity::{BitIter, BitMachine, Cost, RedeemNode};
 
 use crate::jet::FedimintJet;
-use crate::{ContractError, ContractInput, ContractOutput, MAX_PROGRAM_BYTES, MAX_WITNESS_BYTES};
+use crate::{
+    BASE_ITEM_FEE_MSAT, ContractError, ContractInput, ContractOutput, MAX_EXTRA_CELLS,
+    MAX_EXTRA_FRAMES, MAX_PROGRAM_BYTES, MAX_PROGRAM_MILLIWEIGHT, MAX_TOTAL_TYPE_BITS,
+    MAX_TYPE_BITS, MAX_WITNESS_BYTES,
+};
 
 mod preflight;
 mod pruning;
@@ -67,11 +71,11 @@ pub fn decode_program(input: &ContractInput) -> Result<Arc<RedeemNode>, Contract
                 .finalize()
                 .map_err(|_| ContractError::Program)?;
             for width in [arrow.source.bit_width(), arrow.target.bit_width()] {
-                if width > 1_048_576 {
+                if width > MAX_TYPE_BITS {
                     return Err(ContractError::Limit);
                 }
                 total_type_bits = total_type_bits.saturating_add(width);
-                if total_type_bits > 16_777_216 {
+                if total_type_bits > MAX_TOTAL_TYPE_BITS {
                     return Err(ContractError::Limit);
                 }
             }
@@ -84,9 +88,9 @@ pub fn decode_program(input: &ContractInput) -> Result<Arc<RedeemNode>, Contract
     )
     .map_err(|_| ContractError::Program)?;
     let bounds = program.bounds();
-    if bounds.cost > Cost::from_milliweight(10_000_000)
-        || bounds.extra_cells > 1_048_576
-        || bounds.extra_frames > 1_024
+    if bounds.cost > Cost::from_milliweight(MAX_PROGRAM_MILLIWEIGHT)
+        || bounds.extra_cells > MAX_EXTRA_CELLS
+        || bounds.extra_frames > MAX_EXTRA_FRAMES
     {
         return Err(ContractError::Limit);
     }
@@ -104,7 +108,10 @@ pub fn input_fee(input: &ContractInput) -> Result<Amount, ContractError> {
 fn program_fee(input: &ContractInput, program: &RedeemNode) -> Amount {
     let weight: bitcoin::Weight = program.bounds().cost.into();
     Amount::from_msats(
-        100 + weight.to_wu() + input.program.len() as u64 + input.witness.len() as u64,
+        BASE_ITEM_FEE_MSAT
+            + weight.to_wu()
+            + input.program.len() as u64
+            + input.witness.len() as u64,
     )
 }
 

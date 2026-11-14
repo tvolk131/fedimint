@@ -1,6 +1,6 @@
-//! Version-zero jet encoding: a family bit, followed by the upstream Core
-//! encoding (0) or an eight-bit Fedimint operation number (1).
-//! The deliberately small Core allowlist is part of this experimental version.
+//! Execution-version-one jet encoding: a family bit, followed by the upstream
+//! Core encoding (0) or an eight-bit Fedimint operation number (1).
+//! The deliberately small Core allowlist is part of this execution version.
 
 use std::io::Write;
 

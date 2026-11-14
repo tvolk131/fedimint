@@ -34,6 +34,18 @@ pub const MAX_CONTRACTS: usize = 32;
 pub const MAX_PROGRAM_BYTES: usize = 8_192;
 pub const MAX_WITNESS_BYTES: usize = 8_192;
 pub const MAX_RECOVERY_BYTES: usize = 1_024;
+/// Largest bit width of any single inferred type in a redemption program.
+pub const MAX_TYPE_BITS: usize = 1_048_576;
+/// Sum of every inferred source and target type width in a redemption program.
+pub const MAX_TOTAL_TYPE_BITS: usize = 16_777_216;
+/// Static cost bound of one redemption program. The transaction-wide budget,
+/// [`resources::MAX_TRANSACTION_MILLIWEIGHT`], is stricter.
+pub const MAX_PROGRAM_MILLIWEIGHT: u32 = 10_000_000;
+/// Bit machine memory bounds of one redemption program.
+pub const MAX_EXTRA_CELLS: usize = 1_048_576;
+pub const MAX_EXTRA_FRAMES: usize = 1_024;
+/// Fixed fee for every contract input or output, before size and cost terms.
+pub const BASE_ITEM_FEE_MSAT: u64 = 100;
 
 /// Bitcoin amounts remain millisatoshis; assets use an explicit extension.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -172,7 +184,7 @@ pub fn output_fee(output: &ContractOutput) -> Amount {
                 * assets::CREATION_FEE_MSAT
         })
         .unwrap_or(0);
-    Amount::from_msats(100 + output.recovery.len() as u64 + extra + creation)
+    Amount::from_msats(BASE_ITEM_FEE_MSAT + output.recovery.len() as u64 + extra + creation)
 }
 
 impl Encodable for ContractOutput {
