@@ -17,9 +17,9 @@ pub(super) fn transaction() -> (FederationId, Transaction) {
             DynInput::from_typed(7, foreign),
         ],
         outputs: vec![
-            DynOutput::from_typed(4, native()),
-            DynOutput::from_typed(4, asset()),
-            DynOutput::from_typed(7, ContractOutput::action_output(actions())),
+            DynOutput::from_typed(4, SimplicityOutput::from(native())),
+            DynOutput::from_typed(4, SimplicityOutput::from(asset())),
+            DynOutput::from_typed(7, action_output()),
         ],
         nonce: [0x88; 8],
         signatures: TransactionSignature::NaiveMultisig(vec![]),
@@ -32,14 +32,14 @@ fn encodings_and_domains_match_independent_reference() {
     let fixture = fixtures();
     let wire = &fixture["wire"];
     for (name, output) in [
-        ("native_output", native()),
-        ("asset_output", asset()),
-        ("actions_output", ContractOutput::action_output(actions())),
+        ("native_output", native().into()),
+        ("asset_output", asset().into()),
+        ("actions_output", action_output()),
     ] {
         let expected = bytes(wire[name].as_str().unwrap());
         assert_eq!(output.consensus_encode_to_vec(), expected, "{name}");
         assert_eq!(
-            ContractOutput::consensus_decode_whole(&expected, &ModuleDecoderRegistry::default())
+            SimplicityOutput::consensus_decode_whole(&expected, &ModuleDecoderRegistry::default())
                 .unwrap(),
             output
         );
@@ -68,7 +68,13 @@ fn encodings_and_domains_match_independent_reference() {
     let v1 = signature_hash(federation, 4, &tx).unwrap();
     let mut changed_actions = actions();
     changed_actions.creations[0].signature = schnorr::Signature::from_slice(&[0x77; 64]).unwrap();
-    tx.outputs[2] = DynOutput::from_typed(7, ContractOutput::action_output(changed_actions));
+    tx.outputs[2] = DynOutput::from_typed(
+        7,
+        SimplicityOutput::from(ActionOutput {
+            actions: changed_actions,
+            recovery: vec![],
+        }),
+    );
     assert_eq!(signature_hash(federation, 4, &tx).unwrap(), v1);
     tx.inputs.pop();
     assert_eq!(signature_hash(federation, 4, &tx).unwrap(), v1);

@@ -21,7 +21,9 @@ use fedimint_core::{Amount, OutPoint, TransactionId, apply, async_trait_maybe_se
 use futures::StreamExt as _;
 
 use crate::common::assets::AssetBundle;
-use crate::common::{ContractInput, ContractOutput, SimplicityCommonInit, SimplicityModuleTypes};
+use crate::common::{
+    ContractInput, ContractOutput, SimplicityCommonInit, SimplicityModuleTypes, SimplicityOutput,
+};
 use crate::compiler::{WitnessNameToValueMap, WitnessValues};
 use crate::descriptor::{BuiltinTemplates, ContractDescriptor, ContractTemplates};
 use crate::preparation::{PreparedTransaction, TransactionPlan};
@@ -184,7 +186,7 @@ impl ClientModule for SimplicityClientModule {
             .map(Amounts::new_bitcoin)
     }
 
-    fn output_fee(&self, _amount: &Amounts, output: &ContractOutput) -> Option<Amounts> {
+    fn output_fee(&self, _amount: &Amounts, output: &SimplicityOutput) -> Option<Amounts> {
         Some(Amounts::new_bitcoin(crate::common::output_fee(output)))
     }
 
@@ -317,47 +319,14 @@ impl SimplicityClientModule {
         Ok(output)
     }
 
-    /// Atomically reserve inputs, obtain native funding/change from the primary
-    /// module, authorize the final transaction, and persist the submission.
-    /// Once this returns, the core executor retries submission across client
-    /// restarts. Asset change and authority successors are explicit
-    /// application outputs.
-    pub async fn submit(
-        &self,
-        spends: Vec<SpendIntent>,
-        outputs: Vec<ContractOutput>,
-        creations: Vec<Keypair>,
-    ) -> anyhow::Result<(OperationId, TransactionId)> {
-        self.submit_plan(TransactionPlan {
-            spends,
-            outputs,
-            creations,
-            ..Default::default()
-        })
-        .await
-    }
-
-    /// Include an encrypted sender receipt even when owned contracts already
-    /// identify this transaction. Context is application-defined and versioned.
-    pub async fn submit_with_receipt(
-        &self,
-        spends: Vec<SpendIntent>,
-        outputs: Vec<ContractOutput>,
-        creations: Vec<Keypair>,
-        context: Option<crate::receipt::ReceiptContext>,
-    ) -> anyhow::Result<(OperationId, TransactionId)> {
-        self.submit_plan(TransactionPlan {
-            spends,
-            outputs,
-            creations,
-            receipt: Some(crate::receipt::SenderReceipt { context }),
-            ..Default::default()
-        })
-        .await
-    }
-
-    /// Submit a plan, preparing it exactly as [`Self::quote_transaction`]
-    /// does. A quote authorizes nothing and caches no signatures: this reads
+    /// Atomically reserve inputs, obtain native funding and change from the
+    /// primary module, authorize the final transaction, and persist the
+    /// submission. Once this returns, the core executor retries submission
+    /// across client restarts. Asset change and authority successors are
+    /// explicit application outputs.
+    ///
+    /// The plan is prepared exactly as [`Self::quote_transaction`] prepares
+    /// it. A quote authorizes nothing and caches no signatures: this reads
     /// current wallet records and a fresh pruning snapshot, reserves the
     /// inputs, and finalization checks the funded transaction and the plan's
     /// `max_fee` again.
@@ -443,7 +412,11 @@ impl SimplicityClientModule {
                     outputs
                         .into_iter()
                         .map(|output| ClientOutput {
-                            amounts: Amounts::new_bitcoin(output.amount),
+                            amounts: Amounts::new_bitcoin(
+                                output
+                                    .contract()
+                                    .map_or(Amount::ZERO, |contract| contract.amount),
+                            ),
                             output,
                         })
                         .collect(),

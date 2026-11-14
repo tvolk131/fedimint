@@ -152,7 +152,7 @@ fn tx(nonce: u8, inputs: &[OutPoint], outputs: Vec<ContractOutput>) -> Transacti
             .collect(),
         outputs: outputs
             .into_iter()
-            .map(|output| DynOutput::from_typed(MODULE, output))
+            .map(|output| DynOutput::from_typed(MODULE, SimplicityOutput::from(output)))
             .collect(),
         signatures: TransactionSignature::NaiveMultisig(vec![]),
     }

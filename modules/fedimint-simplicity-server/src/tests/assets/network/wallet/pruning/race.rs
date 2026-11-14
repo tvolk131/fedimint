@@ -19,11 +19,11 @@ pub(super) async fn build(
             // This successful competing transaction makes the already captured
             // context stale deterministically, with no scheduling sleeps.
             let (operation, _) = wallet
-                .submit(
-                    vec![SpendIntent::owner(original)],
-                    vec![replacement],
-                    vec![],
-                )
+                .submit_plan(TransactionPlan {
+                    spends: vec![SpendIntent::owner(original)],
+                    outputs: vec![replacement.into()],
+                    ..Default::default()
+                })
                 .await?;
             wallet.await_operation(operation).await?;
             original
@@ -49,7 +49,7 @@ pub(super) async fn check(client: &ClientHandle) {
         let output = wallet
             .receive(Amount::from_sats(1), Default::default())
             .unwrap();
-        let txid = submit(&wallet, vec![], vec![output], vec![]).await;
+        let txid = submit(&wallet, vec![], vec![output.into()], vec![]).await;
         let original = OutPoint { txid, out_idx: 0 };
         let replacement = wallet
             .receive(Amount::from_sats(1), Default::default())

@@ -115,7 +115,9 @@ fn federation() -> (Database, ServerModuleRegistry) {
         (
             id,
             fedimint_simplicity_common::KIND,
-            DynServerModule::from(Simplicity::new_for_testing(vec![0.into()]).unwrap()),
+            DynServerModule::from(Simplicity::new_for_testing(fedimint_core::NumPeers::from(
+                1,
+            ))),
         )
     }));
     (Database::new(MemDatabase::new(), decoders), modules)
@@ -259,8 +261,10 @@ async fn unsupported_output_version_precedes_earlier_vm_failure() {
     let mut invalid = stored.output;
     invalid.version = 0;
     let mut tx = transaction(vec![(4, first), (7, last)]);
-    tx.outputs
-        .push(fedimint_core::core::DynOutput::from_typed(7, invalid));
+    tx.outputs.push(fedimint_core::core::DynOutput::from_typed(
+        7,
+        fedimint_simplicity_common::SimplicityOutput::from(invalid),
+    ));
     sign_transaction(&mut tx, &[owner(), owner()]).unwrap();
     check(
         &db,
@@ -337,7 +341,7 @@ async fn retention_budget_changes_neither_execution_result_nor_fees() {
             inputs.push((4, input));
         }
         let tx = transaction(inputs);
-        let module = Simplicity::new_for_testing(vec![0.into()]).unwrap();
+        let module = Simplicity::new_for_testing(fedimint_core::NumPeers::from(1));
         let first = tx.inputs[0]
             .as_any()
             .downcast_ref::<ContractInput>()
@@ -420,8 +424,10 @@ async fn activation_gates_inputs_and_outputs_before_program_decoding() {
     assert_eq!(error, input_error(4, ContractError::Version));
     assert!(resolve(&mut dbtx, &context(&tx, 4), active).await.is_ok());
     tx.inputs.clear();
-    tx.outputs
-        .push(fedimint_core::core::DynOutput::from_typed(4, stored.output));
+    tx.outputs.push(fedimint_core::core::DynOutput::from_typed(
+        4,
+        fedimint_simplicity_common::SimplicityOutput::from(stored.output),
+    ));
     let error = resolve(&mut dbtx, &context(&tx, 4), before)
         .await
         .err()

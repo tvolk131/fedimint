@@ -22,8 +22,8 @@ fn action_outputs_cannot_satisfy_zero_amount_or_state_contract_checks() {
         output.amount = Amount::ZERO;
         output.state = [0; 32];
         assert!(runtime::execute(&input, &env).is_ok(), "{source}");
-        Arc::make_mut(&mut env.outputs)[0].contract =
-            Some(ContractOutput::action_output(Default::default()));
+        // Action outputs expose no contract view to programs.
+        Arc::make_mut(&mut env.outputs)[0].contract = None;
         assert_eq!(
             runtime::execute(&input, &env),
             Err(ContractError::Rejected),

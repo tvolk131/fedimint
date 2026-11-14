@@ -6,7 +6,7 @@ use fedimint_core::{Amount, OutPoint, TransactionId};
 
 use super::*;
 use crate::common::StoredContract;
-use crate::common::assets::{AssetAmount, AssetBundle, AssetExtension, AssetId};
+use crate::common::assets::{AssetAmount, AssetBundle, AssetId};
 use crate::{ContractProgram, sign_transaction};
 
 const MODULE: u16 = 4;
@@ -51,7 +51,10 @@ fn fixture(source: &str) -> (Transaction, BTreeMap<u16, PruningSnapshot>) {
                 .input(point, key().public_key(), Default::default())
                 .unwrap(),
         )],
-        outputs: vec![DynOutput::from_typed(MODULE, output)],
+        outputs: vec![DynOutput::from_typed(
+            MODULE,
+            SimplicityOutput::from(output),
+        )],
         signatures: TransactionSignature::NaiveMultisig(vec![]),
         nonce: [0; 8],
     };
@@ -100,7 +103,7 @@ fn exact_candidate_is_unchanged_and_report_contains_no_spending_material() {
         .unwrap();
     let output = tx.outputs[0]
         .as_any()
-        .downcast_ref::<ContractOutput>()
+        .downcast_ref::<SimplicityOutput>()
         .unwrap();
     assert_eq!(
         report.simplicity_fees_msat,
@@ -246,7 +249,7 @@ fn aggregate_caps_reject_before_execution_across_instances() {
         .downcast_ref::<ContractInput>()
         .unwrap()
         .clone();
-    input.witness = vec![0; common::MAX_WITNESS_BYTES];
+    input.witness = vec![0; common::limits::MAX_WITNESS_BYTES];
     tx.inputs = vec![
         DynInput::from_typed(MODULE, input.clone()),
         DynInput::from_typed(MODULE + 1, input),
@@ -281,11 +284,11 @@ fn asset_conservation_is_checked_but_registry_membership_is_not_invented() {
         .next()
         .unwrap();
     stored.output.version = 1;
-    stored.output.extension = Some(AssetExtension::Bundle(AssetBundle {
+    stored.output.assets = AssetBundle {
         balances: vec![amount],
         authorities: vec![],
-    }));
-    tx.outputs[0] = DynOutput::from_typed(MODULE, stored.output.clone());
+    };
+    tx.outputs[0] = DynOutput::from_typed(MODULE, SimplicityOutput::from(stored.output.clone()));
     sign_transaction(&mut tx, &[key()]).unwrap();
     let mut inflated = stored.output.clone();
     let report = analyze(&tx, federation(), &snapshots);
@@ -294,10 +297,8 @@ fn asset_conservation_is_checked_but_registry_membership_is_not_invented() {
         check(&report, "asset_registry"),
         Outcome::NotChecked { .. }
     ));
-    if let Some(AssetExtension::Bundle(bundle)) = &mut inflated.extension {
-        bundle.balances[0].quantity += 1;
-    }
-    tx.outputs[0] = DynOutput::from_typed(MODULE, inflated);
+    inflated.assets.balances[0].quantity += 1;
+    tx.outputs[0] = DynOutput::from_typed(MODULE, SimplicityOutput::from(inflated));
     sign_transaction(&mut tx, &[key()]).unwrap();
     assert!(matches!(
         check(&analyze(&tx, federation(), &snapshots), "asset_accounting"),
@@ -326,12 +327,15 @@ fn genesis_checks_creation_authorization_and_authority_assignment() {
     let mut tx = Transaction {
         inputs: vec![],
         outputs: vec![
-            DynOutput::from_typed(MODULE, authority.clone()),
+            DynOutput::from_typed(MODULE, SimplicityOutput::from(authority.clone())),
             DynOutput::from_typed(
                 MODULE,
-                ContractOutput::action_output(AssetActions {
-                    creations: vec![creation],
-                    ..Default::default()
+                SimplicityOutput::from(common::ActionOutput {
+                    actions: AssetActions {
+                        creations: vec![creation],
+                        ..Default::default()
+                    },
+                    recovery: vec![],
                 }),
             ),
         ],
@@ -356,10 +360,8 @@ fn genesis_checks_creation_authorization_and_authority_assignment() {
         }
     ));
     let mut wrong_authority = authority;
-    if let Some(AssetExtension::Bundle(bundle)) = &mut wrong_authority.extension {
-        bundle.authorities[0] = AssetId([3; 32]);
-    }
-    tx.outputs[0] = DynOutput::from_typed(MODULE, wrong_authority);
+    wrong_authority.assets.authorities[0] = AssetId([3; 32]);
+    tx.outputs[0] = DynOutput::from_typed(MODULE, SimplicityOutput::from(wrong_authority));
     crate::assets::sign_creation(&mut tx, federation(), MODULE, &key()).unwrap();
     assert!(matches!(
         check(&analyze(&tx, federation(), &snapshots), "asset_accounting"),

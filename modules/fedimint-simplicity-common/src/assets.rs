@@ -1,21 +1,19 @@
 //! Explicit assets for execution version one. Creation always starts at zero
 //! supply. An authority is an indivisible capability, not a fungible balance.
 use bitcoin::hashes::Hash;
+use fedimint_core::OutPoint;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::{DynOutput, ModuleInstanceId};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::secp256k1::schnorr::Signature;
 use fedimint_core::transaction::Transaction;
-use fedimint_core::{Amount, OutPoint};
 use serde::{Deserialize, Serialize};
 
-use crate::{ContractError, ContractInput, ContractOutput, EXECUTION_VERSION, MAX_CONTRACTS};
+use crate::limits::{MAX_ASSETS, MAX_CONTRACTS};
+use crate::{ContractError, ContractInput, SimplicityOutput};
 
 pub mod accounting;
-
-pub const MAX_ASSETS: usize = 32;
-pub const CREATION_FEE_MSAT: u64 = 100;
 
 #[derive(
     Debug,
@@ -69,13 +67,6 @@ pub struct AssetActions {
     pub burns: Vec<AssetAmount>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
-pub enum AssetExtension {
-    Bundle(AssetBundle),
-    /// At most one action output per transaction. It creates no spendable UTXO.
-    Actions(AssetActions),
-}
-
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Encodable, Decodable)]
 pub struct AssetRecord {
     pub creation_key: PublicKey,
@@ -123,33 +114,6 @@ pub fn validate_amounts(amounts: &[AssetAmount]) -> Result<(), ContractError> {
     Ok(())
 }
 
-impl ContractOutput {
-    pub fn bundle(&self) -> Option<&AssetBundle> {
-        match &self.extension {
-            Some(AssetExtension::Bundle(bundle)) => Some(bundle),
-            _ => None,
-        }
-    }
-
-    pub fn actions(&self) -> Option<&AssetActions> {
-        match &self.extension {
-            Some(AssetExtension::Actions(actions)) => Some(actions),
-            _ => None,
-        }
-    }
-
-    pub fn action_output(actions: AssetActions) -> Self {
-        Self {
-            version: EXECUTION_VERSION,
-            amount: Amount::ZERO,
-            cmr: [0; 32],
-            state: [0; 32],
-            recovery: vec![],
-            extension: Some(AssetExtension::Actions(actions)),
-        }
-    }
-}
-
 /// Commits all operations, claim keys, and outer outputs while excluding
 /// creation signatures to avoid self-reference.
 pub fn signature_hash(
@@ -176,7 +140,7 @@ pub fn signature_hash(
         .outputs
         .iter()
         .map(|output| {
-            let Some(contract) = output.as_any().downcast_ref::<ContractOutput>() else {
+            let Some(output_value) = output.as_any().downcast_ref::<SimplicityOutput>() else {
                 return if output.module_instance_id() == module {
                     Err(ContractError::Context)
                 } else {
@@ -186,16 +150,17 @@ pub fn signature_hash(
             // Normalize only authorization material, in every Simplicity
             // instance, so simultaneous creation batches do not sign each
             // other's signatures. Other foreign output types stay opaque.
-            let mut contract = contract.clone();
-            if contract.version == EXECUTION_VERSION
-                && let Some(AssetExtension::Actions(actions)) = &mut contract.extension
-            {
-                for creation in &mut actions.creations {
+            let mut output_value = output_value.clone();
+            if let SimplicityOutput::Actions(action) = &mut output_value {
+                for creation in &mut action.actions.creations {
                     creation.signature =
                         Signature::from_slice(&[0; 64]).expect("fixed signature width");
                 }
             }
-            Ok(DynOutput::from_typed(output.module_instance_id(), contract))
+            Ok(DynOutput::from_typed(
+                output.module_instance_id(),
+                output_value,
+            ))
         })
         .collect::<Result<Vec<_>, ContractError>>()?;
     Ok((

@@ -119,7 +119,10 @@ async fn unpruned_spends_fail_admission_and_consensus_without_consuming_old_comm
         .output(Amount::from_sats(10), [0; 32], vec![])
         .unwrap();
     let funding = fed
-        .fund(vec![DynOutput::from_typed(SIMP, output.clone())])
+        .fund(vec![DynOutput::from_typed(
+            SIMP,
+            SimplicityOutput::from(output.clone()),
+        )])
         .await;
     let point = OutPoint {
         txid: funding.tx_hash(),

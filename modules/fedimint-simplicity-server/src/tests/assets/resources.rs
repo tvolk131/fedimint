@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use fedimint_core::TransactionId;
-use fedimint_simplicity_common::{resources, runtime};
+use fedimint_simplicity_common::limits::MAX_TRANSACTION_MILLIWEIGHT;
+use fedimint_simplicity_common::runtime;
 use simplicity::node::CoreConstructible;
 use simplicity::{ConstructNode, Cost};
 
@@ -60,14 +61,14 @@ async fn shared_cost_budget_accepts_exact_boundary_and_rejects_before_execution(
             let decoded = runtime::decode_program(input).unwrap();
             DynOutput::from_typed(
                 if index == 0 { SIMP } else { OTHER },
-                ContractOutput {
+                SimplicityOutput::from(ContractOutput {
                     version: fedimint_simplicity_common::EXECUTION_VERSION,
                     amount: Amount::from_sats(100),
                     cmr: decoded.cmr().to_byte_array(),
                     state: [0; 32],
                     recovery: vec![],
-                    extension: Some(AssetExtension::Bundle(AssetBundle::default())),
-                },
+                    assets: AssetBundle::default(),
+                }),
             )
         })
         .collect();
@@ -86,7 +87,7 @@ async fn shared_cost_budget_accepts_exact_boundary_and_rejects_before_execution(
     assert_eq!(
         runtime::decode_program(&inputs[0]).unwrap().bounds().cost
             + runtime::decode_program(&inputs[1]).unwrap().bounds().cost,
-        Cost::from_milliweight(resources::MAX_TRANSACTION_MILLIWEIGHT)
+        Cost::from_milliweight(MAX_TRANSACTION_MILLIWEIGHT)
     );
     let before = snapshot(&fed).await;
     for reverse in [false, true] {
@@ -161,17 +162,21 @@ async fn creation_authorizations_share_one_budget_without_contract_inputs() {
             origins.extend(ids.iter().map(|id| (module, *id)));
             outputs.push(DynOutput::from_typed(
                 module,
-                program
-                    .asset_output(Amount::ZERO, [0; 32], vec![], bundle(&[], &ids))
-                    .unwrap(),
+                SimplicityOutput::from(
+                    program
+                        .asset_output(Amount::ZERO, [0; 32], vec![], bundle(&[], &ids))
+                        .unwrap(),
+                ),
             ));
             outputs.push(DynOutput::from_typed(
                 module,
-                assets::action_output(AssetActions {
-                    creations,
-                    ..Default::default()
-                })
-                .unwrap(),
+                SimplicityOutput::from(
+                    assets::action_output(AssetActions {
+                        creations,
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                ),
             ));
         }
         let (mut tx, sponsor) = sponsored(vec![], outputs);

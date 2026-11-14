@@ -179,7 +179,10 @@ fn aggregate_byte_limit_rejects_before_allocating_decoded_constants() {
         allocation >= 4096,
         "control must exercise a large decoder allocation"
     );
-    assert!(4 * input.program.len() > resources::MAX_TRANSACTION_REDEMPTION_BYTES);
+    assert!(
+        4 * input.program.len()
+            > fedimint_simplicity_common::limits::MAX_TRANSACTION_REDEMPTION_BYTES
+    );
     let tx = Transaction {
         inputs: (0..4)
             .map(|index| DynInput::from_typed(4 + index % 2, input.clone()))
@@ -209,14 +212,16 @@ fn aggregate_byte_limit_rejects_before_allocating_decoded_constants() {
         .outputs
         .push(fedimint_core::core::DynOutput::from_typed(
             4,
-            fedimint_simplicity_common::ContractOutput {
-                version: 2,
-                amount: fedimint_core::Amount::ZERO,
-                cmr: [0; 32],
-                state: [0; 32],
-                recovery: vec![],
-                extension: None,
-            },
+            fedimint_simplicity_common::SimplicityOutput::from(
+                fedimint_simplicity_common::ContractOutput {
+                    version: 2,
+                    amount: fedimint_core::Amount::ZERO,
+                    cmr: [0; 32],
+                    state: [0; 32],
+                    recovery: vec![],
+                    assets: Default::default(),
+                },
+            ),
         ));
     for (tx, expected) in [
         (duplicate, ContractError::UnknownContract),

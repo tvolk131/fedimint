@@ -62,7 +62,7 @@ impl Fixture {
         let program = terms.program().unwrap();
         let mut deposit = transaction(
             vec![DynInput::from_typed(MINT, MintInput::new_v0(note))],
-            vec![DynOutput::from_typed(SIMP, output)],
+            vec![DynOutput::from_typed(SIMP, SimplicityOutput::from(output))],
         );
         sign_transaction(&mut deposit, &[request.key]).unwrap();
         fed.process(&deposit, 1).await.unwrap();

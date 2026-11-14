@@ -6,11 +6,11 @@ use simplicity::dag::{DagLike, InternalSharing};
 use simplicity::{BitIter, BitMachine, Cost, RedeemNode};
 
 use crate::jet::FedimintJet;
-use crate::{
-    BASE_ITEM_FEE_MSAT, ContractError, ContractInput, ContractOutput, MAX_EXTRA_CELLS,
-    MAX_EXTRA_FRAMES, MAX_PROGRAM_BYTES, MAX_PROGRAM_MILLIWEIGHT, MAX_TOTAL_TYPE_BITS,
-    MAX_TYPE_BITS, MAX_WITNESS_BYTES,
+use crate::limits::{
+    BASE_ITEM_FEE_MSAT, MAX_EXTRA_CELLS, MAX_EXTRA_FRAMES, MAX_PROGRAM_BYTES,
+    MAX_PROGRAM_MILLIWEIGHT, MAX_TOTAL_TYPE_BITS, MAX_TYPE_BITS, MAX_WITNESS_BYTES,
 };
+use crate::{ContractError, ContractInput, ContractOutput};
 
 mod preflight;
 mod pruning;
@@ -19,7 +19,8 @@ mod pruning;
 pub struct EnvironmentOutput {
     pub module_id: ModuleInstanceId,
     pub hash: [u8; 32],
-    /// Rich views are exposed only for this Simplicity module instance.
+    /// Rich views are exposed only for this Simplicity module instance's
+    /// contracts, not for its action output.
     pub contract: Option<ContractOutput>,
 }
 

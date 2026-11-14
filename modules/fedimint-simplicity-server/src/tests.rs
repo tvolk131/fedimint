@@ -20,7 +20,7 @@ use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::module::{AmountUnit, CoreConsensusVersion};
 use fedimint_core::secp256k1::{Keypair, SECP256K1};
 use fedimint_core::transaction::{Transaction, TransactionError, TransactionSignature};
-use fedimint_core::{Amount, OutPoint, PeerId};
+use fedimint_core::{Amount, NumPeers, OutPoint, PeerId};
 use fedimint_dummy_common::config::{DummyConfig, DummyConfigConsensus, DummyConfigPrivate};
 use fedimint_dummy_common::{DummyInput, DummyOutput};
 use fedimint_dummy_server::Dummy;
@@ -36,10 +36,17 @@ use fedimint_simplicity_client::compiler::{U256, Value, ValueConstructible, argu
 use fedimint_simplicity_client::{
     ContractProgram, owner_program, placeholder_signature, sign_transaction, signature_value,
 };
-use fedimint_simplicity_common::{
-    ContractError, ContractInput, MAX_PROGRAM_BYTES, MAX_RECOVERY_BYTES, MAX_WITNESS_BYTES,
-    SimplicityConsensusItem, output_fee,
+use fedimint_simplicity_common::limits::{
+    MAX_PROGRAM_BYTES, MAX_RECOVERY_BYTES, MAX_WITNESS_BYTES,
 };
+use fedimint_simplicity_common::{
+    ContractError, ContractInput, ContractOutput, SimplicityConsensusItem, SimplicityOutput,
+};
+
+/// The fee charged for a contract output, as consensus computes it.
+fn output_fee(output: &ContractOutput) -> Amount {
+    fedimint_simplicity_common::output_fee(&SimplicityOutput::from(output.clone()))
+}
 
 use super::Simplicity;
 use super::db::{ContractKey, StoredContract};
@@ -192,7 +199,7 @@ impl Harness {
             (
                 SIMP,
                 fedimint_simplicity_common::KIND,
-                DynServerModule::from(Simplicity::new_for_testing(peers).unwrap()),
+                DynServerModule::from(Simplicity::new_for_testing(NumPeers::from(peers.len()))),
             ),
             (
                 MINT,
@@ -352,7 +359,10 @@ async fn ecash_deposit_top_up_and_redeem_through_core() {
     initial.amount.msats -= output_fee(&initial).msats;
     let mut deposit = transaction(
         vec![DynInput::from_typed(MINT, MintInput::new_v0(note))],
-        vec![DynOutput::from_typed(SIMP, initial.clone())],
+        vec![DynOutput::from_typed(
+            SIMP,
+            SimplicityOutput::from(initial.clone()),
+        )],
     );
     sign_transaction(&mut deposit, &[first.key]).unwrap();
     fed.process(&deposit, 1).await.unwrap();
@@ -369,7 +379,10 @@ async fn ecash_deposit_top_up_and_redeem_through_core() {
         point,
         &owner,
         false,
-        vec![DynOutput::from_typed(SIMP, successor.clone())],
+        vec![DynOutput::from_typed(
+            SIMP,
+            SimplicityOutput::from(successor.clone()),
+        )],
     );
     top_up
         .inputs
@@ -383,7 +396,7 @@ async fn ecash_deposit_top_up_and_redeem_through_core() {
         .unwrap()
         .msats
         + output_fee(&successor).msats;
-    top_up.outputs[0] = DynOutput::from_typed(SIMP, successor.clone());
+    top_up.outputs[0] = DynOutput::from_typed(SIMP, SimplicityOutput::from(successor.clone()));
     authorize(
         &fed,
         &mut top_up,
@@ -411,7 +424,7 @@ async fn ecash_deposit_top_up_and_redeem_through_core() {
     let mut changed = top_up.clone();
     let mut changed_successor = successor.clone();
     changed_successor.state = [9; 32];
-    changed.outputs[0] = DynOutput::from_typed(SIMP, changed_successor);
+    changed.outputs[0] = DynOutput::from_typed(SIMP, SimplicityOutput::from(changed_successor));
     sign_transaction(&mut changed, &[owner, second.key]).unwrap();
     assert!(fed.process(&changed, 2).await.is_err());
 
@@ -547,7 +560,12 @@ async fn signatures_commit_to_claim_key_federation_module_and_foreign_outputs() 
     let original = program
         .output(Amount::from_sats(100), [0; 32], vec![])
         .unwrap();
-    let funding = fed.fund(vec![DynOutput::from_typed(SIMP, original)]).await;
+    let funding = fed
+        .fund(vec![DynOutput::from_typed(
+            SIMP,
+            SimplicityOutput::from(original),
+        )])
+        .await;
     let point = OutPoint {
         txid: funding.tx_hash(),
         out_idx: 0,
@@ -607,9 +625,11 @@ async fn malformed_oversized_and_wrong_programs_do_not_consume_contracts() {
     let funding = fed
         .fund(vec![DynOutput::from_typed(
             SIMP,
-            program
-                .output(Amount::from_sats(100), [0; 32], vec![])
-                .unwrap(),
+            SimplicityOutput::from(
+                program
+                    .output(Amount::from_sats(100), [0; 32], vec![])
+                    .unwrap(),
+            ),
         )])
         .await;
     let point = OutPoint {
@@ -658,8 +678,7 @@ async fn malformed_oversized_and_wrong_programs_do_not_consume_contracts() {
 
 #[tokio::test]
 async fn consensus_clock_requires_threshold_and_rejects_unknown_or_stale_votes() {
-    let peers = (0..4).map(PeerId::from).collect();
-    let module = Simplicity::new_for_testing(peers).unwrap();
+    let module = Simplicity::new_for_testing(NumPeers::from(4));
     let db = Database::new(MemDatabase::new(), Default::default());
     let mut tx = db.begin_transaction().await;
     module
@@ -725,24 +744,31 @@ async fn invalid_outputs_and_duplicate_spends_roll_back() {
         )
         .unwrap();
     let funding = fed
-        .fund(vec![DynOutput::from_typed(SIMP, output.clone())])
+        .fund(vec![DynOutput::from_typed(
+            SIMP,
+            SimplicityOutput::from(output.clone()),
+        )])
         .await;
     let point = OutPoint {
         txid: funding.tx_hash(),
         out_idx: 0,
     };
     for change in 0..4 {
-        let mut invalid = output.clone();
-        match change {
-            0 => invalid.version += 1,
-            1 => invalid.recovery.push(0),
-            2 => invalid.amount = Amount::from_msats(u64::MAX),
-            // A pre-asset output has no execution version this module accepts.
-            _ => {
-                invalid.version = 0;
-                invalid.extension = None;
+        let invalid = if change == 3 {
+            // An unknown output variant decodes but has no execution rules.
+            SimplicityOutput::Default {
+                variant: 99,
+                bytes: vec![],
             }
-        }
+        } else {
+            let mut invalid = output.clone();
+            match change {
+                0 => invalid.version += 1,
+                1 => invalid.recovery.push(0),
+                _ => invalid.amount = Amount::from_msats(u64::MAX),
+            }
+            SimplicityOutput::from(invalid)
+        };
         let mut tx = draft_spend(
             &program,
             point,

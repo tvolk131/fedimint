@@ -22,31 +22,36 @@ fn blob(data: &[u8]) -> Vec<u8> {
     [big(data.len() as u64), data.to_vec()].concat()
 }
 
-fn extension(variant: u64, data: &[u8]) -> Vec<u8> {
-    [vec![1], big(variant), blob(data)].concat()
+/// An enum variant: its index, then its length-prefixed fields.
+fn variant(index: u64, data: &[u8]) -> Vec<u8> {
+    [big(index), blob(data)].concat()
 }
 
-fn output(amount: u64, cmr: &[u8], state: &[u8], recovery: &[u8], ext: &[u8]) -> Vec<u8> {
-    [
+/// The contract variant of a Simplicity output, with execution version one.
+fn output(amount: u64, cmr: &[u8], state: &[u8], recovery: &[u8], bundle: &[u8]) -> Vec<u8> {
+    let contract = [
         big(1),
         big(amount),
         cmr.to_vec(),
         state.to_vec(),
         blob(recovery),
-        ext.to_vec(),
+        bundle.to_vec(),
     ]
-    .concat()
+    .concat();
+    variant(0, &contract)
 }
 
+/// The action variant of a Simplicity output, with an empty recovery field.
 fn actions(key: &[u8], signature: &[u8]) -> Vec<u8> {
     let creation = [key.to_vec(), sequence(&[big(1)]), signature.to_vec()].concat();
     let payload = [
         sequence(&[creation]),
         sequence(&[[vec![0x44; 32], big(10)].concat()]),
         sequence(&[[vec![0x55; 32], big(11)].concat()]),
+        blob(&[]),
     ]
     .concat();
-    output(0, &[0; 32], &[0; 32], &[], &extension(1, &payload))
+    variant(1, &payload)
 }
 
 fn outputs(native: &[u8], asset: &[u8], key: &[u8], signature: &[u8]) -> Vec<u8> {
@@ -108,13 +113,7 @@ fn main() {
         2, 121, 190, 102, 126, 249, 220, 187, 172, 85, 160, 98, 149, 206, 135, 11, 7, 2, 155, 252,
         219, 45, 206, 40, 217, 89, 242, 129, 91, 22, 248, 23, 152,
     ];
-    let native = output(
-        1000,
-        &[0x11; 32],
-        &[0x22; 32],
-        &[0xde, 0xad],
-        &extension(0, &[0, 0]),
-    );
+    let native = output(1000, &[0x11; 32], &[0x22; 32], &[0xde, 0xad], &[0, 0]);
     let bundle = [
         sequence(&[
             [vec![0x44; 32], big(253)].concat(),
@@ -123,13 +122,7 @@ fn main() {
         sequence(&[vec![0x44; 32], vec![0x55; 32]]),
     ]
     .concat();
-    let asset = output(
-        65536,
-        &[0x11; 32],
-        &[0x22; 32],
-        &[0xde, 0xad],
-        &extension(0, &bundle),
-    );
+    let asset = output(65536, &[0x11; 32], &[0x22; 32], &[0xde, 0xad], &bundle);
     let point = [vec![0x33; 32], big(253)].concat();
     let spends = sequence(&[[point.clone(), key.to_vec()].concat()]);
     let namespace = sha(&[

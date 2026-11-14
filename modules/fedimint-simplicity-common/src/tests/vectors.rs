@@ -14,11 +14,9 @@ use bitcoin::hex::FromHex;
 use fedimint_core::secp256k1::{PublicKey, schnorr};
 use fedimint_core::{Amount, OutPoint, TransactionId};
 
-use crate::assets::{
-    AssetActions, AssetAmount, AssetBundle, AssetCreation, AssetExtension, AssetId,
-};
+use crate::assets::{AssetActions, AssetAmount, AssetBundle, AssetCreation, AssetId};
 use crate::runtime::{Environment, EnvironmentInput, EnvironmentOutput};
-use crate::{ContractInput, ContractOutput};
+use crate::{ActionOutput, ContractInput, ContractOutput, SimplicityOutput};
 
 fn fixtures() -> serde_json::Value {
     serde_json::from_str(include_str!("../../tests/vectors/consensus.json")).unwrap()
@@ -56,14 +54,14 @@ fn native() -> ContractOutput {
         cmr: [0x11; 32],
         state: [0x22; 32],
         recovery: vec![0xde, 0xad],
-        extension: Some(AssetExtension::Bundle(AssetBundle::default())),
+        assets: AssetBundle::default(),
     }
 }
 
 fn asset() -> ContractOutput {
     let mut output = native();
     output.amount = Amount::from_msats(65536);
-    output.extension = Some(AssetExtension::Bundle(AssetBundle {
+    output.assets = AssetBundle {
         balances: vec![
             AssetAmount {
                 asset: AssetId([0x44; 32]),
@@ -75,8 +73,16 @@ fn asset() -> ContractOutput {
             },
         ],
         authorities: vec![AssetId([0x44; 32]), AssetId([0x55; 32])],
-    }));
+    };
     output
+}
+
+fn action_output() -> SimplicityOutput {
+    ActionOutput {
+        actions: actions(),
+        recovery: vec![],
+    }
+    .into()
 }
 
 fn actions() -> AssetActions {
@@ -138,7 +144,8 @@ fn environment() -> Environment {
             EnvironmentOutput {
                 module_id: 4,
                 hash: [0xdd; 32],
-                contract: Some(ContractOutput::action_output(actions())),
+                // Action outputs expose no contract view.
+                contract: None,
             },
         ]
         .into(),

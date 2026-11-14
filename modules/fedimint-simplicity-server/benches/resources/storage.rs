@@ -64,31 +64,43 @@ async fn measure(scenario: &str, count: u32) {
                 assets::creation(federation(), MODULE, &key, vec![0; assets_count])
                     .expect("creation");
             ids.sort();
-            output.extension = Some(AssetExtension::Bundle(AssetBundle {
+            output.assets = AssetBundle {
                 balances: vec![],
                 authorities: ids,
-            }));
-            outputs.push(DynOutput::from_typed(MODULE, output));
+            };
             outputs.push(DynOutput::from_typed(
                 MODULE,
-                assets::action_output(AssetActions {
-                    creations: vec![creation],
-                    ..Default::default()
-                })
-                .expect("actions"),
+                SimplicityOutput::from(output),
+            ));
+            outputs.push(DynOutput::from_typed(
+                MODULE,
+                SimplicityOutput::from(
+                    assets::action_output(AssetActions {
+                        creations: vec![creation],
+                        ..Default::default()
+                    })
+                    .expect("actions"),
+                ),
             ));
             creator = Some(key);
         } else {
-            if scenario == "receipt" {
-                output = assets::action_output(AssetActions::default()).expect("receipt action");
-            }
             // Incompressible stand-in for encrypted annotations, unique per
             // record. No secrets or plaintext recovery descriptors.
-            if scenario != "bare" {
-                output.recovery = (0..32u32)
+            let recovery = if scenario == "bare" {
+                output.recovery.clone()
+            } else {
+                (0..32u32)
                     .flat_map(|block| (index, block).consensus_hash_sha256().to_byte_array())
-                    .collect();
-            }
+                    .collect()
+            };
+            let output = if scenario == "receipt" {
+                SimplicityOutput::from(ActionOutput {
+                    recovery,
+                    ..assets::action_output(AssetActions::default()).expect("receipt action")
+                })
+            } else {
+                SimplicityOutput::from(ContractOutput { recovery, ..output })
+            };
             outputs.push(DynOutput::from_typed(MODULE, output));
         }
         let fee: u64 = outputs
@@ -96,7 +108,7 @@ async fn measure(scenario: &str, count: u32) {
             .map(|o| {
                 output_fee(
                     o.as_any()
-                        .downcast_ref::<ContractOutput>()
+                        .downcast_ref::<SimplicityOutput>()
                         .expect("contract"),
                 )
                 .msats
@@ -115,9 +127,9 @@ async fn measure(scenario: &str, count: u32) {
         if index.is_multiple_of(count.div_ceil(1024)) {
             let asset = tx.outputs[0]
                 .as_any()
-                .downcast_ref::<ContractOutput>()
-                .and_then(ContractOutput::bundle)
-                .and_then(|b| b.authorities.first())
+                .downcast_ref::<SimplicityOutput>()
+                .and_then(SimplicityOutput::contract)
+                .and_then(|contract| contract.assets.authorities.first())
                 .copied();
             samples.push((point, asset));
         }

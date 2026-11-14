@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use anyhow::ensure;
 use fedimint_api_client::api::{DynModuleApi, FederationApiExt};
+use fedimint_core::PeerId;
 use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::module::{ApiRequestErased, ModuleConsensusVersion};
 use fedimint_core::task::TaskGroup;
-use fedimint_core::{NumPeersExt, PeerId};
 use fedimint_simplicity_common::MODULE_CONSENSUS_VERSION;
 use fedimint_simplicity_common::consensus::{
     SUPPORTED_CONSENSUS_VERSION, SUPPORTED_CONSENSUS_VERSION_ENDPOINT,
@@ -39,16 +39,16 @@ impl Simplicity {
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
     ) -> ModuleConsensusVersion {
-        let mut votes = Vec::with_capacity(self.cfg.consensus.peers.len());
-        for peer in &self.cfg.consensus.peers {
+        let mut votes = Vec::with_capacity(self.num_peers.total());
+        for peer in self.num_peers.peer_ids() {
             votes.push(
-                dbtx.get_value(&VersionVoteKey(*peer))
+                dbtx.get_value(&VersionVoteKey(peer))
                     .await
                     .unwrap_or(MODULE_CONSENSUS_VERSION),
             );
         }
         votes.sort_unstable();
-        votes[self.cfg.consensus.peers.to_num_peers().max_evil()]
+        votes[self.num_peers.max_evil()]
     }
 
     pub(crate) async fn ensure_supported(

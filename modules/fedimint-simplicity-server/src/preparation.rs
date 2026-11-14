@@ -8,7 +8,7 @@ use fedimint_core::module::ModuleConsensusVersion;
 use fedimint_core::transaction::TransactionError;
 use fedimint_server_core::{ModuleTransactionContext, ModuleTransactionValidation};
 use fedimint_simplicity_common::consensus::check_execution_version;
-use fedimint_simplicity_common::{ContractError, ContractInput, resources, runtime};
+use fedimint_simplicity_common::{ContractError, ContractInput, limits, resources, runtime};
 use simplicity::{Cost, RedeemNode};
 
 use crate::db::{ContractKey, StoredContract};
@@ -69,10 +69,14 @@ pub(crate) async fn resolve(
     }
     for output in &context.transaction.outputs {
         if output.module_instance_id() == context.module_instance_id {
-            let output = output
+            let Some(output) = output
                 .as_any()
-                .downcast_ref::<fedimint_simplicity_common::ContractOutput>()
-                .ok_or_else(|| input_error(context.module_instance_id, ContractError::Context))?;
+                .downcast_ref::<fedimint_simplicity_common::SimplicityOutput>()
+                .ok_or_else(|| input_error(context.module_instance_id, ContractError::Context))?
+                .contract()
+            else {
+                continue;
+            };
             check_execution_version(output.version, active).map_err(|error| {
                 TransactionError::Output(fedimint_core::core::DynOutputError::from_typed(
                     context.module_instance_id,
@@ -159,7 +163,7 @@ impl Decoding {
                 .ok_or_else(|| error(ContractError::MissingContext))?;
             let decoded = cache::decode(contract).map_err(error)?;
             cost = cost + decoded.program.bounds().cost;
-            if cost > Cost::from_milliweight(resources::MAX_TRANSACTION_MILLIWEIGHT) {
+            if cost > Cost::from_milliweight(limits::MAX_TRANSACTION_MILLIWEIGHT) {
                 return Err(error(ContractError::Limit));
             }
             runtime::check_commitment(&decoded.program, &stored.output).map_err(error)?;

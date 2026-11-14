@@ -143,7 +143,7 @@ fn guardian_validation(bencher: divan::Bencher, name: &str) {
     let fixture = case(name);
     let rt = fixtures::executor();
     let db = rt.block_on(fixture.database());
-    let module = Simplicity::new_for_testing(vec![0.into()]).expect("one guardian");
+    let module = Simplicity::new_for_testing(fedimint_core::NumPeers::from(1));
     let mut dbtx = rt.block_on(db.begin_transaction_nc());
     // Use the production module hook, with a warm read-only DB transaction.
     rt.block_on(validate(&module, &mut dbtx, fixture));

@@ -21,7 +21,9 @@ use fedimint_mintv2_client::{
 use fedimint_rocksdb::RocksDb;
 use fedimint_simplicity_client::common::assets::AssetBundle;
 use fedimint_simplicity_client::states::OperationStatus;
-use fedimint_simplicity_client::{SimplicityClientInit, SimplicityClientModule, SpendIntent};
+use fedimint_simplicity_client::{
+    SimplicityClientInit, SimplicityClientModule, SpendIntent, TransactionPlan,
+};
 use futures::StreamExt as _;
 
 #[derive(Parser)]
@@ -245,7 +247,12 @@ async fn run(client: &ClientHandle, command: Command) -> anyhow::Result<()> {
         Command::Lock { msats } => {
             ensure!(msats > 0, "amount must be positive");
             let output = wallet.receive(Amount::from_msats(msats), AssetBundle::default())?;
-            let (operation, txid) = wallet.submit(vec![], vec![output], vec![]).await?;
+            let (operation, txid) = wallet
+                .submit_plan(TransactionPlan {
+                    outputs: vec![output.into()],
+                    ..Default::default()
+                })
+                .await?;
             println!("operation={} contract={txid}:0", operation.fmt_full());
             wallet.await_operation(operation).await?;
         }
@@ -268,7 +275,10 @@ async fn run(client: &ClientHandle, command: Command) -> anyhow::Result<()> {
             }
             ensure!(owned, "expected an unspent owner contract");
             let (operation, _) = wallet
-                .submit(vec![SpendIntent::owner(point)], vec![], vec![])
+                .submit_plan(TransactionPlan {
+                    spends: vec![SpendIntent::owner(point)],
+                    ..Default::default()
+                })
                 .await?;
             println!("operation={}", operation.fmt_full());
             wallet.await_operation(operation).await?;

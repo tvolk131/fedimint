@@ -137,9 +137,7 @@ async fn recovery_follows_an_authority_successor_without_its_original_annotation
     vault.amount = Amount::from_sats(20);
     // The same policy without the authorities is a lookalike, not a successor.
     let mut lookalike = vault.clone();
-    lookalike.extension = Some(crate::common::assets::AssetExtension::Bundle(
-        AssetBundle::default(),
-    ));
+    lookalike.assets = AssetBundle::default();
     let successor = tx(1, &[point(&creation)], vec![vault, lookalike]);
     store
         .apply_session(0, &session(&[creation, successor.clone()]), true)
@@ -154,7 +152,7 @@ async fn recovery_follows_an_authority_successor_without_its_original_annotation
     assert_eq!(holdings.len(), 1);
     assert_eq!(holdings[0].0, point(&successor));
     assert_eq!(holdings[0].1.descriptor, descriptor);
-    assert_eq!(holdings[0].1.output.bundle(), Some(&bundle));
+    assert_eq!(holdings[0].1.output.assets, bundle);
     // Watching a shared vault does not make its collateral a wallet balance.
     assert!(!AuthorityTemplates.owns_balance(&descriptor));
 }

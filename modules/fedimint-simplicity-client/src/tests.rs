@@ -81,7 +81,8 @@ fn creation_signatures_compose_across_instances_in_either_order() {
     use fedimint_core::secp256k1::Message;
     use fedimint_core::transaction::{Transaction, TransactionSignature};
 
-    use crate::common::assets::{AssetActions, AssetExtension, signature_hash};
+    use crate::common::SimplicityOutput;
+    use crate::common::assets::{AssetActions, signature_hash};
     let key = Keypair::from_secret_key(SECP256K1, &SecretKey::from_slice(&[3; 32]).unwrap());
     let federation = FederationId(sha256::Hash::hash(b"composable-creation"));
     let program = owner_program(key.x_only_public_key().0).unwrap();
@@ -100,14 +101,19 @@ fn creation_signatures_compose_across_instances_in_either_order() {
                 },
             )
             .unwrap();
-        outputs.push(DynOutput::from_typed(module, contract));
         outputs.push(DynOutput::from_typed(
             module,
-            assets::action_output(AssetActions {
-                creations: vec![creation],
-                ..Default::default()
-            })
-            .unwrap(),
+            SimplicityOutput::from(contract),
+        ));
+        outputs.push(DynOutput::from_typed(
+            module,
+            SimplicityOutput::from(
+                assets::action_output(AssetActions {
+                    creations: vec![creation],
+                    ..Default::default()
+                })
+                .unwrap(),
+            ),
         ));
     }
     let draft = Transaction {
@@ -124,9 +130,9 @@ fn creation_signatures_compose_across_instances_in_either_order() {
         for (index, module) in [4, 5].into_iter().enumerate() {
             let output = tx.outputs[index * 2 + 1]
                 .as_any()
-                .downcast_ref::<crate::common::ContractOutput>()
+                .downcast_ref::<SimplicityOutput>()
                 .unwrap();
-            let signature = output.actions().unwrap().creations[0].signature;
+            let signature = output.actions().unwrap().actions.creations[0].signature;
             let message = Message::from_digest(signature_hash(federation, module, &tx).unwrap());
             SECP256K1
                 .verify_schnorr(&signature, &message, &key.x_only_public_key().0)
@@ -136,19 +142,20 @@ fn creation_signatures_compose_across_instances_in_either_order() {
         // remain authenticated by the first instance's creator.
         let signature = tx.outputs[1]
             .as_any()
-            .downcast_ref::<crate::common::ContractOutput>()
+            .downcast_ref::<SimplicityOutput>()
             .unwrap()
             .actions()
             .unwrap()
+            .actions
             .creations[0]
             .signature;
         let mut foreign = tx.outputs[3]
             .as_any()
-            .downcast_ref::<crate::common::ContractOutput>()
+            .downcast_ref::<SimplicityOutput>()
             .unwrap()
             .clone();
-        if let Some(AssetExtension::Actions(actions)) = &mut foreign.extension {
-            actions.creations[0].authority_outputs[0] = 0;
+        if let SimplicityOutput::Actions(action) = &mut foreign {
+            action.actions.creations[0].authority_outputs[0] = 0;
         }
         tx.outputs[3] = DynOutput::from_typed(5, foreign);
         let message = Message::from_digest(signature_hash(federation, 4, &tx).unwrap());

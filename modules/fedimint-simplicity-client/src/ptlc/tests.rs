@@ -82,13 +82,16 @@ fn funding_validation_binds_all_public_terms() {
     let output = terms.output(vec![]).unwrap();
     terms.validate_output(&output).unwrap();
     let mut invalid_output = output.clone();
-    invalid_output.extension = None;
+    invalid_output.assets.balances = vec![crate::common::assets::AssetAmount {
+        asset: crate::common::assets::AssetId([9; 32]),
+        quantity: 1,
+    }];
     assert!(terms.validate_output(&invalid_output).is_err());
     invalid_output = output.clone();
-    invalid_output.extension = Some(crate::common::assets::AssetExtension::Bundle(AssetBundle {
+    invalid_output.assets = AssetBundle {
         authorities: vec![crate::common::assets::AssetId([9; 32])],
         ..Default::default()
-    }));
+    };
     assert!(terms.validate_output(&invalid_output).is_err());
     for altered in [
         Ptlc {

@@ -39,8 +39,10 @@ fn plan(module: u16, output_index: usize) -> ReceiptPlan {
     }
 }
 fn transaction(plan: &ReceiptPlan) -> Transaction {
-    let mut output = ContractOutput::action_output(Default::default());
-    output.recovery = plan.placeholder().unwrap();
+    let output = ActionOutput {
+        actions: AssetActions::default(),
+        recovery: plan.placeholder().unwrap(),
+    };
     Transaction {
         inputs: vec![
             DynInput::consensus_decode_whole(
@@ -49,7 +51,10 @@ fn transaction(plan: &ReceiptPlan) -> Transaction {
             )
             .unwrap(),
         ],
-        outputs: vec![DynOutput::from_typed(plan.module, output)],
+        outputs: vec![DynOutput::from_typed(
+            plan.module,
+            SimplicityOutput::from(output),
+        )],
         nonce: [3; 8],
         signatures: TransactionSignature::NaiveMultisig(vec![]),
     }
@@ -84,7 +89,7 @@ async fn automatic_receipts_require_authenticated_recovery_descriptors() {
         .unwrap();
     assert_eq!(owned.version, version);
     assert!(store.has_recovery_descriptor(&owned).unwrap());
-    let mut outputs = vec![owned.clone()];
+    let mut outputs = vec![SimplicityOutput::from(owned.clone())];
     assert!(
         store
             .prepare_receipt(false, &mut outputs, None)
@@ -106,15 +111,16 @@ async fn automatic_receipts_require_authenticated_recovery_descriptors() {
     copied.cmr[0] ^= 1;
     assert!(!store.has_recovery_descriptor(&copied).unwrap());
     for output in [watched, copied] {
-        let mut outputs = vec![output];
+        let mut outputs = vec![SimplicityOutput::from(output)];
         let receipt = store
             .prepare_receipt(false, &mut outputs, None)
             .unwrap()
             .unwrap();
         assert_eq!(receipt.output_index, 1);
-        assert_eq!(outputs[1].recovery, receipt.placeholder().unwrap());
+        assert!(outputs[1].actions().is_some());
+        assert_eq!(outputs[1].recovery(), receipt.placeholder().unwrap());
     }
-    let mut outputs = vec![ContractOutput::action_output(Default::default())];
+    let mut outputs = vec![SimplicityOutput::from(ActionOutput::default())];
     let receipt = store
         .prepare_receipt(true, &mut outputs, Some(SenderReceipt { context: None }))
         .unwrap()
@@ -139,10 +145,10 @@ fn receipts_bind_payers_outputs_nonce_and_scope_and_keep_reserved_size() {
     plan.verify(&tx).unwrap();
     let output = tx.outputs[0]
         .as_any()
-        .downcast_ref::<ContractOutput>()
+        .downcast_ref::<SimplicityOutput>()
         .unwrap();
     assert_eq!(
-        read(&plan.keys, federation(), 4, &tx, &output.recovery).unwrap(),
+        read(&plan.keys, federation(), 4, &tx, output.recovery()).unwrap(),
         Some(plan.receipt.clone())
     );
     for mutation in 0..4 {
@@ -159,25 +165,25 @@ fn receipts_bind_payers_outputs_nonce_and_scope_and_keep_reserved_size() {
             }
             _ => copied.outputs.push(DynOutput::from_typed(
                 8,
-                ContractOutput::action_output(Default::default()),
+                SimplicityOutput::from(ActionOutput::default()),
             )),
         }
         assert!(plan.verify(&copied).is_err());
         assert_eq!(
-            read(&plan.keys, federation(), 4, &copied, &output.recovery).unwrap(),
+            read(&plan.keys, federation(), 4, &copied, output.recovery()).unwrap(),
             None
         );
     }
     assert_eq!(
-        read(&plan.keys, federation(), 5, &tx, &output.recovery).unwrap(),
+        read(&plan.keys, federation(), 5, &tx, output.recovery()).unwrap(),
         None
     );
     let other = super::tests::plan(5, 0);
     assert_eq!(
-        read(&other.keys, federation(), 4, &tx, &output.recovery).unwrap(),
+        read(&other.keys, federation(), 4, &tx, output.recovery()).unwrap(),
         None
     );
-    let mut corrupted = output.recovery.clone();
+    let mut corrupted = output.recovery().to_vec();
     *corrupted.last_mut().unwrap() ^= 1;
     assert_eq!(
         read(&plan.keys, federation(), 4, &tx, &corrupted).unwrap(),
@@ -216,32 +222,32 @@ fn receipts_precede_creation_signatures_across_instances_in_either_order() {
             let key = plan.keys.signing_key(&ContractDescriptor::owner([1; 32]));
             let (creation, authorities) =
                 assets::creation(federation(), module, &key, vec![(2 * i + 1) as u32]).unwrap();
-            let mut output = ContractOutput::action_output(AssetActions {
-                creations: vec![creation],
-                ..Default::default()
-            });
-            output.recovery = plan.placeholder().unwrap();
+            let output = ActionOutput {
+                actions: AssetActions {
+                    creations: vec![creation],
+                    ..Default::default()
+                },
+                recovery: plan.placeholder().unwrap(),
+            };
             builder = builder
                 .with_outputs(
                     ClientOutputBundle::new_no_sm(vec![
                         ClientOutput {
-                            output,
+                            output: SimplicityOutput::from(output),
                             amounts: Amounts::ZERO,
                         },
                         ClientOutput {
-                            output: ContractOutput {
+                            output: SimplicityOutput::from(ContractOutput {
                                 version: 1,
                                 amount: Amount::ZERO,
                                 cmr: [0; 32],
                                 state: [0; 32],
                                 recovery: vec![],
-                                extension: Some(crate::common::assets::AssetExtension::Bundle(
-                                    crate::common::assets::AssetBundle {
-                                        balances: vec![],
-                                        authorities,
-                                    },
-                                )),
-                            },
+                                assets: crate::common::assets::AssetBundle {
+                                    balances: vec![],
+                                    authorities,
+                                },
+                            }),
                             amounts: Amounts::ZERO,
                         },
                     ])
@@ -267,9 +273,9 @@ fn receipts_precede_creation_signatures_across_instances_in_either_order() {
             plan.verify(&tx).unwrap();
             let output = tx.outputs[2 * i]
                 .as_any()
-                .downcast_ref::<ContractOutput>()
+                .downcast_ref::<SimplicityOutput>()
                 .unwrap();
-            let signature = output.actions().unwrap().creations[0].signature;
+            let signature = output.actions().unwrap().actions.creations[0].signature;
             SECP256K1
                 .verify_schnorr(
                     &signature,

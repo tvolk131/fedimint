@@ -5,12 +5,12 @@ use fedimint_core::core::{DynInput, DynOutput};
 use fedimint_core::secp256k1::schnorr::Signature;
 use fedimint_core::secp256k1::{Keypair, SECP256K1, SecretKey};
 use fedimint_core::transaction::TransactionSignature;
-use fedimint_core::{Amount, OutPoint, TransactionId};
+use fedimint_core::{OutPoint, TransactionId};
 use simplicity::ConstructNode;
 use simplicity::node::CoreConstructible;
 
 use super::*;
-use crate::assets::{AssetActions, AssetBundle, AssetCreation, AssetExtension};
+use crate::assets::{AssetActions, AssetBundle, AssetCreation};
 
 mod structure;
 
@@ -58,14 +58,14 @@ fn units(mut count: usize) -> Vec<u8> {
     })
 }
 
-fn creations(count: usize, destination: u32) -> ContractOutput {
-    ContractOutput {
-        version: 1,
-        amount: Amount::ZERO,
-        cmr: [0; 32],
-        state: [0; 32],
+fn out(instance: ModuleInstanceId, output: impl Into<SimplicityOutput>) -> DynOutput {
+    DynOutput::from_typed(instance, output.into())
+}
+
+fn creations(count: usize, destination: u32) -> ActionOutput {
+    ActionOutput {
         recovery: vec![],
-        extension: Some(AssetExtension::Actions(AssetActions {
+        actions: AssetActions {
             creations: (0..count)
                 .map(|index| AssetCreation {
                     key: Keypair::from_secret_key(
@@ -78,7 +78,7 @@ fn creations(count: usize, destination: u32) -> ContractOutput {
                 })
                 .collect(),
             ..Default::default()
-        })),
+        },
     }
 }
 
@@ -89,7 +89,7 @@ fn bundle() -> ContractOutput {
         cmr: [0; 32],
         state: [0; 32],
         recovery: vec![],
-        extension: Some(AssetExtension::Bundle(AssetBundle::default())),
+        assets: AssetBundle::default(),
     }
 }
 
@@ -173,15 +173,15 @@ fn creation_signatures_share_the_execution_budget_including_output_only_instance
     let tx = transaction(
         vec![],
         vec![
-            DynOutput::from_typed(4, creations(10, 2)),
-            DynOutput::from_typed(7, creations(10, 3)),
-            DynOutput::from_typed(4, bundle()),
-            DynOutput::from_typed(7, bundle()),
+            out(4, creations(10, 2)),
+            out(7, creations(10, 3)),
+            out(4, bundle()),
+            out(7, bundle()),
         ],
     );
     assert_eq!(check_transaction(&tx), Ok(()));
     let mut over = tx.clone();
-    over.outputs[1] = DynOutput::from_typed(7, creations(11, 3));
+    over.outputs[1] = out(7, creations(11, 3));
     assert_eq!(check_transaction(&over), Err(ContractError::Limit));
     // Even the minimum valid input costs something: there is no separate
     // allowance for programs after spending the entire budget on creation.
@@ -192,10 +192,7 @@ fn creation_signatures_share_the_execution_budget_including_output_only_instance
         assert_eq!(
             check_transaction(&transaction(
                 vec![DynInput::from_typed(4, input(units(count)))],
-                vec![
-                    DynOutput::from_typed(7, creations(19, 1)),
-                    DynOutput::from_typed(7, bundle())
-                ]
+                vec![out(7, creations(19, 1)), out(7, bundle())]
             )),
             expected
         );
@@ -223,13 +220,10 @@ fn counted_payload_excludes_recovery_and_counts_every_repeated_program() {
         Err(ContractError::Limit)
     );
     let mut output = bundle();
-    output.recovery = vec![0; crate::MAX_RECOVERY_BYTES];
+    output.recovery = vec![0; MAX_RECOVERY_BYTES];
     // Recovery bytes retain their separate bounds and outer transaction limit.
     assert_eq!(
-        check_transaction(&transaction(
-            vec![],
-            vec![DynOutput::from_typed(4, output); MAX_CONTRACTS]
-        )),
+        check_transaction(&transaction(vec![], vec![out(4, output); MAX_CONTRACTS])),
         Ok(())
     );
 }

@@ -54,7 +54,7 @@ async fn watched_shared_contract_submission_survives_mnemonic_only_recovery() {
                 signature_witness: None,
                 witnesses: compiler::witnesses([]),
             }],
-            outputs: vec![output],
+            outputs: vec![output.into()],
             ..Default::default()
         };
         let snapshot = wallet.pruning_snapshot([origin]).await.unwrap();
@@ -75,7 +75,7 @@ async fn watched_shared_contract_submission_survives_mnemonic_only_recovery() {
             .filter(|output| output.module_instance_id() == fed.simplicity)
             .map(|output| {
                 fedimint_simplicity_common::output_fee(
-                    output.as_any().downcast_ref::<ContractOutput>().unwrap(),
+                    output.as_any().downcast_ref::<SimplicityOutput>().unwrap(),
                 )
             })
             .sum();

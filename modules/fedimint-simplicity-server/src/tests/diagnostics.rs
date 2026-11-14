@@ -15,9 +15,11 @@ async fn local_diagnostics_match_guardian_checks_without_promising_liveness() {
     let funding = fed
         .fund(vec![DynOutput::from_typed(
             SIMP,
-            program
-                .output(Amount::from_sats(10), [0; 32], vec![])
-                .unwrap(),
+            SimplicityOutput::from(
+                program
+                    .output(Amount::from_sats(10), [0; 32], vec![])
+                    .unwrap(),
+            ),
         )])
         .await;
     let point = OutPoint {

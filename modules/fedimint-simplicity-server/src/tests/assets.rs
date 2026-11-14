@@ -7,16 +7,13 @@ mod network;
 mod resources;
 
 use fedimint_simplicity_client::assets;
-use fedimint_simplicity_common::ContractOutput;
-use fedimint_simplicity_common::assets::{
-    AssetActions, AssetAmount, AssetBundle, AssetExtension, AssetId,
-};
+use fedimint_simplicity_common::assets::{AssetActions, AssetAmount, AssetBundle, AssetId};
 
 use super::*;
 use crate::db::AssetKey;
 
-fn output(value: ContractOutput) -> DynOutput {
-    DynOutput::from_typed(SIMP, value)
+fn output(value: impl Into<SimplicityOutput>) -> DynOutput {
+    DynOutput::from_typed(SIMP, value.into())
 }
 fn point(tx: &Transaction, index: u64) -> OutPoint {
     OutPoint {
@@ -119,11 +116,12 @@ async fn namespace_authority_and_conservation_cannot_be_bypassed() {
     .unwrap();
     let (mut create, sponsor) = sponsored(vec![], vec![output(initial.clone()), output(action)]);
     // Pin the full three-asset creation fee independently of the fee helper:
-    // two 100-msat bases, 206 extension bytes and three 100-msat asset charges.
+    // two 100-msat bases, 98 bundle bytes, 104 action bytes and three 100-msat
+    // asset charges.
     create.inputs[0] = DynInput::from_typed(
         DUMMY,
         DummyInput {
-            amount: Amount::from_msats(706),
+            amount: Amount::from_msats(702),
             unit: AmountUnit::BITCOIN,
             pub_key: sponsor.public_key(),
         },
@@ -134,9 +132,7 @@ async fn namespace_authority_and_conservation_cannot_be_bypassed() {
     fed.sign(&mut create, &[sponsor]).await.unwrap();
     let mut unbacked = create.clone();
     let mut inflated = initial.clone();
-    if let Some(AssetExtension::Bundle(bundle)) = &mut inflated.extension {
-        bundle.balances = values(&[(ids[0], 1)]);
-    }
+    inflated.assets.balances = values(&[(ids[0], 1)]);
     unbacked.outputs[0] = output(inflated);
     assets::sign_creation(&mut unbacked, federation_id(), SIMP, &creator).unwrap();
     fed.sign(&mut unbacked, &[sponsor]).await.unwrap();
@@ -150,7 +146,7 @@ async fn namespace_authority_and_conservation_cannot_be_bypassed() {
     underfunded.inputs[0] = DynInput::from_typed(
         DUMMY,
         DummyInput {
-            amount: Amount::from_msats(705),
+            amount: Amount::from_msats(701),
             unit: AmountUnit::BITCOIN,
             pub_key: sponsor.public_key(),
         },

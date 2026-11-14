@@ -1,6 +1,6 @@
 use fedimint_core::core::ModuleKind;
 use fedimint_core::encoding::{Decodable, Encodable};
-use fedimint_core::{PeerId, plugin_types_trait_impl_config};
+use fedimint_core::plugin_types_trait_impl_config;
 use serde::{Deserialize, Serialize};
 
 use crate::SimplicityCommonInit;
@@ -15,9 +15,7 @@ pub struct SimplicityConfig {
 pub struct SimplicityConfigPrivate;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encodable, Decodable)]
-pub struct SimplicityConfigConsensus {
-    pub peers: Vec<PeerId>,
-}
+pub struct SimplicityConfigConsensus;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
 pub struct SimplicityClientConfig;

@@ -1,6 +1,6 @@
 use fedimint_core::core::DynInputError;
 use fedimint_core::secp256k1::schnorr::Signature;
-use fedimint_simplicity_common::ContractOutput;
+use fedimint_simplicity_common::ActionOutput;
 use fedimint_simplicity_common::assets::{AssetActions, AssetCreation};
 
 use super::*;
@@ -29,26 +29,29 @@ async fn structural_errors_precede_decoding_in_submission_and_consensus() {
     let mut bad_output = tx.clone();
     bad_output.outputs.push(DynOutput::from_typed(
         SIMP,
-        ContractOutput {
+        SimplicityOutput::from(ContractOutput {
             version: 2,
             amount: Amount::ZERO,
             cmr: [0; 32],
             state: [0; 32],
             recovery: vec![],
-            extension: None,
-        },
+            assets: Default::default(),
+        }),
     ));
     cases.push((bad_output, module_error(ContractError::Version)));
     let mut bad_destination = tx.clone();
     bad_destination.outputs.push(DynOutput::from_typed(
         SIMP,
-        ContractOutput::action_output(AssetActions {
-            creations: vec![AssetCreation {
-                key: owner.public_key(),
-                authority_outputs: vec![u32::MAX],
-                signature: Signature::from_slice(&[0; 64]).unwrap(),
-            }],
-            ..Default::default()
+        SimplicityOutput::from(ActionOutput {
+            actions: AssetActions {
+                creations: vec![AssetCreation {
+                    key: owner.public_key(),
+                    authority_outputs: vec![u32::MAX],
+                    signature: Signature::from_slice(&[0; 64]).unwrap(),
+                }],
+                ..Default::default()
+            },
+            recovery: vec![],
         }),
     ));
     cases.push((bad_destination, module_error(ContractError::Assets)));

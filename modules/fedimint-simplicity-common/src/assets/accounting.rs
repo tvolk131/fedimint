@@ -10,7 +10,8 @@ use fedimint_core::config::FederationId;
 use fedimint_core::core::ModuleInstanceId;
 use fedimint_core::secp256k1::{Message, SECP256K1};
 
-use super::{AssetActions, AssetCreation, AssetId, MAX_ASSETS, asset_id};
+use super::{AssetActions, AssetCreation, AssetId, asset_id};
+use crate::limits::MAX_ASSETS;
 use crate::{ContractError, ContractOutput};
 
 #[cfg(test)]
@@ -33,23 +34,19 @@ pub fn balances<'a>(
 ) -> Result<BTreeMap<AssetId, Balance>, ContractError> {
     let mut balances = BTreeMap::<AssetId, Balance>::new();
     for input in inputs {
-        if let Some(bundle) = input.bundle() {
-            for value in &bundle.balances {
-                balances.entry(value.asset).or_default().consumed += u128::from(value.quantity);
-            }
-            for id in &bundle.authorities {
-                balances.entry(*id).or_default().consumed_authorities += 1;
-            }
+        for value in &input.assets.balances {
+            balances.entry(value.asset).or_default().consumed += u128::from(value.quantity);
+        }
+        for id in &input.assets.authorities {
+            balances.entry(*id).or_default().consumed_authorities += 1;
         }
     }
     for output in outputs {
-        if let Some(bundle) = output.bundle() {
-            for value in &bundle.balances {
-                balances.entry(value.asset).or_default().created += u128::from(value.quantity);
-            }
-            for id in &bundle.authorities {
-                balances.entry(*id).or_default().created_authorities += 1;
-            }
+        for value in &output.assets.balances {
+            balances.entry(value.asset).or_default().created += u128::from(value.quantity);
+        }
+        for id in &output.assets.authorities {
+            balances.entry(*id).or_default().created_authorities += 1;
         }
     }
     for value in &actions.issuance {
@@ -105,11 +102,7 @@ pub fn check_creation<'a>(
             let ordinal = ordinal as u32;
             let id = asset_id(federation, module, creation.key, ordinal);
             let authority = output(output_index)
-                .filter(|candidate| {
-                    candidate
-                        .bundle()
-                        .is_some_and(|bundle| bundle.authorities.contains(&id))
-                })
+                .filter(|candidate| candidate.assets.authorities.contains(&id))
                 .ok_or(ContractError::Assets)?;
             Ok(CreatedAuthority {
                 id,

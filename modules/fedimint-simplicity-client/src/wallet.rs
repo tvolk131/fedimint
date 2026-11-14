@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::LOG_CLIENT_SIMPLICITY_SYNC;
-use crate::common::{ContractInput, ContractOutput};
+use crate::common::{ContractInput, ContractOutput, SimplicityOutput};
 use crate::descriptor::{ContractDescriptor, ContractTemplates, WalletKeys};
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Encodable, Decodable)]
@@ -325,23 +325,28 @@ impl WalletStore {
                 if output.module_instance_id() != self.module {
                     continue;
                 }
-                let output = output
+                let output = match output
                     .as_any()
-                    .downcast_ref::<ContractOutput>()
-                    .ok_or_else(|| anyhow::anyhow!("wrong Simplicity output decoder"))?;
-                if output.actions().is_some() {
-                    if let Some(receipt) = crate::receipt::read(
-                        &self.keys,
-                        self.federation,
-                        self.module,
-                        tx,
-                        &output.recovery,
-                    )? {
-                        ensure!(sent.is_none(), "multiple owned sender receipts");
-                        sent = Some(receipt);
+                    .downcast_ref::<SimplicityOutput>()
+                    .ok_or_else(|| anyhow::anyhow!("wrong Simplicity output decoder"))?
+                {
+                    SimplicityOutput::Contract(contract) => contract,
+                    SimplicityOutput::Actions(action) => {
+                        if let Some(receipt) = crate::receipt::read(
+                            &self.keys,
+                            self.federation,
+                            self.module,
+                            tx,
+                            &action.recovery,
+                        )? {
+                            ensure!(sent.is_none(), "multiple owned sender receipts");
+                            sent = Some(receipt);
+                        }
+                        continue;
                     }
-                    continue;
-                }
+                    // Accepted history never holds one; guardians reject it.
+                    SimplicityOutput::Default { .. } => continue,
+                };
                 let descriptor = self.keys.decrypt(&output.recovery)?;
                 let descriptor = if let Some(descriptor) = descriptor {
                     let (version, program) =
