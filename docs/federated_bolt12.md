@@ -200,6 +200,26 @@ item is burned against that gateway's allowance.
 4. Wallet, when next online: scan the receive stream for its claim keys,
    collect decryption shares and claim.
 
+## Gateway
+
+- `POST /bolt12_ingress` with a federation id returns the gateway's blinded
+  onion-message path, its reservation key and its receive fee, or `null` when
+  it does not serve federated BOLT12 offers for that federation. Wallets use
+  `LightningClientModule::bolt12_gateways` to collect these from several
+  gateways and drop the ones the federation has not approved.
+- The Lightning node hands invoice requests whose offer metadata carries the
+  routing prefix to the gateway instead of answering them itself. The gateway
+  answers up to 16 at once, each within 60 seconds, and drops the rest; payers
+  retry. Requests share the gateway's invoice rate limit.
+- A held payment is matched against every connected federation's issued
+  BOLT12 invoices by payment hash, after LNv2 and before LNv1. A payment whose
+  amount differs from the invoice is failed back unfunded.
+- Only the LDK backend serves these offers. It needs the `fedimint-ldk-node`
+  patch on branch `fedimint-federated-bolt12` of `tvolk131/ldk-node`, which
+  routes externally issued invoice requests to the gateway and registers
+  payment hashes whose preimage the node does not know, with a 144-block final
+  CLTV delta. Other backends report the feature as unsupported.
+
 ## Fees and minimum amounts
 
 `Bolt12Config` carries `registration_fee`, `stock_item_fee` and `receive_fee`.

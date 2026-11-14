@@ -3741,6 +3741,7 @@ dependencies = [
  "iroh-base 0.35.0",
  "iroh-relay 0.35.0",
  "itertools 0.14.0",
+ "lightning",
  "lightning-invoice",
  "lockable",
  "prost 0.13.5",
@@ -3893,8 +3894,7 @@ dependencies = [
 [[package]]
 name = "fedimint-ldk-node"
 version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d3a661de29bbeda13edfe59ea8f7d5258e3251bf95e497e11c433293ce3dbcc"
+source = "git+https://github.com/tvolk131/ldk-node?rev=11a41756fe049a64375c6b5c586501b76733f44a#11a41756fe049a64375c6b5c586501b76733f44a"
 dependencies = [
  "base64 0.22.1",
  "bdk_chain",
@@ -4862,6 +4862,7 @@ dependencies = [
  "fedimint-server-core",
  "fedimint-testing-core",
  "fs-lock",
+ "lightning",
  "lightning-invoice",
  "rand 0.8.5",
  "serde",

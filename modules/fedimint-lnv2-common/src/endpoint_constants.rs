@@ -25,4 +25,5 @@ pub const BOLT12_SIGN_ENDPOINT: &str = "bolt12_sign";
 pub const CREATE_BOLT11_INVOICE_ENDPOINT: &str = "/create_bolt11_invoice";
 pub const VERIFY_BOLT11_PREIMAGE_ENDPOINT: &str = "/verify_bolt11_preimage";
 pub const ROUTING_INFO_ENDPOINT: &str = "/routing_info";
+pub const BOLT12_INGRESS_ENDPOINT: &str = "/bolt12_ingress";
 pub const SEND_PAYMENT_ENDPOINT: &str = "/send_payment";

@@ -14,6 +14,7 @@
 #![allow(clippy::large_futures)]
 #![allow(clippy::struct_field_names)]
 
+mod bolt12;
 pub mod client;
 pub mod config;
 pub mod envs;
@@ -1161,8 +1162,9 @@ impl Gateway {
             }
         }
 
+        let lnrpc = LnRpcTracked::new(ln_client, "gateway");
         let lightning_context = LightningContext {
-            lnrpc: LnRpcTracked::new(ln_client, "gateway"),
+            lnrpc: lnrpc.clone(),
             lightning_public_key,
             lightning_alias,
             lightning_network,
@@ -1192,6 +1194,7 @@ impl Gateway {
         // Runs until the connection to the lightning node breaks or we receive the
         // shutdown signal.
         let htlc_task_group = self.task_group.make_subgroup();
+        self.spawn_bolt12_request_handler(&htlc_task_group, lnrpc);
         if handle
             .cancel_on_shutdown(async move {
                 loop {
@@ -1351,6 +1354,14 @@ impl Gateway {
                 "Ignoring payment for a registered LNv2 contract whose amount does not match",
             );
             return "ignore";
+        }
+
+        if self
+            .try_handle_lightning_payment_bolt12(&payment_request, lightning_context)
+            .await
+            .is_ok()
+        {
+            return "bolt12";
         }
 
         let lnv1_start = fedimint_core::time::now();

@@ -27,6 +27,10 @@ path = "src/lib.rs"
 name = "gatewayd-tests"
 path = "tests/tests.rs"
 
+[[test]]
+name = "gatewayd-bolt12-tests"
+path = "tests/bolt12.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 aquamarine = { workspace = true }
@@ -77,6 +81,7 @@ iroh-base = { workspace = true, default-features = false, features = [
     "ticket",
 ] }
 iroh-relay = { workspace = true, default-features = false }
+lightning = { workspace = true }
 lightning-invoice = { workspace = true }
 lockable = { workspace = true }
 prost = { workspace = true }

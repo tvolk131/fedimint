@@ -9,6 +9,8 @@ use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::util::SafeUrl;
 use fedimint_core::{Amount, OutPoint, ParseAmountError, apply, async_trait_maybe_send};
 use fedimint_ln_common::client::GatewayApi;
+use lightning::blinded_path::message::BlindedMessagePath;
+use lightning::util::ser::{Readable, Writeable};
 use lightning_invoice::{Bolt11Invoice, RoutingFees};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
@@ -16,7 +18,8 @@ use thiserror::Error;
 
 use crate::contracts::{IncomingContract, OutgoingContract};
 use crate::endpoint_constants::{
-    CREATE_BOLT11_INVOICE_ENDPOINT, ROUTING_INFO_ENDPOINT, SEND_PAYMENT_ENDPOINT,
+    BOLT12_INGRESS_ENDPOINT, CREATE_BOLT11_INVOICE_ENDPOINT, ROUTING_INFO_ENDPOINT,
+    SEND_PAYMENT_ENDPOINT,
 };
 use crate::{Bolt11InvoiceDescription, LightningInvoice};
 
@@ -47,6 +50,16 @@ pub trait GatewayConnection: std::fmt::Debug {
         invoice: LightningInvoice,
         auth: Signature,
     ) -> Result<Result<[u8; 32], Signature>, ServerError>;
+
+    /// How payers reach the gateway for federated BOLT12 offers, or `None`
+    /// if it does not serve them for this federation.
+    async fn bolt12_ingress(
+        &self,
+        _gateway_api: SafeUrl,
+        _federation_id: FederationId,
+    ) -> Result<Option<Bolt12Ingress>, ServerError> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +132,65 @@ impl GatewayConnection for RealGatewayConnection {
                 }),
             )
             .await
+    }
+
+    async fn bolt12_ingress(
+        &self,
+        gateway_api: SafeUrl,
+        federation_id: FederationId,
+    ) -> Result<Option<Bolt12Ingress>, ServerError> {
+        self.api
+            .request(
+                &gateway_api,
+                Method::POST,
+                BOLT12_INGRESS_ENDPOINT,
+                Some(federation_id),
+            )
+            .await
+    }
+}
+
+/// What a wallet needs to list a gateway in a federated BOLT12 offer.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Bolt12Ingress {
+    /// The gateway's blinded onion-message path, hex-encoded.
+    pub message_path: String,
+    /// The key the gateway reserves invoices with. Only keys the federation
+    /// approved may reserve.
+    pub gateway_key: PublicKey,
+    /// What the gateway keeps from each payment.
+    pub receive_fee: PaymentFee,
+}
+
+impl Bolt12Ingress {
+    pub fn new(
+        message_path: &BlindedMessagePath,
+        gateway_key: PublicKey,
+        receive_fee: PaymentFee,
+    ) -> Self {
+        use bitcoin::hex::DisplayHex as _;
+
+        Self {
+            message_path: message_path.encode().to_lower_hex_string(),
+            gateway_key,
+            receive_fee,
+        }
+    }
+
+    pub fn message_path(&self) -> anyhow::Result<BlindedMessagePath> {
+        use bitcoin::hex::FromHex as _;
+
+        let bytes = Vec::<u8>::from_hex(&self.message_path)?;
+        let mut reader = std::io::Cursor::new(&bytes);
+        let path = BlindedMessagePath::read(&mut reader)
+            .map_err(|e| anyhow::anyhow!("Invalid message path: {e:?}"))?;
+
+        anyhow::ensure!(
+            usize::try_from(reader.position())? == bytes.len(),
+            "Trailing message path data"
+        );
+
+        Ok(path)
     }
 }
 

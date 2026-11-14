@@ -18,6 +18,7 @@ use fedimint_core::core::OperationId;
 use fedimint_core::db::IDatabaseTransactionOpsCoreTyped;
 use fedimint_core::module::{Amounts, CommonModuleInit};
 use fedimint_core::secp256k1::{Keypair, PublicKey, SECP256K1};
+use fedimint_core::util::SafeUrl;
 use fedimint_core::{Amount, runtime};
 use fedimint_derive_secret::{ChildId, DerivableSecret};
 use fedimint_lnv2_common::bolt12::invoice::{offer_hash, routing_metadata};
@@ -25,7 +26,7 @@ use fedimint_lnv2_common::bolt12::{
     AddStock, Bolt12Output, MAX_STOCK, MAX_STOCK_BATCH, ReceivePolicy, Register, Registration,
     RegistrationId, Source, StockItem, StreamedReceive,
 };
-use fedimint_lnv2_common::gateway_api::PaymentFee;
+use fedimint_lnv2_common::gateway_api::{Bolt12Ingress, PaymentFee};
 use fedimint_lnv2_common::{LightningCommonInit, LightningOutput, LightningOutputV0};
 use fedimint_logging::LOG_CLIENT_MODULE_LNV2;
 use futures::StreamExt;
@@ -128,6 +129,41 @@ pub struct Bolt12ReceiveOperationMeta {
 }
 
 impl LightningClientModule {
+    /// Ask each of `gateways` how payers reach it for this federation's BOLT12
+    /// offers. Gateways that do not answer, do not serve them, or are not
+    /// approved by the federation are left out.
+    ///
+    /// Pass the returned message paths as [`Bolt12OfferParams::ingress`], and
+    /// set [`Bolt12OfferParams::max_gateway_fee`] to at least the highest
+    /// returned fee so that every listed gateway accepts the offer.
+    pub async fn bolt12_gateways(&self, gateways: &[SafeUrl]) -> Vec<Bolt12Ingress> {
+        let mut usable = Vec::new();
+
+        for gateway in gateways {
+            let Ok(Some(ingress)) = self
+                .gateway_conn
+                .bolt12_ingress(gateway.clone(), self.federation_id)
+                .await
+            else {
+                continue;
+            };
+
+            if ingress.message_path().is_err() {
+                continue;
+            }
+
+            if let Ok(true) = self
+                .module_api
+                .bolt12_gateway_approved(ingress.gateway_key)
+                .await
+            {
+                usable.push(ingress);
+            }
+        }
+
+        usable
+    }
+
     /// Register a reusable BOLT12 offer and stock it with single-use
     /// preimages. The offer keeps receiving while this wallet is offline until
     /// it expires or its stock runs out.

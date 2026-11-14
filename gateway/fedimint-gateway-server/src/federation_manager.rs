@@ -214,6 +214,11 @@ impl FederationManager {
         self.clients.contains_key(&federation_id)
     }
 
+    /// Every connected federation's client.
+    pub fn clients(&self) -> Vec<Spanned<ClientHandleArc>> {
+        self.clients.values().cloned().collect()
+    }
+
     pub fn client(&self, federation_id: &FederationId) -> Option<&Spanned<ClientHandleArc>> {
         self.clients.get(federation_id)
     }

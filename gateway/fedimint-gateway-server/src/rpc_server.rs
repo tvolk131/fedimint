@@ -39,7 +39,8 @@ use fedimint_ln_common::gateway_endpoint_constants::{
 };
 use fedimint_lnurl::LnurlResponse;
 use fedimint_lnv2_common::endpoint_constants::{
-    CREATE_BOLT11_INVOICE_ENDPOINT, ROUTING_INFO_ENDPOINT, SEND_PAYMENT_ENDPOINT,
+    BOLT12_INGRESS_ENDPOINT, CREATE_BOLT11_INVOICE_ENDPOINT, ROUTING_INFO_ENDPOINT,
+    SEND_PAYMENT_ENDPOINT,
 };
 use fedimint_lnv2_common::gateway_api::{CreateBolt11InvoicePayload, SendPaymentPayload};
 use fedimint_logging::LOG_GATEWAY;
@@ -288,6 +289,13 @@ fn lnv2_routes(handlers: &mut Handlers) -> Router {
         handlers,
         CREATE_BOLT11_INVOICE_ENDPOINT,
         create_bolt11_invoice_v2,
+        false,
+        router,
+    );
+    let router = register_post_handler(
+        handlers,
+        BOLT12_INGRESS_ENDPOINT,
+        bolt12_ingress_v2,
         false,
         router,
     );
@@ -824,6 +832,15 @@ async fn routing_info_v2(
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     let routing_info = gateway.routing_info_v2(&federation_id).await?;
     Ok(Json(json!(routing_info)))
+}
+
+#[instrument(target = LOG_GATEWAY, skip_all, err)]
+async fn bolt12_ingress_v2(
+    Extension(gateway): Extension<Arc<Gateway>>,
+    Json(federation_id): Json<FederationId>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    let ingress = gateway.bolt12_ingress_v2(&federation_id).await?;
+    Ok(Json(json!(ingress)))
 }
 
 #[instrument(target = LOG_GATEWAY, skip_all, err)]

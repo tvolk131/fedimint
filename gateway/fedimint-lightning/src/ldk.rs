@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -19,11 +19,15 @@ use fedimint_gateway_common::{
 use fedimint_ln_common::contracts::Preimage;
 use fedimint_logging::{LOG_LIGHTNING, LOG_LIGHTNING_LDK};
 use ldk_node::config::ChannelConfig;
+use ldk_node::external_bolt12::ExternalInvoiceRequest;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::lightning::routing::gossip::{NodeAlias, NodeId};
 use ldk_node::logger::{LogLevel, LogRecord, LogWriter};
 use ldk_node::payment::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
+use lightning::blinded_path::message::BlindedMessagePath;
+use lightning::blinded_path::payment::BlindedPaymentPath;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::offers::invoice_request::InvoiceRequest;
 use lightning::offers::offer::{Offer, OfferId};
 use lightning::routing::router::RouteParametersConfig;
 use lightning::types::payment::{PaymentHash, PaymentPreimage};
@@ -35,6 +39,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info, trace, warn};
 
 use super::{ChannelInfo, ILnRpcClient, LightningRpcError, ListChannelsResponse, RouteHtlcStream};
+use crate::bolt12::{Bolt12Request, Bolt12RequestFilter, MAX_QUEUED_BOLT12_REQUESTS};
 use crate::{
     CloseChannelsWithPeerRequest, CloseChannelsWithPeerResponse, CreateInvoiceRequest,
     CreateInvoiceResponse, GetBalancesResponse, GetLnOnchainAddressResponse, GetNodeInfoResponse,
@@ -1351,6 +1356,89 @@ impl ILnRpcClient for GatewayLdkClient {
             let _ = self.node.sync_wallets();
         });
         Ok(())
+    }
+
+    // The node hands a request it does not claim back by value, once per
+    // onion message; boxing it would allocate for every request the node
+    // answers itself.
+    #[allow(clippy::result_large_err)]
+    fn bolt12_requests(
+        &self,
+        filter: Bolt12RequestFilter,
+    ) -> Result<tokio::sync::mpsc::Receiver<Bolt12Request>, LightningRpcError> {
+        let (sender, receiver) = tokio::sync::mpsc::channel(MAX_QUEUED_BOLT12_REQUESTS);
+        // The node owns the handler, so the handler must not own the node.
+        let node = Arc::downgrade(&self.node);
+
+        self.node.set_external_bolt12_request_handler(Arc::new(
+            move |request: ExternalInvoiceRequest| {
+                if !filter(request.invoice_request()) {
+                    return Err(request);
+                }
+
+                let invoice_request = request.invoice_request().clone();
+                let node: Weak<ldk_node::Node> = node.clone();
+
+                let request = Bolt12Request::new(invoice_request, move |invoice| {
+                    node.upgrade()
+                        .ok_or_else(|| LightningRpcError::Bolt12Error {
+                            failure_reason: "The Lightning node has stopped".to_string(),
+                        })?
+                        .respond_external_bolt12(request, invoice)
+                        .map_err(|err| LightningRpcError::Bolt12Error {
+                            failure_reason: format!("Cannot queue the invoice: {err}"),
+                        })
+                });
+
+                if sender.try_send(request).is_err() {
+                    debug!(target: LOG_LIGHTNING, "Dropping a BOLT12 invoice request: the queue is full");
+                }
+
+                Ok(())
+            },
+        ));
+
+        Ok(receiver)
+    }
+
+    async fn bolt12_message_path(&self) -> Result<BlindedMessagePath, LightningRpcError> {
+        Ok(self.node.external_bolt12_message_path())
+    }
+
+    async fn register_bolt12_payment(
+        &self,
+        payment_hash: sha256::Hash,
+        amount: Amount,
+        invoice_request: &InvoiceRequest,
+        offer_id: [u8; 32],
+    ) -> Result<BlindedPaymentPath, LightningRpcError> {
+        // The same guard as `create_invoice`: a registration must not
+        // overwrite the record of a payment we send for this hash.
+        let payment_id = PaymentId(payment_hash.to_byte_array());
+        let outbound_lock_guard = self
+            .outbound_lightning_payment_lock_pool
+            .try_lock(payment_id);
+        let existing_direction = self
+            .node
+            .payment(&payment_id)
+            .map(|details| details.direction);
+
+        check_inbound_registration(outbound_lock_guard.is_some(), existing_direction).map_err(
+            |refusal| LightningRpcError::Bolt12Error {
+                failure_reason: format!("Payment hash cannot be registered: {refusal}"),
+            },
+        )?;
+
+        self.node
+            .register_external_bolt12_payment(
+                PaymentHash(payment_hash.to_byte_array()),
+                amount.msats,
+                invoice_request,
+                OfferId(offer_id),
+            )
+            .map_err(|err| LightningRpcError::Bolt12Error {
+                failure_reason: format!("Cannot register the payment: {err}"),
+            })
     }
 }
 

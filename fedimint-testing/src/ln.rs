@@ -26,6 +26,16 @@ use fedimint_ln_common::PrunedInvoice;
 use fedimint_ln_common::contracts::Preimage;
 use fedimint_ln_common::route_hints::RouteHint;
 use fedimint_logging::LOG_TEST;
+use lightning::blinded_path::message::{BlindedMessagePath, MessageContext, OffersContext};
+use lightning::blinded_path::payment::{
+    BlindedPaymentPath, Bolt12OfferContext, PaymentConstraints, PaymentContext,
+    UnauthenticatedReceiveTlvs,
+};
+use lightning::ln::inbound_payment::ExpandedKey;
+use lightning::offers::invoice_request::{InvoiceRequest, InvoiceRequestFields};
+use lightning::offers::nonce::Nonce;
+use lightning::offers::offer::OfferId;
+use lightning::sign::{EntropySource, ReceiveAuthKey};
 use lightning_invoice::{
     Bolt11Invoice, Currency, DEFAULT_EXPIRY_TIME, InvoiceBuilder, PaymentSecret,
 };
@@ -36,6 +46,14 @@ use tracing::info;
 pub const INVALID_INVOICE_PAYMENT_SECRET: [u8; 32] = [212; 32];
 
 pub const MOCK_INVOICE_PREIMAGE: [u8; 32] = [1; 32];
+
+struct Entropy;
+
+impl EntropySource for Entropy {
+    fn get_secure_random_bytes(&self) -> [u8; 32] {
+        rand::random()
+    }
+}
 
 #[derive(Debug)]
 pub struct FakeLightningTest {
@@ -384,6 +402,58 @@ impl ILnRpcClient for FakeLightningTest {
     ) -> Result<Preimage, LightningRpcError> {
         Err(LightningRpcError::Bolt12Error {
             failure_reason: "FakeLightningTest does not support Bolt12".to_string(),
+        })
+    }
+
+    async fn bolt12_message_path(&self) -> Result<BlindedMessagePath, LightningRpcError> {
+        Ok(BlindedMessagePath::one_hop(
+            self.gateway_node_pub_key,
+            ReceiveAuthKey(rand::random()),
+            MessageContext::Offers(OffersContext::InvoiceRequest {
+                nonce: Nonce::from_entropy_source(&Entropy),
+            }),
+            &Entropy,
+            secp256k1::SECP256K1,
+        ))
+    }
+
+    async fn register_bolt12_payment(
+        &self,
+        _payment_hash: sha256::Hash,
+        _amount: Amount,
+        invoice_request: &InvoiceRequest,
+        offer_id: [u8; 32],
+    ) -> Result<BlindedPaymentPath, LightningRpcError> {
+        let tlvs = UnauthenticatedReceiveTlvs {
+            payment_secret: lightning::types::payment::PaymentSecret(rand::random()),
+            payment_constraints: PaymentConstraints {
+                max_cltv_expiry: u32::MAX,
+                htlc_minimum_msat: 1,
+            },
+            payment_context: PaymentContext::Bolt12Offer(Bolt12OfferContext {
+                offer_id: OfferId(offer_id),
+                invoice_request: InvoiceRequestFields {
+                    payer_signing_pubkey: invoice_request.payer_signing_pubkey(),
+                    quantity: invoice_request.quantity(),
+                    payer_note_truncated: None,
+                    human_readable_name: None,
+                },
+            }),
+        }
+        .authenticate(
+            Nonce::from_entropy_source(&Entropy),
+            &ExpandedKey::new(rand::random()),
+        );
+
+        BlindedPaymentPath::one_hop(
+            self.gateway_node_pub_key,
+            tlvs,
+            144,
+            &Entropy,
+            secp256k1::SECP256K1,
+        )
+        .map_err(|()| LightningRpcError::Bolt12Error {
+            failure_reason: "Cannot build a payment path".to_string(),
         })
     }
 
