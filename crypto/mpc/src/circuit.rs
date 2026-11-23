@@ -1,15 +1,15 @@
 //! Boolean circuits and the preimage generator circuit.
 
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Result, ensure};
 use sha2::{Digest as _, Sha256};
 
-use crate::{MAX_PARTIES, MAX_TRIPLES};
+use crate::{MAX_PARTIES, MAX_TRIPLES, sha256};
 
-/// AND gates in one SHA-256 compression of a 32-byte message.
-pub const SHA256_AND_GATES: usize = 22_573;
+/// AND gates in one low-depth SHA-256 circuit for a 32-byte message.
+pub const SHA256_AND_GATES: usize = 46_220;
 
 /// The most preimages one run may generate.
-pub const MAX_BATCH: usize = 16;
+pub const MAX_BATCH: usize = 512;
 
 /// A gate reading earlier wires. Wires are numbered with every party's inputs
 /// first, in party order, then one wire per gate.
@@ -23,27 +23,50 @@ pub enum Gate {
 #[derive(Clone, Debug)]
 pub struct Circuit {
     pub parties: usize,
+    /// Input bits per party per lane.
     pub inputs_per_party: usize,
+    /// Number of independent SIMD lanes evaluated in lockstep with this circuit.
+    pub lanes: usize,
     pub gates: Vec<Gate>,
-    /// Wires opened to everyone.
+    /// Wires opened to everyone (per lane).
     pub outputs: Vec<usize>,
-    /// Wires never opened. Every 256 of them, most significant bit first,
-    /// form a secret value that each party receives a Shamir share of.
+    /// Wires never opened (per lane). Every 256 of them, most significant bit
+    /// first, form a secret value that each party receives a Shamir share of.
     pub secret_outputs: Vec<usize>,
 }
 
-/// Gates grouped into layers by AND depth. Layer `d` holds the AND gates
-/// that need depth `d - 1` results, then the linear gates computable after
-/// them.
+/// Gates grouped into layers by AND depth, together with a live-wire slot
+/// allocation that recycles dead wires so large batches stay in cache.
 pub struct Schedule {
     pub linear: Vec<Vec<usize>>,
     pub nonlinear: Vec<Vec<usize>>,
+    /// AND gates in one lane.
     pub and_count: usize,
+    /// Live slot index assigned to every wire (`0..wire_count()`).
+    pub wire_slot: Vec<usize>,
+    /// Peak concurrent live wire slots per lane.
+    pub slot_count: usize,
+}
+
+impl Schedule {
+    /// Multiplicative depth (number of interactive AND layers).
+    pub fn depth(&self) -> usize {
+        self.nonlinear
+            .iter()
+            .filter(|layer| !layer.is_empty())
+            .count()
+    }
 }
 
 impl Circuit {
+    /// Total input wires in one lane across all parties.
     pub fn input_count(&self) -> usize {
         self.parties * self.inputs_per_party
+    }
+
+    /// Total input bits per party across all lanes.
+    pub fn total_inputs_per_party(&self) -> usize {
+        self.inputs_per_party * self.lanes
     }
 
     pub fn wire_count(&self) -> usize {
@@ -56,6 +79,7 @@ impl Circuit {
             (3..=MAX_PARTIES).contains(&self.parties),
             "Unsupported party count"
         );
+        ensure!(self.lanes >= 1, "Lane count must be positive");
 
         for (i, gate) in self.gates.iter().enumerate() {
             let (a, b) = match *gate {
@@ -86,9 +110,10 @@ impl Circuit {
     pub fn id(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
 
-        hash.update(b"fedimint/mpc/circuit/v1");
+        hash.update(b"fedimint/mpc/circuit/v2");
         hash.update((self.parties as u64).to_le_bytes());
         hash.update((self.inputs_per_party as u64).to_le_bytes());
+        hash.update((self.lanes as u64).to_le_bytes());
 
         for gate in &self.gates {
             let (tag, a, b) = match *gate {
@@ -117,7 +142,8 @@ impl Circuit {
 
     pub fn schedule(&self) -> Schedule {
         let input_count = self.input_count();
-        let mut depths = vec![0; self.wire_count()];
+        let wire_count = self.wire_count();
+        let mut depths = vec![0; wire_count];
         let mut linear = vec![vec![]];
         let mut nonlinear = vec![vec![]];
         let mut and_count = 0;
@@ -146,16 +172,113 @@ impl Circuit {
             }
         }
 
+        // Compute remaining use counts so dead wire slots can be recycled.
+        let mut uses = vec![0u32; wire_count];
+        for gate in &self.gates {
+            match *gate {
+                Gate::Xor(a, b) | Gate::And(a, b) => {
+                    uses[a] += 1;
+                    uses[b] += 1;
+                }
+                Gate::Not(a) => {
+                    uses[a] += 1;
+                }
+            }
+        }
+        // Pin outputs and secret outputs so they remain live until the end.
+        for &w in self.outputs.iter().chain(&self.secret_outputs) {
+            uses[w] += 1;
+        }
+
+        let mut wire_slot = vec![usize::MAX; wire_count];
+        let mut free_slots: Vec<usize> = Vec::new();
+        let mut slot_count = 0usize;
+
+        let alloc = |free: &mut Vec<usize>, count: &mut usize| -> usize {
+            if let Some(s) = free.pop() {
+                s
+            } else {
+                let s = *count;
+                *count += 1;
+                s
+            }
+        };
+
+        // Assign slots to input wires first.
+        for w in 0..input_count {
+            let s = alloc(&mut free_slots, &mut slot_count);
+            wire_slot[w] = s;
+            if uses[w] == 0 {
+                free_slots.push(s);
+            }
+        }
+
+        for depth in 0..linear.len() {
+            // Allocate all outputs of this nonlinear layer before freeing its
+            // inputs so parallel reads and writes never alias.
+            for &i in &nonlinear[depth] {
+                let w = input_count + i;
+                wire_slot[w] = alloc(&mut free_slots, &mut slot_count);
+            }
+            for &i in &nonlinear[depth] {
+                let Gate::And(a, b) = self.gates[i] else {
+                    unreachable!("Only AND gates are scheduled as nonlinear");
+                };
+                for src in [a, b] {
+                    uses[src] -= 1;
+                    if uses[src] == 0 {
+                        free_slots.push(wire_slot[src]);
+                    }
+                }
+                let w = input_count + i;
+                if uses[w] == 0 {
+                    free_slots.push(wire_slot[w]);
+                }
+            }
+
+            // Linear gates run sequentially; allocate dst before freeing src
+            // so dst never aliases src on the same gate.
+            for &i in &linear[depth] {
+                let w = input_count + i;
+                wire_slot[w] = alloc(&mut free_slots, &mut slot_count);
+                match self.gates[i] {
+                    Gate::Xor(a, b) => {
+                        for src in [a, b] {
+                            uses[src] -= 1;
+                            if uses[src] == 0 {
+                                free_slots.push(wire_slot[src]);
+                            }
+                        }
+                    }
+                    Gate::Not(a) => {
+                        uses[a] -= 1;
+                        if uses[a] == 0 {
+                            free_slots.push(wire_slot[a]);
+                        }
+                    }
+                    Gate::And(..) => unreachable!("AND gates are nonlinear"),
+                }
+                if uses[w] == 0 {
+                    free_slots.push(wire_slot[w]);
+                }
+            }
+        }
+
         Schedule {
             linear,
             nonlinear,
             and_count,
+            wire_slot,
+            slot_count,
         }
     }
 
-    /// Evaluate in the clear, for tests.
+    /// Evaluate lane 0 in the clear, for tests.
     pub fn evaluate(&self, inputs: &[Vec<bool>]) -> Vec<bool> {
-        let mut wires: Vec<bool> = inputs.iter().flatten().copied().collect();
+        let mut wires: Vec<bool> = inputs
+            .iter()
+            .flat_map(|party_bits| party_bits[..self.inputs_per_party].iter().copied())
+            .collect();
 
         for gate in &self.gates {
             wires.push(match *gate {
@@ -168,7 +291,7 @@ impl Circuit {
         self.outputs.iter().map(|&i| wires[i]).collect()
     }
 
-    fn add(&mut self, gate: Gate) -> usize {
+    pub(crate) fn add(&mut self, gate: Gate) -> usize {
         let wire = self.wire_count();
 
         self.gates.push(gate);
@@ -192,126 +315,15 @@ pub fn bytes(bits: &[bool]) -> Vec<u8> {
         .collect()
 }
 
-/// One SHA-256 compression as a Bristol-format circuit.
-struct Compression {
-    wires: usize,
-    gates: Vec<(Vec<usize>, usize, String)>,
-}
-
-impl Compression {
-    fn parse() -> Result<Self> {
-        let mut lines = include_str!("../circuits/sha256.txt").lines();
-
-        let header: Vec<usize> = lines
-            .next()
-            .context("Missing circuit header")?
-            .split_whitespace()
-            .map(str::parse)
-            .collect::<std::result::Result<_, _>>()?;
-
-        ensure!(
-            header.len() == 2 && header[1] >= 768,
-            "Invalid circuit header"
-        );
-
-        lines.next();
-        lines.next();
-
-        let mut gates = vec![];
-
-        for line in lines.filter(|l| !l.trim().is_empty()) {
-            let row: Vec<_> = line.split_whitespace().collect();
-            let fan_in: usize = row[0].parse()?;
-
-            ensure!(row.len() == fan_in + 4 && row[1] == "1", "Invalid gate row");
-
-            let inputs = row[2..2 + fan_in]
-                .iter()
-                .map(|v| v.parse())
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-
-            gates.push((inputs, row[2 + fan_in].parse()?, row[3 + fan_in].to_owned()));
-        }
-
-        ensure!(gates.len() == header[0], "Gate count mismatch");
-
-        Ok(Self {
-            wires: header[1],
-            gates,
-        })
-    }
-
-    /// Append SHA-256 of the 256 `message` wires, returning the digest wires
-    /// in the circuit's bit order (least significant first).
-    fn append(
-        &self,
-        circuit: &mut Circuit,
-        message: &[usize],
-        zero: usize,
-        one: usize,
-    ) -> Result<Vec<usize>> {
-        ensure!(message.len() == 256, "SHA-256 input must be 32 bytes");
-
-        let constant = |bit: bool| if bit { one } else { zero };
-
-        // A 32-byte message fills one block: 0x80, zeros, then the length
-        // (256 bits) in the last two bytes.
-        let mut padding = [0u8; 32];
-
-        padding[0] = 0x80;
-        padding[30] = 1;
-
-        let mut block = message.to_vec();
-
-        block.extend(bits(&padding).into_iter().map(constant));
-        block.reverse();
-
-        let iv = [
-            0x6a, 0x09, 0xe6, 0x67, 0xbb, 0x67, 0xae, 0x85, 0x3c, 0x6e, 0xf3, 0x72, 0xa5, 0x4f,
-            0xf5, 0x3a, 0x51, 0x0e, 0x52, 0x7f, 0x9b, 0x05, 0x68, 0x8c, 0x1f, 0x83, 0xd9, 0xab,
-            0x5b, 0xe0, 0xcd, 0x19,
-        ];
-
-        let mut iv_bits = bits(&iv);
-
-        iv_bits.reverse();
-        block.extend(iv_bits.into_iter().map(constant));
-
-        let mut wires = vec![usize::MAX; self.wires];
-
-        wires[..768].copy_from_slice(&block);
-
-        for (inputs, output, op) in &self.gates {
-            ensure!(
-                *output < wires.len()
-                    && inputs
-                        .iter()
-                        .all(|&i| i < wires.len() && wires[i] != usize::MAX),
-                "Undefined wire in the compression circuit"
-            );
-
-            let gate = match (op.as_str(), inputs.as_slice()) {
-                ("AND", &[a, b]) => Gate::And(wires[a], wires[b]),
-                ("XOR", &[a, b]) => Gate::Xor(wires[a], wires[b]),
-                ("INV", &[a]) => Gate::Not(wires[a]),
-                _ => bail!("Unsupported compression gate {op}"),
-            };
-
-            wires[*output] = circuit.add(gate);
-        }
-
-        Ok(wires[self.wires - 256..].to_vec())
-    }
-}
-
 /// Multiplication triples a generator run consumes: the AND gates plus one
-/// bit check per input.
+/// bit check per input, across all `batch` lanes.
 pub fn direct_triples(parties: usize, batch: usize) -> usize {
     batch * SHA256_AND_GATES + parties * batch * 256
 }
 
-/// The generator: for each of `batch` preimages, `r` is the XOR of every
-/// party's 256-bit contribution. The circuit outputs `SHA256(r)` publicly and
+/// The generator: for each of `batch` preimages (evaluated as SIMD lanes of
+/// one single-preimage circuit), `r` is the XOR of every party's 256-bit
+/// contribution. The circuit outputs `SHA256(r)` publicly (MSB-first) and
 /// keeps `r` as a secret output, which the engine hands out as Shamir shares
 /// (see [`crate::engine::run`]).
 pub fn direct(parties: usize, batch: usize) -> Result<Circuit> {
@@ -327,36 +339,33 @@ pub fn direct(parties: usize, batch: usize) -> Result<Circuit> {
 
     let mut circuit = Circuit {
         parties,
-        inputs_per_party: batch * 256,
+        inputs_per_party: 256,
+        lanes: batch,
         gates: vec![],
         outputs: vec![],
         secret_outputs: vec![],
     };
 
-    let input = |party: usize, item: usize, bit: usize| party * batch * 256 + item * 256 + bit;
+    let input = |party: usize, bit: usize| party * 256 + bit;
 
     let zero = circuit.add(Gate::Xor(0, 0));
     let one = circuit.add(Gate::Not(zero));
-    let compression = Compression::parse()?;
 
-    for item in 0..batch {
-        let mut preimage = vec![];
+    let mut preimage = Vec::with_capacity(256);
+    for bit in 0..256 {
+        let mut wire = input(0, bit);
 
-        for bit in 0..256 {
-            let mut wire = input(0, item, bit);
-
-            for party in 1..parties {
-                wire = circuit.add(Gate::Xor(wire, input(party, item, bit)));
-            }
-
-            preimage.push(wire);
+        for party in 1..parties {
+            wire = circuit.add(Gate::Xor(wire, input(party, bit)));
         }
 
-        let digest = compression.append(&mut circuit, &preimage, zero, one)?;
-
-        circuit.outputs.extend(digest);
-        circuit.secret_outputs.extend(preimage);
+        preimage.push(wire);
     }
+
+    let digest = sha256::append_low_depth(&mut circuit, &preimage, zero, one)?;
+
+    circuit.outputs.extend(digest);
+    circuit.secret_outputs.extend(preimage);
 
     Ok(circuit)
 }

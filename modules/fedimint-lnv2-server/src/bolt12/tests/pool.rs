@@ -29,27 +29,10 @@ struct Dealt {
     submissions: BTreeMap<PeerId, Vec<PoolShare>>,
 }
 
-fn words(value: &[u8; 32]) -> [F; 4] {
-    std::array::from_fn(|w| {
-        F(u64::from_be_bytes(
-            value[w * 8..w * 8 + 8].try_into().expect("eight bytes"),
-        ))
-    })
-}
-
 fn share(preimage: &[u8; 32], coefficient: &[u8; 32], position: usize) -> [u8; 32] {
-    let mut out = [0; 32];
     let x = point(position + 1);
 
-    for (w, (r, c)) in words(preimage)
-        .into_iter()
-        .zip(words(coefficient))
-        .enumerate()
-    {
-        out[w * 8..w * 8 + 8].copy_from_slice(&(r + c * x).0.to_be_bytes());
-    }
-
-    out
+    std::array::from_fn(|b| (F(preimage[b]) + F(coefficient[b]) * x).0)
 }
 
 fn seal(

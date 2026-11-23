@@ -77,8 +77,9 @@ pub fn verify_message(
 /// Plaintext bytes per chunk.
 pub const CHUNK: usize = 256 * 1024;
 
-/// The largest message a run sends: the preprocessing of a full triple budget.
-const MAX_MESSAGE: usize = 3 * 8 * mpc::MAX_TRIPLES;
+/// The largest message a run sends: one peer's share of the double-random
+/// batch (`<= MAX_TRIPLES / 2` bytes for a `2f + 1` committee).
+const MAX_MESSAGE: usize = mpc::MAX_TRIPLES / 2;
 
 /// The most chunks one message may have.
 #[allow(clippy::cast_possible_truncation)] // A small constant.

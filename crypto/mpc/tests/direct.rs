@@ -162,13 +162,64 @@ async fn larger_committee_generates_recoverable_preimages() {
     check_generation(params, 1, &run(params, 1, 2, None).await);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn non_minimal_committee_generates_recoverable_preimages() {
+    let params = Params::new(4, 1).expect("valid");
+
+    check_generation(params, 1, &run(params, 1, 9, None).await);
+}
+
 #[test]
 fn committees_need_an_honest_majority() {
     assert!(Params::new(2, 1).is_err());
     assert!(Params::new(4, 2).is_err());
     assert!(Params::new(3, 0).is_err());
-    assert!(Params::new(17, 1).is_err());
+    assert!(Params::new(33, 1).is_err());
     assert!(Params::new(7, 3).is_ok());
+    assert!(Params::new(21, 10).is_ok());
+}
+
+#[test]
+fn berlekamp_welch_decodes_31_guardians_with_10_byzantine_shares() {
+    use mpc::field::{F, evaluate, point};
+
+    // Simulate a 31-guardian federation (`f = 10`, threshold `11`) where all
+    // 10 malicious guardians seal arbitrary garbage shares at the worst-case
+    // lowest indices `0..10`. Subset search would need C(31, 11) > 84M tries;
+    // Berlekamp–Welch must recover the exact preimage in < 1 ms.
+    let preimage: [u8; 32] = std::array::from_fn(|i| (i as u8).wrapping_mul(37).wrapping_add(11));
+    let payment_hash: [u8; 32] = Sha256::digest(preimage).into();
+    let threshold = 11usize;
+    let total_guardians = 31usize;
+
+    let polys: Vec<Vec<F>> = (0..32)
+        .map(|b| {
+            let mut coeffs = Vec::with_capacity(threshold);
+            coeffs.push(F(preimage[b]));
+            for d in 1..threshold {
+                coeffs.push(F(((b * 17 + d * 31 + 5) % 251 + 1) as u8));
+            }
+            coeffs
+        })
+        .collect();
+
+    let shares: Vec<Share> = (0..total_guardians)
+        .map(|party| {
+            let x = point(party + 1);
+            let mut val: [u8; 32] = std::array::from_fn(|b| evaluate(&polys[b], x).0);
+            if party < 10 {
+                // Corrupt all 10 lowest-index shares.
+                val[party % 32] ^= 0xa5;
+                val[(party * 7 + 3) % 32] ^= 0x5a;
+            }
+            Share::new(party, val)
+        })
+        .collect();
+
+    let recovered =
+        reconstruct(&payment_hash, threshold, &shares).expect("Berlekamp-Welch recovers");
+    assert_eq!(recovered.preimage, preimage);
+    assert_eq!(recovered.rejected, (0..10).collect::<Vec<_>>());
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -73,7 +73,7 @@ fn inputs(seed: &[u8; 32], circuit: &Circuit) -> Zeroizing<Vec<bool>> {
     rng_seed.update(seed);
 
     let mut rng = ChaCha20Rng::from_seed(rng_seed.finalize().into());
-    let mut bytes = Zeroizing::new(vec![0u8; circuit.inputs_per_party / 8]);
+    let mut bytes = Zeroizing::new(vec![0u8; circuit.total_inputs_per_party() / 8]);
 
     rng.fill_bytes(&mut bytes);
 
@@ -110,16 +110,9 @@ pub async fn generate<T: Transport>(
         .0
         .iter()
         .zip(&output.shares)
-        .map(|(digest, share)| {
-            // The digest wires come least significant bit first.
-            let mut digest = digest.to_vec();
-
-            digest.reverse();
-
-            Generated {
-                payment_hash: bytes(&digest).try_into().expect("256 bits"),
-                share: Share::new(party, *share),
-            }
+        .map(|(digest, share)| Generated {
+            payment_hash: bytes(digest).try_into().expect("256 bits"),
+            share: Share::new(party, *share),
         })
         .collect())
 }
@@ -132,23 +125,16 @@ pub struct Recovered {
     pub rejected: Vec<usize>,
 }
 
-fn words(value: &[u8; 32]) -> [F; 4] {
-    std::array::from_fn(|w| {
-        F(u64::from_be_bytes(
-            value[w * 8..w * 8 + 8].try_into().expect("eight bytes"),
-        ))
-    })
-}
-
 /// Inverses of every difference between two evaluation points. Points are
-/// at most `MAX_PARTIES`, so differences (XOR in a binary field) are below 32.
-fn inverse_table() -> [F; 32] {
+/// at most `MAX_PARTIES` (32), so pairwise XOR differences stay below 64.
+fn inverse_table() -> [F; 64] {
     std::array::from_fn(|k| if k == 0 { F(0) } else { inverse(point(k)) })
 }
 
-/// Evaluate, at `target`, the polynomial through `shares`.
-fn interpolate(shares: &[&Share], target: usize, inverses: &[F; 32]) -> [u8; 32] {
-    let mut acc = [F(0); 4];
+/// Evaluate, at `target`, the polynomial through `shares` byte-by-byte over
+/// `GF(2^8)`.
+fn interpolate(shares: &[&Share], target: usize, inverses: &[F; 64]) -> [u8; 32] {
+    let mut acc = [F(0); 32];
 
     for share in shares {
         let i = share.party + 1;
@@ -159,24 +145,200 @@ fn interpolate(shares: &[&Share], target: usize, inverses: &[F; 32]) -> [u8; 32]
             .filter(|&j| j != i)
             .fold(F(1), |w, j| w * point(target ^ j) * inverses[i ^ j]);
 
-        for (a, word) in acc.iter_mut().zip(words(&share.value)) {
-            *a += word * weight;
+        for (a, &byte) in acc.iter_mut().zip(&share.value) {
+            *a += F(byte) * weight;
         }
     }
 
-    let mut out = [0u8; 32];
+    std::array::from_fn(|i| acc[i].0)
+}
 
-    for (chunk, word) in out.chunks_mut(8).zip(acc) {
-        chunk.copy_from_slice(&word.0.to_be_bytes());
+/// Decode one byte column with Berlekamp–Welch over `GF(2^8)`, correcting up
+/// to `e = (n - threshold) / 2` arbitrary corrupted shares in `O(n^3)` time.
+/// Returns the degree-`< threshold` polynomial coefficients (constant term
+/// first) if decoding succeeds.
+fn berlekamp_welch_byte(xs: &[F], ys: &[F], threshold: usize) -> Option<Vec<F>> {
+    let n = xs.len();
+    let e = (n - threshold) / 2;
+    let q_len = threshold + e;
+    let cols = q_len + e; // unknowns: q_0..q_{q_len-1}, e_0..e_{e-1}
+
+    // Build augmented matrix `[A | rhs]` of size `n × (cols + 1)`.
+    let mut mat = vec![vec![F(0); cols + 1]; n];
+    for (i, row_vec) in mat.iter_mut().enumerate() {
+        let x = xs[i];
+        let y = ys[i];
+        let mut xpow = F(1);
+        for cell in row_vec.iter_mut().take(q_len) {
+            *cell = xpow;
+            xpow *= x;
+        }
+        let mut xpow_e = F(1);
+        for cell in row_vec.iter_mut().skip(q_len).take(e) {
+            *cell = y * xpow_e;
+            xpow_e *= x;
+        }
+        row_vec[cols] = y * xpow_e;
     }
 
-    out
+    // Gaussian elimination to reduced row-echelon form.
+    let mut pivot_cols = Vec::with_capacity(cols);
+    let mut row = 0;
+    for col in 0..cols {
+        let Some(piv) = (row..n).find(|&r| mat[r][col] != F(0)) else {
+            continue;
+        };
+        mat.swap(row, piv);
+        let inv = inverse(mat[row][col]);
+        for cell in &mut mat[row][col..=cols] {
+            *cell *= inv;
+        }
+        for r in 0..n {
+            if r != row && mat[r][col] != F(0) {
+                let factor = mat[r][col];
+                for c in col..=cols {
+                    let sub = factor * mat[row][c];
+                    mat[r][c] += sub;
+                }
+            }
+        }
+        pivot_cols.push((row, col));
+        row += 1;
+        if row == n {
+            break;
+        }
+    }
+
+    // Check consistency on zero rows.
+    let zeroize_mat = |m: &mut [Vec<F>]| {
+        for r in m {
+            for cell in r {
+                cell.0.zeroize();
+            }
+        }
+    };
+
+    if mat[row..n].iter().any(|r| r[cols] != F(0)) {
+        zeroize_mat(&mut mat);
+        return None;
+    }
+
+    // Extract one solution (setting any free variables to 0).
+    let mut sol = vec![F(0); cols];
+    for &(r, col) in &pivot_cols {
+        sol[col] = mat[r][cols];
+    }
+    zeroize_mat(&mut mat);
+
+    let mut q = sol[..q_len].to_vec();
+    let mut err = Vec::with_capacity(e + 1);
+    err.extend_from_slice(&sol[q_len..]);
+    err.push(F(1)); // monic x^e term
+    for cell in &mut sol {
+        cell.0.zeroize();
+    }
+
+    // Exact polynomial division `Q(x) / E(x)` (lowest degree first).
+    let mut p = vec![F(0); threshold];
+    for deg in (e..q_len).rev() {
+        let coef = q[deg];
+        p[deg - e] = coef;
+        if coef != F(0) {
+            for j in 0..=e {
+                q[deg - e + j] += coef * err[j];
+            }
+        }
+    }
+
+    // Remainder must vanish identically.
+    let ok = q[..e].iter().all(|&r| r == F(0));
+    for cell in &mut q {
+        cell.0.zeroize();
+    }
+    for cell in &mut err {
+        cell.0.zeroize();
+    }
+
+    if !ok {
+        for cell in &mut p {
+            cell.0.zeroize();
+        }
+        return None;
+    }
+
+    Some(p)
+}
+
+/// Try polynomial-time Berlekamp–Welch decoding across all 32 bytes.
+/// Succeeds immediately whenever at most `(shares.len() - threshold) / 2`
+/// shares are corrupted (including ALL `f` malicious shares when `3f + 1`
+/// shares are present).
+fn try_berlekamp_welch(
+    payment_hash: &[u8; 32],
+    threshold: usize,
+    shares: &[Share],
+) -> Option<Recovered> {
+    let xs: Vec<F> = shares.iter().map(|s| point(s.party + 1)).collect();
+    let mut polys: Vec<Vec<F>> = Vec::with_capacity(32);
+    let mut candidate = [0u8; 32];
+
+    let zeroize_polys = |ps: &mut [Vec<F>]| {
+        for poly in ps {
+            for cell in poly {
+                cell.0.zeroize();
+            }
+        }
+    };
+
+    for byte_idx in 0..32 {
+        let mut ys: Vec<F> = shares.iter().map(|s| F(s.value[byte_idx])).collect();
+        let poly = berlekamp_welch_byte(&xs, &ys, threshold);
+        for y in &mut ys {
+            y.0.zeroize();
+        }
+        let Some(poly) = poly else {
+            candidate.zeroize();
+            zeroize_polys(&mut polys);
+            return None;
+        };
+        candidate[byte_idx] = poly[0].0;
+        polys.push(poly);
+    }
+
+    if Sha256::digest(candidate).as_slice() != payment_hash {
+        candidate.zeroize();
+        zeroize_polys(&mut polys);
+        return None;
+    }
+
+    let mut rejected = Vec::new();
+    for (idx, share) in shares.iter().enumerate() {
+        let x = xs[idx];
+        let valid = polys
+            .iter()
+            .enumerate()
+            .all(|(b, poly)| crate::field::evaluate(poly, x).0 == share.value[b]);
+        if !valid {
+            rejected.push(share.party);
+        }
+    }
+
+    zeroize_polys(&mut polys);
+
+    Some(Recovered {
+        preimage: candidate,
+        rejected,
+    })
 }
 
 /// Recover the preimage of `payment_hash` from shares of which at least
-/// `threshold` are correct. Tries share subsets of size `threshold` until one
-/// yields a value with the right hash; with at most `MAX_PARTIES` shares that
-/// is at most 12,870 attempts.
+/// `threshold` are correct.
+///
+/// Runs polynomial-time Berlekamp–Welch decoding first (handling up to
+/// `(shares.len() - threshold) / 2` corrupted shares in microseconds—covering
+/// all `f` Byzantine shares when `3f + 1` shares are given, and up to `f / 2`
+/// when `2f + 1` are given), then falls back to subset search if more errors
+/// are present.
 pub fn reconstruct(
     payment_hash: &[u8; 32],
     threshold: usize,
@@ -194,6 +356,10 @@ pub fn reconstruct(
         );
 
         seen[share.party] = true;
+    }
+
+    if let Some(recovered) = try_berlekamp_welch(payment_hash, threshold, shares) {
+        return Ok(recovered);
     }
 
     let inverses = inverse_table();
