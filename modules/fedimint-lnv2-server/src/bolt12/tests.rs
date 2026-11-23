@@ -1,4 +1,5 @@
 mod pool;
+mod relay;
 
 use std::collections::BTreeMap;
 
@@ -47,7 +48,11 @@ struct Federation {
 
 impl Federation {
     fn new() -> Self {
-        let peers: Vec<PeerId> = (0..GUARDIANS).map(PeerId::from).collect();
+        Self::with_guardians(GUARDIANS)
+    }
+
+    fn with_guardians(guardians: u16) -> Self {
+        let peers: Vec<PeerId> = (0..guardians).map(PeerId::from).collect();
         let polynomial = dealer_polynomial(peers.to_num_peers());
         let sks: BTreeMap<_, _> = peers
             .iter()

@@ -37,6 +37,7 @@ tracing = { workspace = true }
 zeroize = "1"
 
 [dev-dependencies]
+fedimint-connectors = { workspace = true }
 lightning = { workspace = true }
 
 [lints]

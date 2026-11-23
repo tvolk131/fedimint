@@ -24,6 +24,8 @@ pub const BOLT12_NEXT_POOL_ENDPOINT: &str = "bolt12_next_pool";
 pub const BOLT12_RECIPIENT_USED_ENDPOINT: &str = "bolt12_recipient_used";
 pub const BOLT12_DECRYPTION_SHARES_ENDPOINT: &str = "bolt12_decryption_shares";
 pub const BOLT12_MPC_ENDPOINT: &str = "bolt12_mpc";
+pub const BOLT12_MPC_FETCH_ENDPOINT: &str = "bolt12_mpc_fetch";
+pub const BOLT12_MPC_RELAY_ENDPOINT: &str = "bolt12_mpc_relay";
 pub const BOLT12_MPC_EVIDENCE_ENDPOINT: &str = "bolt12_mpc_evidence";
 
 // Gateway endpoints

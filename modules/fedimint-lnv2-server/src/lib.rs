@@ -241,7 +241,10 @@ impl ModuleInit for LightningInit {
                 | DbKeyPrefix::Bolt12Dispute
                 | DbKeyPrefix::Bolt12PoolTranscript
                 | DbKeyPrefix::Bolt12PoolLocalVerdict
-                | DbKeyPrefix::Bolt12GatewayApprovalCount => {}
+                | DbKeyPrefix::Bolt12GatewayApprovalCount
+                | DbKeyPrefix::Bolt12PoolStickyCommittee
+                | DbKeyPrefix::Bolt12PoolAbort
+                | DbKeyPrefix::Bolt12PoolRelayEvidence => {}
                 DbKeyPrefix::IncomingContractIndex => {
                     push_db_pair_items!(
                         dbtx,
@@ -592,6 +595,11 @@ impl ServerModule for Lightning {
                 let now = self.consensus_unix_time(dbtx).await;
 
                 bolt12::pool::process_abandon(dbtx, &self.cfg, run, now).await
+            }
+            LightningConsensusItem::Bolt12PoolAbort { run } => {
+                let now = self.consensus_unix_time(dbtx).await;
+
+                bolt12::pool::process_abort(dbtx, &self.cfg, peer, run, now).await
             }
             LightningConsensusItem::Bolt12PoolEvidence { run, digest } => {
                 let now = self.consensus_unix_time(dbtx).await;

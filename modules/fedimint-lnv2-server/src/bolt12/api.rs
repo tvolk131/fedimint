@@ -15,10 +15,10 @@ use fedimint_lnv2_common::bolt12::{
 use fedimint_lnv2_common::endpoint_constants::{
     BOLT12_AWAIT_RECEIVES_ENDPOINT, BOLT12_CONTRACT_ENDPOINT, BOLT12_DECRYPTION_SHARES_ENDPOINT,
     BOLT12_GATEWAY_APPROVED_ENDPOINT, BOLT12_MPC_ENDPOINT, BOLT12_MPC_EVIDENCE_ENDPOINT,
-    BOLT12_NEXT_POOL_ENDPOINT, BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_NONCE_ENDPOINT,
-    BOLT12_RECIPIENT_USED_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
-    BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT, BOLT12_RESERVATION_ENDPOINT,
-    BOLT12_SET_GATEWAY_VOTE_ENDPOINT, BOLT12_SIGN_ENDPOINT,
+    BOLT12_MPC_FETCH_ENDPOINT, BOLT12_MPC_RELAY_ENDPOINT, BOLT12_NEXT_POOL_ENDPOINT,
+    BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_NONCE_ENDPOINT, BOLT12_RECIPIENT_USED_ENDPOINT,
+    BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT, BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT,
+    BOLT12_RESERVATION_ENDPOINT, BOLT12_SET_GATEWAY_VOTE_ENDPOINT, BOLT12_SIGN_ENDPOINT,
 };
 use futures::StreamExt;
 use tpe::DecryptionKeyShare;
@@ -213,9 +213,8 @@ impl Lightning {
         ]
     }
 
-    /// Invoice signing and generation runs. Not consensus: each guardian
-    /// answers for itself.
-    pub(crate) fn bolt12_signing_endpoints() -> Vec<ApiEndpoint<Self>> {
+    /// MPC generation transport, relay, and evidence endpoints.
+    fn bolt12_mpc_endpoints() -> Vec<ApiEndpoint<Self>> {
         vec![
             public_api_endpoint! {
                 BOLT12_MPC_ENDPOINT,
@@ -232,6 +231,53 @@ impl Lightning {
                 }
             },
             public_api_endpoint! {
+                BOLT12_MPC_FETCH_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |module: &Lightning, _context, request: String| -> Vec<String> {
+                    let worker = module
+                        .bolt12_worker
+                        .as_ref()
+                        .ok_or_else(|| ApiError::bad_request("Preimage generation is disabled".to_string()))?;
+
+                    let request = transport::decode_fetch_request(&request)
+                        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+                    worker
+                        .serve_packets(&request)
+                        .map(|packets| {
+                            packets
+                                .into_iter()
+                                .map(|packet| packet.consensus_encode_to_hex())
+                                .collect()
+                        })
+                        .map_err(|e| ApiError::bad_request(e.to_string()))
+                }
+            },
+            public_api_endpoint! {
+                BOLT12_MPC_RELAY_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |module: &Lightning, _context, request: String| -> Vec<String> {
+                    let worker = module
+                        .bolt12_worker
+                        .as_ref()
+                        .ok_or_else(|| ApiError::bad_request("Preimage generation is disabled".to_string()))?;
+
+                    let request = transport::decode_relay_request(&request)
+                        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+                    worker
+                        .relay(&request)
+                        .await
+                        .map(|packets| {
+                            packets
+                                .into_iter()
+                                .map(|packet| packet.consensus_encode_to_hex())
+                                .collect()
+                        })
+                        .map_err(|e| ApiError::bad_request(e.to_string()))
+                }
+            },
+            public_api_endpoint! {
                 BOLT12_MPC_EVIDENCE_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Lightning, context, params: (u64, u64)| -> String {
@@ -241,6 +287,14 @@ impl Lightning {
                         .map_err(|e| ApiError::bad_request(e.to_string()))
                 }
             },
+        ]
+    }
+
+    /// Invoice signing and generation runs. Not consensus: each guardian
+    /// answers for itself.
+    pub(crate) fn bolt12_signing_endpoints() -> Vec<ApiEndpoint<Self>> {
+        let mut endpoints = Self::bolt12_mpc_endpoints();
+        endpoints.extend([
             public_api_endpoint! {
                 BOLT12_NONCE_ENDPOINT,
                 ApiVersion::new(0, 0),
@@ -294,6 +348,7 @@ impl Lightning {
                         .map_err(|e| ApiError::bad_request(e.to_string()))
                 }
             },
-        ]
+        ]);
+        endpoints
     }
 }

@@ -26,6 +26,20 @@ pub type Received = Vec<Vec<Option<Vec<u8>>>>;
 pub struct Evidence {
     pub seed: [u8; 32],
     pub received: Received,
+    /// `(sender, recipient, round)` triples where this member was asked to
+    /// relay `sender`'s encrypted packet for `recipient` in `round` and
+    /// `sender` failed to serve a valid signed packet.
+    pub relay_missing: BTreeSet<(usize, usize, u64)>,
+}
+
+impl Evidence {
+    pub fn new(seed: [u8; 32], received: Received) -> Self {
+        Self {
+            seed,
+            received,
+            relay_missing: BTreeSet::new(),
+        }
+    }
 }
 
 /// How a replayed party's run went.
@@ -74,9 +88,16 @@ impl Transport for ReplayTransport<'_> {
 
         let messages = messages.expect("checked above");
 
-        Ok(messages
-            .iter()
-            .map(|message| message.clone().unwrap_or_default())
+        // Clamp to `parties` so an oversized untrusted row cannot make the
+        // engine abort inside `exchange` with `stalled = None`.
+        Ok((0..parties)
+            .map(|sender| {
+                messages
+                    .get(sender)
+                    .and_then(Option::as_ref)
+                    .cloned()
+                    .unwrap_or_default()
+            })
             .collect())
     }
 }
@@ -222,6 +243,62 @@ pub async fn judge(
         .flatten()
         .filter_map(|replay| replay.stalled.as_ref().map(|(round, _)| *round))
         .min();
+
+    // At `first_stall`, convict any `sender` accused by at least `f + 1`
+    // distinct committee members (`!= sender`) across the union of:
+    // - members stalled at `first_stall` waiting for `sender`, and
+    // - members that witnessed `relay_missing(sender, victim, first_stall)`
+    //   for a stalled `victim`.
+    //
+    // Soundness: an honest `sender` never causes honest members to stall and
+    // never triggers an honest `relay_missing` witness, so at most `f`
+    // malicious members can appear in the union (strictly `< f + 1`).
+    // Completeness: if a malicious `sender` drops `h >= 1` honest members and
+    // delivers to the other `s = (f + 1) - h` honest members, all `h` stall
+    // and all `s` witness `relay_missing`, giving `h + s = f + 1` accusers.
+    if let Some(stall_round) = first_stall {
+        let mut stalled_by_sender: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); parties];
+        for (party, replay) in replays.iter().enumerate() {
+            if let Some((round, missing)) = replay.as_ref().and_then(|r| r.stalled.as_ref())
+                && *round == stall_round
+            {
+                for &sender in missing {
+                    if sender < parties && sender != party {
+                        stalled_by_sender[sender].insert(party);
+                    }
+                }
+            }
+        }
+
+        for (sender, stalled) in stalled_by_sender.iter().enumerate() {
+            if stalled.len() > params.degree() {
+                verdict.culprits.insert(sender);
+                continue;
+            }
+
+            for &victim in stalled {
+                let mut accusers = stalled.clone();
+                for (witness, ev) in evidence.iter().enumerate() {
+                    if witness != sender
+                        && ev.as_ref().is_some_and(|ev| {
+                            ev.relay_missing.contains(&(sender, victim, stall_round))
+                        })
+                    {
+                        accusers.insert(witness);
+                    }
+                }
+
+                if accusers.len() > params.degree() {
+                    verdict.culprits.insert(sender);
+                    break;
+                }
+            }
+        }
+    }
+
+    if !verdict.culprits.is_empty() {
+        return Ok(verdict);
+    }
 
     for (party, replay) in replays.iter().enumerate() {
         if let Some((round, missing)) = replay.as_ref().and_then(|r| r.stalled.as_ref())

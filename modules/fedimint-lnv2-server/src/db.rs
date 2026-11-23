@@ -7,7 +7,8 @@ use fedimint_core::util::SafeUrl;
 use fedimint_core::{OutPoint, PeerId, impl_db_lookup, impl_db_record};
 use fedimint_lnv2_common::bolt12::{
     AbandonedRun, Blame, Pending, PoolItem, PoolRun, PoolShare, PoolVerdict, ReceiveContract,
-    Registration, RegistrationId, Reservation, ReservationId, StockItem, StreamedReceive,
+    Registration, RegistrationId, Reservation, ReservationId, StickyCommittee, StockItem,
+    StreamedReceive,
 };
 use fedimint_lnv2_common::contracts::{IncomingContract, OutgoingContract};
 use fedimint_lnv2_common::{ContractId, LightningInputV0, LightningOutputV0};
@@ -68,6 +69,9 @@ pub enum DbKeyPrefix {
     Bolt12PoolTranscript = 0x3e,
     Bolt12PoolLocalVerdict = 0x3f,
     Bolt12GatewayApprovalCount = 0x40,
+    Bolt12PoolStickyCommittee = 0x41,
+    Bolt12PoolAbort = 0x42,
+    Bolt12PoolRelayEvidence = 0x43,
 }
 
 impl std::fmt::Display for DbKeyPrefix {
@@ -771,4 +775,124 @@ impl_db_record!(
     key = Bolt12GatewayApprovalCountKey,
     value = u64,
     db_prefix = DbKeyPrefix::Bolt12GatewayApprovalCount,
+);
+
+/// Proven-good committee reused across consecutive generation runs.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolStickyCommitteeKey;
+
+impl_db_record!(
+    key = Bolt12PoolStickyCommitteeKey,
+    value = StickyCommittee,
+    db_prefix = DbKeyPrefix::Bolt12PoolStickyCommittee,
+);
+
+/// A committee member's report that its local execution of a run aborted.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolAbortKey(pub u64, pub PeerId);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolAbortRunPrefix(pub u64);
+
+impl_db_record!(
+    key = Bolt12PoolAbortKey,
+    value = (),
+    db_prefix = DbKeyPrefix::Bolt12PoolAbort,
+);
+impl_db_lookup!(
+    key = Bolt12PoolAbortKey,
+    query_prefix = Bolt12PoolAbortRunPrefix
+);
+
+/// An envelope-signed MPC packet recorded as local evidence so judges can
+/// verify it against the sender's revealed seed.
+#[derive(Debug, Clone, Eq, PartialEq, Encodable, Decodable)]
+pub struct BadPacket {
+    pub sender: PeerId,
+    pub round: u64,
+    pub chunk: u32,
+    pub chunks: u32,
+    pub ephemeral_pk: PublicKey,
+    pub ciphertext: Vec<u8>,
+    pub envelope_sig: fedimint_core::secp256k1::schnorr::Signature,
+}
+
+/// Cryptographically verifiable transport misbehavior by a sender, saved as
+/// local evidence so judges can convict the sender against its revealed seed.
+#[derive(Debug, Clone, Eq, PartialEq, Encodable, Decodable)]
+pub enum TransportFault {
+    /// A single envelope-signed packet that failed ephemeral-key matching,
+    /// AEAD decryption, chunk bounds, or (for single-chunk messages) inner
+    /// signature verification.
+    BadPacket(BadPacket),
+    /// Two envelope-signed packets from the same sender for the same
+    /// `(run, recipient, round)` declaring different total `chunks` counts.
+    ChunkCountConflict(BadPacket, BadPacket),
+    /// A complete set of envelope-signed chunks (`0..chunks`) whose decrypted
+    /// concatenation failed inner signature verification.
+    BadMultiChunk(Vec<BadPacket>),
+}
+
+impl TransportFault {
+    #[must_use]
+    pub fn sender(&self) -> Option<PeerId> {
+        match self {
+            Self::BadPacket(packet) | Self::ChunkCountConflict(packet, _) => Some(packet.sender),
+            Self::BadMultiChunk(packets) => packets.first().map(|packet| packet.sender),
+        }
+    }
+
+    #[must_use]
+    pub fn ciphertext_bytes(&self) -> usize {
+        match self {
+            Self::BadPacket(packet) => packet.ciphertext.len(),
+            Self::ChunkCountConflict(a, b) => a.ciphertext.len().saturating_add(b.ciphertext.len()),
+            Self::BadMultiChunk(packets) => packets.iter().fold(0usize, |acc, packet| {
+                acc.saturating_add(packet.ciphertext.len())
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn max_ciphertext_len(&self) -> usize {
+        match self {
+            Self::BadPacket(packet) => packet.ciphertext.len(),
+            Self::ChunkCountConflict(a, b) => a.ciphertext.len().max(b.ciphertext.len()),
+            Self::BadMultiChunk(packets) => packets
+                .iter()
+                .map(|packet| packet.ciphertext.len())
+                .max()
+                .unwrap_or(0),
+        }
+    }
+}
+
+/// Local relay evidence collected during a run: failed relay fetches witnessed
+/// for other peers, plus verifiable transport faults from senders.
+#[derive(Debug, Clone, Default, Eq, PartialEq, Encodable, Decodable)]
+pub struct RelayEvidence {
+    /// `(sender, recipient, round)` triples where this guardian tried to relay
+    /// `sender`'s packet to `recipient` and `sender` failed to serve valid
+    /// signed chunks.
+    pub relay_missing: Vec<(PeerId, PeerId, u64)>,
+    /// Verifiable transport faults observed from senders addressed to this
+    /// guardian (at most one per sender).
+    pub faults: Vec<TransportFault>,
+}
+
+/// Local relay evidence for a generation run.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolRelayEvidenceKey(pub u64);
+
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12PoolRelayEvidencePrefix;
+
+impl_db_record!(
+    key = Bolt12PoolRelayEvidenceKey,
+    value = RelayEvidence,
+    db_prefix = DbKeyPrefix::Bolt12PoolRelayEvidence,
+);
+impl_db_lookup!(
+    key = Bolt12PoolRelayEvidenceKey,
+    query_prefix = Bolt12PoolRelayEvidencePrefix
 );

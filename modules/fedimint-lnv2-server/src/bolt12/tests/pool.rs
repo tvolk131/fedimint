@@ -9,8 +9,9 @@ use fedimint_core::db::IDatabaseTransactionOpsCoreTyped;
 use fedimint_core::secp256k1::{Keypair, SECP256K1};
 use fedimint_core::{Amount, PeerId};
 use fedimint_lnv2_common::bolt12::{
-    Blame, Bolt12Output, EVIDENCE_WINDOW, JUDGE_TIMEOUT, POOL_RUN_TIMEOUT, PoolShare, PoolVerdict,
-    Register, Reserve, Sealed, Source, pool_share_binding, terms_hash,
+    BLAME_DECAY_RUNS, Blame, Bolt12Output, EVIDENCE_WINDOW, JUDGE_TIMEOUT, POOL_RUN_TIMEOUT,
+    PoolShare, PoolVerdict, Register, Reserve, STICKY_COMMITTEE_RUNS, Sealed, Source,
+    pool_share_binding, quorum, terms_hash,
 };
 use mpc::field::{F, point};
 use rand::rngs::OsRng;
@@ -120,6 +121,16 @@ impl Federation {
         Ok(())
     }
 
+    async fn abort(&self, peer: PeerId, run: u64, now: u64) -> Result<()> {
+        let mut dbtx = self.db.begin_transaction().await;
+
+        pool::process_abort(&mut dbtx.to_ref_nc(), &self.cfg, peer, run, now).await?;
+
+        dbtx.commit_tx().await;
+
+        Ok(())
+    }
+
     async fn evidence(&self, peer: u16, run: u64, now: u64) -> Result<()> {
         let mut dbtx = self.db.begin_transaction().await;
 
@@ -189,9 +200,10 @@ impl Federation {
             .expect("run is overdue");
     }
 
-    /// Have guardians 0 to 2 return `verdict` on `run`, abandoned at `at`.
+    /// Have a quorum of guardians return `verdict` on `run`, abandoned at `at`.
     async fn judge(&self, run: u64, at: u64, verdict: &PoolVerdict) {
-        for peer in 0..3 {
+        let count = u16::try_from(quorum(self.cfg.consensus.tpe_pks.len())).expect("small");
+        for peer in 0..count {
             self.verdict(peer, run, verdict.clone(), at + EVIDENCE_WINDOW)
                 .await
                 .expect("verdict is valid");
@@ -727,6 +739,7 @@ async fn abandoned_runs_are_judged_before_the_next_run() -> Result<()> {
         Some(Blame {
             offences: 1,
             until_run: 1 + 8,
+            clean_runs: 0,
         })
     );
 
@@ -793,20 +806,33 @@ async fn disputed_pairs_never_share_a_committee() -> Result<()> {
 }
 
 #[tokio::test]
-async fn repeat_offences_double_and_a_completed_run_clears_them() -> Result<()> {
-    let fed = Federation::new();
+async fn repeat_offences_double_and_decay_slowly() -> Result<()> {
+    let mut fed = Federation::new();
+    fed.cfg
+        .consensus
+        .bolt12
+        .as_mut()
+        .expect("enabled")
+        .pool_target = 256;
 
     // Penalties start at eight runs and double per offence, up to 64.
     let first = Blame::repeat(None, 5);
     let second = Blame::repeat(Some(&first), 5);
 
-    assert_eq!((first.offences, first.until_run), (1, 13));
-    assert_eq!((second.offences, second.until_run), (2, 21));
+    assert_eq!(
+        (first.offences, first.until_run, first.clean_runs),
+        (1, 13, 0)
+    );
+    assert_eq!(
+        (second.offences, second.until_run, second.clean_runs),
+        (2, 21, 0)
+    );
     assert_eq!(
         Blame::repeat(
             Some(&Blame {
                 offences: 10,
-                until_run: 0
+                until_run: 0,
+                clean_runs: 0,
             }),
             5
         )
@@ -814,17 +840,25 @@ async fn repeat_offences_double_and_a_completed_run_clears_them() -> Result<()> 
         69
     );
 
-    // Guardian 2's blame has run out by run 0; completing a run clears its
-    // record, so a later offence starts from eight runs again.
+    // Guardian 2's blame has expired by run 0 (guardian 3 has higher offences,
+    // so guardian 2 is seated on [0, 1, 2]). One completed run must NOT wipe
+    // guardian 2's accumulated offences (preventing the sleeper-reset attack).
     let mut dbtx = fed.db.begin_transaction().await;
-
-    dbtx.insert_entry(&Bolt12BlameKey(PeerId::from(2)), &second)
-        .await;
     dbtx.insert_entry(
         &Bolt12BlameKey(PeerId::from(2)),
         &Blame {
             offences: 2,
             until_run: 0,
+            clean_runs: 0,
+        },
+    )
+    .await;
+    dbtx.insert_entry(
+        &Bolt12BlameKey(PeerId::from(3)),
+        &Blame {
+            offences: 3,
+            until_run: 0,
+            clean_runs: 0,
         },
     )
     .await;
@@ -832,7 +866,34 @@ async fn repeat_offences_double_and_a_completed_run_clears_them() -> Result<()> 
 
     fed.fill(0).await;
 
-    assert_eq!(fed.committee().await, None);
+    assert_eq!(
+        fed.blame(2).await,
+        Some(Blame {
+            offences: 2,
+            until_run: 0,
+            clean_runs: 1,
+        })
+    );
+
+    // Completing BLAME_DECAY_RUNS clean runs decays one offence level; another
+    // BLAME_DECAY_RUNS clears the record completely.
+    for run in 1..u64::from(BLAME_DECAY_RUNS) {
+        fed.fill(run).await;
+    }
+
+    assert_eq!(
+        fed.blame(2).await,
+        Some(Blame {
+            offences: 1,
+            until_run: 0,
+            clean_runs: 0,
+        })
+    );
+
+    for run in u64::from(BLAME_DECAY_RUNS)..u64::from(2 * BLAME_DECAY_RUNS) {
+        fed.fill(run).await;
+    }
+
     assert_eq!(fed.blame(2).await, None);
 
     Ok(())
@@ -891,7 +952,9 @@ async fn evidence_is_revealed_only_for_abandoned_runs_and_only_signed_messages_c
 
     use crate::bolt12::transport::message_digest;
     use crate::bolt12::worker::{evidence_digest, serve_evidence, signed_messages};
-    use crate::db::{Bolt12PoolLocalRunKey, Bolt12PoolTranscriptKey, LocalRun, SignedMessage};
+    use crate::db::{
+        Bolt12PoolLocalRunKey, Bolt12PoolTranscriptKey, LocalRun, RelayEvidence, SignedMessage,
+    };
 
     let mut fed = Federation::new();
     let secrets: Vec<SecretKey> = (0..4).map(|_| SecretKey::new(&mut OsRng)).collect();
@@ -949,12 +1012,14 @@ async fn evidence_is_revealed_only_for_abandoned_runs_and_only_signed_messages_c
 
     let mut dbtx = fed.db.begin_transaction().await;
 
+    let relay = RelayEvidence::default();
+
     dbtx.insert_entry(
         &Bolt12PoolLocalRunKey(0),
         &LocalRun {
             seed: [7; 32],
             submission: None,
-            evidence: Some(evidence_digest(&[7; 32], &rounds)),
+            evidence: Some(evidence_digest(&[7; 32], &rounds, &relay)),
         },
     )
     .await;
@@ -972,9 +1037,593 @@ async fn evidence_is_revealed_only_for_abandoned_runs_and_only_signed_messages_c
     assert_eq!(page.seed, [7; 32]);
     assert!(!page.more);
     assert_eq!(
-        evidence_digest(&page.seed, &page.rounds),
-        evidence_digest(&[7; 32], &rounds)
+        evidence_digest(&page.seed, &page.rounds, &page.relay),
+        evidence_digest(&[7; 32], &rounds, &relay)
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn early_abort_by_f_plus_one_abandons_without_waiting_for_timeout() -> Result<()> {
+    let fed = Federation::new();
+
+    fed.start(0, NOW).await?;
+
+    // Non-members cannot abort; f = 1 malicious member alone cannot abandon.
+    assert!(fed.abort(PeerId::from(3), 0, NOW + 5).await.is_err());
+    fed.abort(PeerId::from(0), 0, NOW + 5).await?;
+    assert!(fed.abort(PeerId::from(0), 0, NOW + 6).await.is_err());
+    assert!(!fed.is_judging(0).await);
+    assert!(fed.committee().await.is_some());
+
+    // A second member reaches f + 1 = 2 and abandons immediately at t = 10 s.
+    fed.abort(PeerId::from(1), 0, NOW + 10).await?;
+    assert!(fed.is_judging(0).await);
+    assert_eq!(fed.committee().await, None);
+
+    // Once all 3 committee members commit evidence, judging opens immediately
+    // without waiting for EVIDENCE_WINDOW.
+    for peer in 0..3u16 {
+        fed.evidence(peer, 0, NOW + 12).await?;
+    }
+
+    for peer in 0..3u16 {
+        fed.verdict(peer, 0, culprits(&[2]), NOW + 13).await?;
+    }
+
+    assert!(!fed.is_judging(0).await);
+    assert!(fed.blame(2).await.is_some());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn sticky_committee_reuses_proven_good_set_and_clears_on_abandon() -> Result<()> {
+    let mut fed = Federation::new();
+    fed.cfg
+        .consensus
+        .bolt12
+        .as_mut()
+        .expect("enabled")
+        .pool_target = 256;
+
+    // Run 0 succeeds with [0, 1, 2]; runs 1..STICKY_COMMITTEE_RUNS reuse it.
+    fed.fill(0).await;
+
+    for run in 1..STICKY_COMMITTEE_RUNS {
+        fed.start(run, NOW + run).await?;
+        assert_eq!(fed.committee().await, Some(peers(&[0, 1, 2])));
+        let dealt = deal(&fed, run, &peers(&[0, 1, 2]), 2);
+        for (peer, shares) in &dealt.submissions {
+            fed.submit(*peer, run, shares.clone()).await?;
+        }
+    }
+
+    // After STICKY_COMMITTEE_RUNS total runs, the committee rotates.
+    let rotated_run = STICKY_COMMITTEE_RUNS;
+    fed.start(rotated_run, NOW + rotated_run).await?;
+    // offset = 32 % 4 = 0 would pick [0, 1, 2] on N=4, so check abandonment
+    // also clears stickiness immediately on run 33.
+    fed.abandon(rotated_run, NOW + rotated_run + POOL_RUN_TIMEOUT)
+        .await?;
+    fed.judge(
+        rotated_run,
+        NOW + rotated_run + POOL_RUN_TIMEOUT,
+        &culprits(&[]),
+    )
+    .await;
+    fed.start(
+        rotated_run + 1,
+        NOW + rotated_run + POOL_RUN_TIMEOUT + EVIDENCE_WINDOW,
+    )
+    .await?;
+    assert_eq!(fed.committee().await, Some(peers(&[1, 2, 3])));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn committee_selection_scales_to_large_federations_with_heavy_disputes() -> Result<()> {
+    // N = 31 (f = 10, m = 21): previously C(31, 21) = 44.3M combinations.
+    // Even with 100 adversarial bipartite disputes (every malicious guardian
+    // 21..31 disputed with 10 honest guardians 0..10), selection must find an
+    // undisputed committee of size 21 in milliseconds.
+    let fed = Federation::with_guardians(31);
+    let mut dbtx = fed.db.begin_transaction().await;
+
+    for m in 21..31u16 {
+        for h in 0..10u16 {
+            dbtx.insert_entry(
+                &Bolt12DisputeKey(PeerId::from(h), PeerId::from(m)),
+                &Blame {
+                    offences: 1,
+                    until_run: 100,
+                    clean_runs: 0,
+                },
+            )
+            .await;
+        }
+    }
+    dbtx.commit_tx().await;
+
+    let started = std::time::Instant::now();
+    let chosen = pool::committee(
+        &mut fed.db.begin_transaction_nc().await.to_ref_nc(),
+        &fed.cfg,
+        5,
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(chosen.len(), 21);
+    assert!(
+        elapsed.as_millis() < 200,
+        "committee selection took too long: {elapsed:?}"
+    );
+    // Verify no disputed pair was seated together.
+    for (i, a) in chosen.iter().enumerate() {
+        for b in &chosen[i + 1..] {
+            assert!(
+                fed.dispute(u16::from(*a.min(b)), u16::from(*a.max(b)))
+                    .await
+                    .is_none(),
+                "disputed pair ({a}, {b}) seated together"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn adversarial_federation_throughput_under_k_equals_f() -> Result<()> {
+    // Simulate consecutive runs against the real consensus DB for N = 10, 16,
+    // 22, and 31 with k = f coordinated attackers. With relay-backed
+    // conviction + sticky committees + offence-prioritized selection + slow
+    // offence decay:
+    // - Worst-case consecutive failures stay <= f
+    // - Once all f attackers are caught, every subsequent run succeeds cleanly
+    //   (even across sticky-committee rotations).
+    for (guardians, runs) in [(10u16, 60u64), (16, 60), (22, 60), (31, 40)] {
+        let f = usize::from(guardians - 1) / 3;
+        let attackers: std::collections::BTreeSet<PeerId> = (0..f)
+            .map(|i| PeerId::from(u16::try_from(i).expect("small")))
+            .collect();
+
+        let mut fed = Federation::with_guardians(guardians);
+        let bolt12 = fed.cfg.consensus.bolt12.as_mut().expect("enabled");
+        bolt12.pool_target = 10_000;
+        bolt12.pool_batch = 1;
+
+        let mut now = NOW;
+        let mut successes = 0usize;
+        let mut cur_streak = 0usize;
+        let mut max_streak = 0usize;
+
+        for run in 0..runs {
+            fed.start(run, now).await?;
+            let committee = fed.committee().await.expect("run started");
+            let present_attackers: Vec<PeerId> = committee
+                .iter()
+                .copied()
+                .filter(|p| attackers.contains(p))
+                .collect();
+
+            if present_attackers.is_empty() {
+                // Clean honest run.
+                let dealt = deal(&fed, run, &committee, 1);
+                for (peer, shares) in &dealt.submissions {
+                    fed.submit(*peer, run, shares.clone()).await?;
+                }
+                successes += 1;
+                cur_streak = 0;
+                now += 165;
+            } else {
+                // One attacker sabotages (early f+1 abort + relay witness
+                // convicts that attacker).
+                let saboteur = present_attackers[0];
+                let honest_members: Vec<PeerId> = committee
+                    .iter()
+                    .copied()
+                    .filter(|p| !attackers.contains(p))
+                    .collect();
+
+                for &honest in honest_members.iter().take(committee.len() / 2 + 1) {
+                    fed.abort(honest, run, now + 15).await?;
+                }
+                assert!(fed.is_judging(run).await);
+
+                fed.judge(run, now + 15, &culprits(&[u16::from(saboteur)]))
+                    .await;
+                cur_streak += 1;
+                max_streak = max_streak.max(cur_streak);
+                now += 15 + EVIDENCE_WINDOW;
+            }
+        }
+
+        assert!(
+            max_streak <= f,
+            "N={guardians} (f={f}): max consecutive fails {max_streak} exceeded f"
+        );
+        // Every run after at most f initial detections must succeed cleanly.
+        let expected_min = usize::try_from(runs).expect("small") - f;
+        assert_eq!(
+            successes, expected_min,
+            "N={guardians} (f={f}): expected exactly {expected_min}/{runs} successes, got {successes}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transport_relay_recovers_blocked_link() -> Result<()> {
+    use fedimint_core::secp256k1::SecretKey;
+
+    use crate::bolt12::transport::{ChannelLimits, Channels, FetchRequest, verify_packet_envelope};
+
+    let committee = peers(&[0, 1, 2]);
+    let limits = ChannelLimits::for_run(3, 1, 4);
+    let secrets: Vec<SecretKey> = (0..3).map(|_| SecretKey::new(&mut OsRng)).collect();
+    let keys: BTreeMap<PeerId, _> = (0..3u16)
+        .map(|p| {
+            (
+                PeerId::from(p),
+                secrets[usize::from(p)].public_key(SECP256K1),
+            )
+        })
+        .collect();
+    let seeds = [[11u8; 32], [22u8; 32], [33u8; 32]];
+
+    let ch0 = Channels::new(
+        0,
+        PeerId::from(0),
+        committee.clone(),
+        limits,
+        &seeds[0],
+        &secrets[0],
+        &keys,
+    )?;
+    let ch1 = Channels::new(
+        0,
+        PeerId::from(1),
+        committee,
+        limits,
+        &seeds[1],
+        &secrets[1],
+        &keys,
+    )?;
+
+    // Peer 0 produces encrypted, envelope-signed packets for peer 1; peer 2
+    // (acting as an authenticated committee relay) pulls them via a signed
+    // FetchRequest and verifies the outer signature without peer 1's key.
+    let msg = b"round-0-share-bytes";
+    let _sent = ch0.packets(PeerId::from(1), 0, msg)?;
+
+    // Unauthenticated / forged or outsider fetch requests must be rejected.
+    let outsider_key = Keypair::new(SECP256K1, &mut OsRng);
+    let forged = FetchRequest::new(0, PeerId::from(2), PeerId::from(1), 0, &outsider_key);
+    assert!(ch0.serve_packets(&forged).is_err());
+    let outsider = FetchRequest::new(0, PeerId::from(3), PeerId::from(1), 0, &outsider_key);
+    assert!(ch0.serve_packets(&outsider).is_err());
+
+    let relay_signer = Keypair::from_secret_key(SECP256K1, &secrets[2]);
+    let valid_fetch = FetchRequest::new(0, PeerId::from(2), PeerId::from(1), 0, &relay_signer);
+    let relayed = ch0.serve_packets(&valid_fetch)?;
+
+    assert_eq!(relayed.len(), 1);
+    assert!(verify_packet_envelope(
+        0,
+        (PeerId::from(0), &keys[&PeerId::from(0)]),
+        PeerId::from(1),
+        &relayed[0]
+    ));
+
+    // Peer 1 receives the relayed packet cleanly.
+    ch1.receive(&relayed[0])?;
+    assert_eq!(
+        ch1.transcript()[0][0]
+            .as_ref()
+            .map(|s| s.message.as_slice()),
+        Some(msg.as_slice())
+    );
+
+    Ok(())
+}
+
+fn encrypt_test_packet(
+    seed: &[u8; 32],
+    signer: &Keypair,
+    recipient_pk: &fedimint_core::secp256k1::PublicKey,
+    round: u64,
+    chunk: u32,
+    chunks: u32,
+    plaintext: &[u8],
+) -> crate::bolt12::transport::MpcPacket {
+    use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
+    use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+    use fedimint_core::encoding::Encodable as _;
+
+    use crate::bolt12::keys::transport_key;
+    use crate::bolt12::transport::{MpcPacket, ephemeral_secret, packet_digest};
+
+    let eph = ephemeral_secret(seed, 0, PeerId::from(0), PeerId::from(1));
+    let eph_pk = eph.public_key(SECP256K1);
+    let domain = (
+        "fedimint/bolt12/mpc-channel/v2",
+        0u64,
+        PeerId::from(0),
+        PeerId::from(1),
+    )
+        .consensus_encode_to_vec();
+    let key = transport_key(&eph, recipient_pk, &domain);
+    let aad = (domain, round, chunks).consensus_encode_to_vec();
+    let mut nonce = [0u8; 12];
+    nonce[..8].copy_from_slice(&round.to_be_bytes());
+    nonce[8..].copy_from_slice(&chunk.to_be_bytes());
+    let ciphertext = ChaCha20Poly1305::new((&key).into())
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
+        .expect("encrypts");
+    let envelope_sig = SECP256K1.sign_schnorr(
+        &packet_digest(
+            0,
+            PeerId::from(0),
+            PeerId::from(1),
+            round,
+            chunk,
+            chunks,
+            eph_pk,
+            &ciphertext,
+        ),
+        signer,
+    );
+    MpcPacket {
+        run: 0,
+        sender: PeerId::from(0),
+        round,
+        chunk,
+        chunks,
+        ephemeral_pk: eph_pk,
+        ciphertext,
+        envelope_sig,
+    }
+}
+
+#[tokio::test]
+async fn transport_faults_convict_malicious_sender() -> Result<()> {
+    use fedimint_core::secp256k1::SecretKey;
+
+    use crate::bolt12::transport::{
+        ChannelLimits, Channels, MpcPacket, packet_digest, verify_transport_fault_convicts,
+    };
+    use crate::db::TransportFault;
+
+    let committee = peers(&[0, 1, 2]);
+    // Batch 32 permits up to 3 chunks so multi-chunk and 2-vs-3 conflict tests
+    // stay within the run's per-run chunk cap.
+    let limits = ChannelLimits::for_run(3, 1, 32);
+    assert!(limits.chunks >= 3);
+    let secrets: Vec<SecretKey> = (0..3).map(|_| SecretKey::new(&mut OsRng)).collect();
+    let keys: BTreeMap<PeerId, _> = (0..3u16)
+        .map(|p| {
+            (
+                PeerId::from(p),
+                secrets[usize::from(p)].public_key(SECP256K1),
+            )
+        })
+        .collect();
+    let seeds = [[11u8; 32], [22u8; 32], [33u8; 32]];
+    let signer0 = Keypair::from_secret_key(SECP256K1, &secrets[0]);
+    let sender = (PeerId::from(0), &keys[&PeerId::from(0)]);
+    let recipient = (PeerId::from(1), &keys[&PeerId::from(1)]);
+    let new_ch1 = || {
+        Channels::new(
+            0,
+            PeerId::from(1),
+            committee.clone(),
+            limits,
+            &seeds[1],
+            &secrets[1],
+            &keys,
+        )
+    };
+    let convicts = |fault: &TransportFault| {
+        verify_transport_fault_convicts(0, sender, recipient, &seeds[0], fault, limits.chunks)
+    };
+
+    let enc = |chunk: u32, chunks: u32, pt: &[u8]| {
+        encrypt_test_packet(&seeds[0], &signer0, recipient.1, 0, chunk, chunks, pt)
+    };
+
+    // 1. Bad AEAD ciphertext convicts sender.
+    let ch1 = new_ch1()?;
+    let bad_ct = vec![0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33];
+    let bad_eph = secrets[0].public_key(SECP256K1);
+    let digest = packet_digest(0, sender.0, recipient.0, 1, 0, 1, bad_eph, &bad_ct);
+    let forged = MpcPacket {
+        run: 0,
+        sender: sender.0,
+        round: 1,
+        chunk: 0,
+        chunks: 1,
+        ephemeral_pk: bad_eph,
+        ciphertext: bad_ct,
+        envelope_sig: SECP256K1.sign_schnorr(&digest, &signer0),
+    };
+    assert!(ch1.receive(&forged).is_err());
+    assert!(convicts(&ch1.relay_evidence().faults[0]));
+
+    // 2. Valid AEAD + invalid inner Schnorr signature (single-chunk) convicts.
+    let ch1_inner = new_ch1()?;
+    assert!(ch1_inner.receive(&enc(0, 1, &[0x42u8; 80])).is_err());
+    assert!(convicts(&ch1_inner.relay_evidence().faults[0]));
+
+    // 3. Valid AEAD + invalid inner signature (multi-chunk) convicts via
+    // BadMultiChunk.
+    let ch1_multi = new_ch1()?;
+    ch1_multi.receive(&enc(0, 2, &[0x11u8; 64]))?;
+    assert!(ch1_multi.receive(&enc(1, 2, &[0x22u8; 64])).is_err());
+    let ev_multi = ch1_multi.relay_evidence();
+    assert!(matches!(
+        ev_multi.faults.as_slice(),
+        [TransportFault::BadMultiChunk(pkts)] if pkts.len() == 2
+    ));
+    assert!(convicts(&ev_multi.faults[0]));
+
+    // 4. Conflicting chunk counts for the same round convict via
+    // ChunkCountConflict.
+    let ch1_conflict = new_ch1()?;
+    ch1_conflict.receive(&enc(0, 2, b"chunk-zero"))?;
+    assert!(ch1_conflict.receive(&enc(1, 3, b"wrong-total")).is_err());
+    let ev_conflict = ch1_conflict.relay_evidence();
+    assert!(matches!(
+        ev_conflict.faults.as_slice(),
+        [TransportFault::ChunkCountConflict(_, _)]
+    ));
+    assert!(convicts(&ev_conflict.faults[0]));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transport_honest_packets_resist_framing() -> Result<()> {
+    use fedimint_core::secp256k1::SecretKey;
+
+    use crate::bolt12::transport::{
+        CHUNK, ChannelLimits, Channels, MpcPacket, verify_transport_fault_convicts,
+    };
+    use crate::db::{BadPacket, TransportFault};
+
+    let committee = peers(&[0, 1, 2]);
+    let limits = ChannelLimits::for_run(3, 1, 16);
+    assert!(limits.chunks >= 2);
+    let secrets: Vec<SecretKey> = (0..3).map(|_| SecretKey::new(&mut OsRng)).collect();
+    let keys: BTreeMap<PeerId, _> = (0..3u16)
+        .map(|p| {
+            (
+                PeerId::from(p),
+                secrets[usize::from(p)].public_key(SECP256K1),
+            )
+        })
+        .collect();
+    let seeds = [[11u8; 32], [22u8; 32], [33u8; 32]];
+    let sender = (PeerId::from(0), &keys[&PeerId::from(0)]);
+    let recipient = (PeerId::from(1), &keys[&PeerId::from(1)]);
+    let ch0 = Channels::new(
+        0,
+        PeerId::from(0),
+        committee,
+        limits,
+        &seeds[0],
+        &secrets[0],
+        &keys,
+    )?;
+    let to_bad = |p: &MpcPacket| BadPacket {
+        sender: p.sender,
+        round: p.round,
+        chunk: p.chunk,
+        chunks: p.chunks,
+        ephemeral_pk: p.ephemeral_pk,
+        ciphertext: p.ciphertext.clone(),
+        envelope_sig: p.envelope_sig,
+    };
+
+    let honest_single = ch0.packets(PeerId::from(1), 0, b"honest")?;
+    assert!(
+        !verify_transport_fault_convicts(
+            0,
+            sender,
+            recipient,
+            &seeds[0],
+            &TransportFault::BadPacket(to_bad(&honest_single[0])),
+            limits.chunks,
+        ),
+        "honest single-chunk packet must never convict sender"
+    );
+
+    let honest_multi = ch0.packets(PeerId::from(1), 1, &vec![0x55u8; CHUNK + 128])?;
+    assert_eq!(honest_multi.len(), 2);
+    assert!(
+        !verify_transport_fault_convicts(
+            0,
+            sender,
+            recipient,
+            &seeds[0],
+            &TransportFault::BadMultiChunk(honest_multi.iter().map(to_bad).collect()),
+            limits.chunks,
+        ),
+        "honest multi-chunk packet must never convict sender"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn per_run_limits_block_oversized_messages_and_cover_max_faults() -> Result<()> {
+    use fedimint_core::secp256k1::SecretKey;
+
+    use crate::bolt12::transport::{CHUNK, ChannelLimits, Channels};
+    use crate::bolt12::worker::max_evidence_page_hex;
+
+    let committee = peers(&[0, 1, 2]);
+    let limits = ChannelLimits::for_run(3, 1, 4);
+    assert_eq!(limits.chunks, 1);
+
+    let secrets: Vec<SecretKey> = (0..3).map(|_| SecretKey::new(&mut OsRng)).collect();
+    let keys: BTreeMap<PeerId, _> = (0..3u16)
+        .map(|p| {
+            (
+                PeerId::from(p),
+                secrets[usize::from(p)].public_key(SECP256K1),
+            )
+        })
+        .collect();
+    let seeds = [[11u8; 32], [22u8; 32], [33u8; 32]];
+    let signer0 = Keypair::from_secret_key(SECP256K1, &secrets[0]);
+    let ch1 = Channels::new(
+        0,
+        PeerId::from(1),
+        committee,
+        limits,
+        &seeds[1],
+        &secrets[1],
+        &keys,
+    )?;
+
+    // A 2-chunk packet exceeds batch=4's per-run `max_chunks = 1` and must be
+    // rejected immediately without entering transcript or faults.
+    let oversized = encrypt_test_packet(
+        &seeds[0],
+        &signer0,
+        &keys[&PeerId::from(1)],
+        0,
+        0,
+        2,
+        &[0xaa; 64],
+    );
+    assert!(ch1.receive(&oversized).is_err());
+    assert_eq!(ch1.transcript(), vec![] as Vec<Vec<Option<_>>>);
+    assert_eq!(ch1.relay_evidence().faults, vec![]);
+
+    // Across every federation size and batch up to MAX_BATCH, `max_fault_bytes`
+    // must cover a full `max_chunks` bad-inner-sig message from every possible
+    // malicious sender, and `max_evidence_page_hex` must strictly exceed the
+    // largest possible encoded Page 0.
+    for (n, t, batch) in [(3, 1, 4), (3, 1, 512), (15, 7, 64), (31, 15, 512)] {
+        let lim = ChannelLimits::for_run(n, t, batch);
+        let one_max_multi = usize::try_from(lim.chunks).expect("small") * (CHUNK + 16);
+        assert!(lim.fault_bytes >= one_max_multi * t);
+        let worst_row = (n - 1) * (usize::try_from(lim.chunks).expect("small") * CHUNK + 80);
+        let worst_page_hex = 2 * (1024 * 1024 + worst_row + lim.fault_bytes + 8192);
+        assert!(max_evidence_page_hex(n, lim) > worst_page_hex);
+    }
 
     Ok(())
 }

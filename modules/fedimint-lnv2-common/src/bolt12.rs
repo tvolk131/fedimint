@@ -43,18 +43,22 @@ pub const MAX_PENDING_POOL: usize = 32;
 pub const MAX_POOL_TARGET: u64 = 256;
 /// Seconds of consensus time a generation run may take before it is
 /// abandoned.
-pub const POOL_RUN_TIMEOUT: u64 = 900;
+pub const POOL_RUN_TIMEOUT: u64 = 300;
 /// Seconds of consensus time after a run is abandoned in which its members
 /// commit to their evidence.
-pub const EVIDENCE_WINDOW: u64 = 300;
+pub const EVIDENCE_WINDOW: u64 = 90;
 /// Seconds of consensus time after a run is abandoned after which it is no
 /// longer judged.
-pub const JUDGE_TIMEOUT: u64 = 1800;
+pub const JUDGE_TIMEOUT: u64 = 600;
 /// Runs a guardian or a disputed pair sits out after a first offence. Each
-/// repeat doubles it, up to `MAX_BLAME_RUNS`, until the guardian (or both
-/// guardians of the pair) completes a run.
+/// repeat doubles it, up to `MAX_BLAME_RUNS`.
 pub const BLAME_RUNS: u64 = 8;
 pub const MAX_BLAME_RUNS: u64 = 64;
+/// Consecutive completed runs a blamed guardian (or disputed pair) must finish
+/// cleanly to decay one offence level.
+pub const BLAME_DECAY_RUNS: u32 = 16;
+/// Consecutive runs a proven-good committee is reused before rotating.
+pub const STICKY_COMMITTEE_RUNS: u64 = 32;
 
 #[derive(
     Debug,
@@ -274,9 +278,14 @@ pub struct AbandonedRun {
 }
 
 impl AbandonedRun {
+    /// Whether every committee member has already committed to its evidence.
+    pub fn all_evidence_committed(&self) -> bool {
+        self.evidence.len() >= self.run.committee.len()
+    }
+
     /// Whether members may still commit to evidence at `now`.
     pub fn collecting_evidence(&self, now: u64) -> bool {
-        now < self.abandoned_at.saturating_add(EVIDENCE_WINDOW)
+        !self.all_evidence_committed() && now < self.abandoned_at.saturating_add(EVIDENCE_WINDOW)
     }
 
     /// Whether the run may no longer be judged at `now`.
@@ -299,10 +308,13 @@ pub struct PoolVerdict {
 /// How long a guardian, or a pair of guardians, is kept off committees.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
 pub struct Blame {
-    /// Offences since the last completed run.
+    /// Accumulated offence level (decays only after `BLAME_DECAY_RUNS` clean
+    /// runs per level).
     pub offences: u32,
     /// The first run the blame no longer applies to.
     pub until_run: u64,
+    /// Clean runs completed since the last offence or decay step.
+    pub clean_runs: u32,
 }
 
 impl Blame {
@@ -317,12 +329,43 @@ impl Blame {
         Self {
             offences,
             until_run: next_run.saturating_add(runs),
+            clean_runs: 0,
+        }
+    }
+
+    /// Record one completed clean run. Decays `offences` by one every
+    /// `BLAME_DECAY_RUNS` clean runs, returning `None` once cleared.
+    pub fn record_clean_run(&self) -> Option<Self> {
+        let clean_runs = self.clean_runs.saturating_add(1);
+
+        if clean_runs >= BLAME_DECAY_RUNS {
+            let offences = self.offences.saturating_sub(1);
+            (offences > 0).then_some(Self {
+                offences,
+                until_run: self.until_run,
+                clean_runs: 0,
+            })
+        } else {
+            Some(Self {
+                offences: self.offences,
+                until_run: self.until_run,
+                clean_runs,
+            })
         }
     }
 
     pub fn applies_to(&self, run: u64) -> bool {
         run < self.until_run
     }
+}
+
+/// A proven-good committee reused across consecutive runs to avoid dragging
+/// blamed or sleeper peers back in on every run.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
+pub struct StickyCommittee {
+    pub committee: Vec<PeerId>,
+    /// Remaining consecutive runs to reuse this committee before rotating.
+    pub remaining: u64,
 }
 
 /// A generation run the federation has started.

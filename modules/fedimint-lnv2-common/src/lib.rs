@@ -160,6 +160,12 @@ pub enum LightningConsensusItem {
     Bolt12PoolAbandon {
         run: u64,
     },
+    /// A committee member reports that its local execution of run `run`
+    /// aborted; once `f + 1` members report an abort, consensus abandons the
+    /// run immediately without waiting for `POOL_RUN_TIMEOUT`.
+    Bolt12PoolAbort {
+        run: u64,
+    },
     /// A member's commitment to its evidence from abandoned run `run`.
     Bolt12PoolEvidence {
         run: u64,
@@ -197,6 +203,9 @@ impl std::fmt::Display for LightningConsensusItem {
             }
             LightningConsensusItem::Bolt12PoolAbandon { run } => {
                 write!(f, "LNv2 BOLT12 Pool Abandon {run}")
+            }
+            LightningConsensusItem::Bolt12PoolAbort { run } => {
+                write!(f, "LNv2 BOLT12 Pool Abort {run}")
             }
             LightningConsensusItem::Bolt12PoolEvidence { run, .. } => {
                 write!(f, "LNv2 BOLT12 Pool Evidence {run}")

@@ -20,7 +20,8 @@ use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
 use fedimint_lnv2_common::LightningConsensusItem;
 use fedimint_lnv2_common::bolt12::{
     AbandonedRun, Blame, Bolt12Config, MAX_POOL_TARGET, POOL_RUN_TIMEOUT, PoolItem, PoolRun,
-    PoolShare, PoolVerdict, Sealed, SealedShare, pool_share_binding, quorum,
+    PoolShare, PoolVerdict, STICKY_COMMITTEE_RUNS, Sealed, SealedShare, StickyCommittee,
+    pool_share_binding, quorum,
 };
 use fedimint_lnv2_common::config::LightningConfig;
 use futures::StreamExt as _;
@@ -29,11 +30,16 @@ use tpe::verify_ciphertext;
 use crate::Lightning;
 use crate::db::{
     Bolt12BlameKey, Bolt12BlamePrefix, Bolt12DisputeKey, Bolt12DisputePrefix, Bolt12PaymentHashKey,
-    Bolt12PoolAbandonedKey, Bolt12PoolAbandonedPrefix, Bolt12PoolItemKey, Bolt12PoolItemPrefix,
-    Bolt12PoolLocalRunKey, Bolt12PoolLocalVerdictKey, Bolt12PoolNextKey, Bolt12PoolRunCountKey,
-    Bolt12PoolRunKey, Bolt12PoolSubmissionKey, Bolt12PoolSubmissionRunPrefix, Bolt12PoolVerdictKey,
-    Bolt12PoolVerdictRunPrefix,
+    Bolt12PoolAbandonedKey, Bolt12PoolAbandonedPrefix, Bolt12PoolAbortKey,
+    Bolt12PoolAbortRunPrefix, Bolt12PoolItemKey, Bolt12PoolItemPrefix, Bolt12PoolLocalRunKey,
+    Bolt12PoolLocalVerdictKey, Bolt12PoolNextKey, Bolt12PoolRunCountKey, Bolt12PoolRunKey,
+    Bolt12PoolStickyCommitteeKey, Bolt12PoolSubmissionKey, Bolt12PoolSubmissionRunPrefix,
+    Bolt12PoolVerdictKey, Bolt12PoolVerdictRunPrefix,
 };
+
+/// Upper bound on backtracking steps when picking an undisputed committee so
+/// large federations (`N >= 25`) can never stall consensus CPU.
+const MAX_COMMITTEE_SEARCH_STEPS: usize = 4_096;
 
 fn pool_config(cfg: &LightningConfig) -> Result<&Bolt12Config> {
     let bolt12 = cfg
@@ -89,49 +95,154 @@ fn dispute_key(a: PeerId, b: PeerId) -> Bolt12DisputeKey {
     Bolt12DisputeKey(a.min(b), a.max(b))
 }
 
-/// The first `size` of `candidates`, in order, no two of which are disputed.
-fn first_undisputed(
+fn is_disputed(disputes: &BTreeSet<(PeerId, PeerId)>, a: PeerId, b: PeerId) -> bool {
+    disputes.contains(&(a.min(b), a.max(b)))
+}
+
+fn search_undisputed(
+    start: usize,
+    size: usize,
+    conflict: &[Vec<bool>],
+    chosen: &mut Vec<usize>,
+    steps: &mut usize,
+) -> bool {
+    if chosen.len() == size {
+        return true;
+    }
+    let n = conflict.len();
+    if chosen.len() + (n - start) < size || *steps >= MAX_COMMITTEE_SEARCH_STEPS {
+        return false;
+    }
+
+    for idx in start..n {
+        if chosen.len() + (n - idx) < size || *steps >= MAX_COMMITTEE_SEARCH_STEPS {
+            break;
+        }
+        *steps += 1;
+
+        if chosen.iter().all(|&prev| !conflict[prev][idx]) {
+            chosen.push(idx);
+            if search_undisputed(idx + 1, size, conflict, chosen, steps) {
+                return true;
+            }
+            chosen.pop();
+        }
+    }
+
+    false
+}
+
+fn greedy_undisputed(size: usize, conflict: &[Vec<bool>]) -> Option<Vec<usize>> {
+    let n = conflict.len();
+    let mut alive = vec![true; n];
+    let mut chosen = Vec::with_capacity(size);
+
+    while chosen.len() < size {
+        let next = (0..n).filter(|&u| alive[u]).min_by_key(|&u| {
+            let residual_degree = (0..n).filter(|&v| alive[v] && conflict[u][v]).count();
+            (residual_degree, u)
+        })?;
+
+        chosen.push(next);
+        alive[next] = false;
+        for (v, is_alive) in alive.iter_mut().enumerate() {
+            if conflict[next][v] {
+                *is_alive = false;
+            }
+        }
+    }
+
+    Some(chosen)
+}
+
+/// Pick `size` guardians from `candidates` with no disputed pair, ordering
+/// lowest-offence, lowest-dispute-degree guardians first and bounding
+/// backtracking so consensus CPU stays polynomial even at `N = 46`.
+///
+/// The returned committee preserves `candidates`' rotation order.
+fn pick_undisputed(
     candidates: &[PeerId],
     size: usize,
+    offences: &BTreeMap<PeerId, u32>,
     disputes: &BTreeSet<(PeerId, PeerId)>,
 ) -> Option<Vec<PeerId>> {
-    if candidates.len() < size {
+    let n = candidates.len();
+    if n < size {
         return None;
     }
 
-    let mut choice: Vec<usize> = (0..size).collect();
-
-    loop {
-        let chosen: Vec<PeerId> = choice.iter().map(|&i| candidates[i]).collect();
-
-        let undisputed = chosen.iter().enumerate().all(|(i, a)| {
-            chosen[i + 1..]
-                .iter()
-                .all(|b| !disputes.contains(&((*a).min(*b), (*a).max(*b))))
-        });
-
-        if undisputed {
-            return Some(chosen);
-        }
-
-        let i = (0..size)
-            .rev()
-            .find(|&i| choice[i] != i + candidates.len() - size)?;
-
-        choice[i] += 1;
-
-        for j in i + 1..size {
-            choice[j] = choice[j - 1] + 1;
+    let mut degrees = vec![0usize; n];
+    if !disputes.is_empty() {
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if is_disputed(disputes, candidates[i], candidates[j]) {
+                    degrees[i] += 1;
+                    degrees[j] += 1;
+                }
+            }
         }
     }
+
+    let mut ordered: Vec<usize> = (0..n).collect();
+    ordered.sort_by_key(|&i| {
+        (
+            offences.get(&candidates[i]).copied().unwrap_or(0),
+            degrees[i],
+            i,
+        )
+    });
+
+    if disputes.is_empty() {
+        let mut original_indices: Vec<usize> = ordered[..size].to_vec();
+        original_indices.sort_unstable();
+        return Some(
+            original_indices
+                .into_iter()
+                .map(|i| candidates[i])
+                .collect(),
+        );
+    }
+
+    // Precompute conflict matrix in `ordered` coordinates.
+    let mut conflict = vec![vec![false; n]; n];
+    for a in 0..n {
+        for b in (a + 1)..n {
+            if is_disputed(disputes, candidates[ordered[a]], candidates[ordered[b]]) {
+                conflict[a][b] = true;
+                conflict[b][a] = true;
+            }
+        }
+    }
+
+    let mut chosen: Vec<usize> = Vec::with_capacity(size);
+    let mut steps = 0usize;
+
+    if !search_undisputed(0, size, &conflict, &mut chosen, &mut steps) {
+        if steps < MAX_COMMITTEE_SEARCH_STEPS {
+            return None;
+        }
+        chosen = greedy_undisputed(size, &conflict)?;
+    }
+
+    let mut original_indices: Vec<usize> = chosen.into_iter().map(|i| ordered[i]).collect();
+    original_indices.sort_unstable();
+
+    Some(
+        original_indices
+            .into_iter()
+            .map(|i| candidates[i])
+            .collect(),
+    )
 }
 
-/// The committee of run `run`: `2f + 1` guardians in an order that rotates
-/// with the run number, leaving out blamed guardians and never seating both
-/// guardians of a disputed pair. Honest guardians are never blamed and never
+/// The committee of run `run`: reuses the last proven-good sticky committee if
+/// it still has `remaining > 0`, no blamed members, and no active mutual
+/// disputes; otherwise picks `2f + 1` guardians preferring clean peers (lowest
+/// accumulated offences, lowest dispute degree) while skipping actively blamed
+/// guardians and disputed pairs. Honest guardians are never blamed and never
 /// dispute each other, and they number at least `2f + 1`, so such a committee
-/// exists unless honest guardians failed; then the committee ignores
-/// disputes, and if it must, seats the blamed guardians released soonest.
+/// exists unless honest guardians failed; then the committee ignores disputes,
+/// and if it must, seats the blamed guardians released soonest.
 pub async fn committee(
     dbtx: &mut DatabaseTransaction<'_>,
     cfg: &LightningConfig,
@@ -149,13 +260,22 @@ pub async fn committee(
         .copied()
         .collect();
 
-    let blamed: BTreeMap<PeerId, Blame> = dbtx
+    let all_blame: BTreeMap<PeerId, Blame> = dbtx
         .find_by_prefix(&Bolt12BlamePrefix)
         .await
-        .filter(|(_, blame)| std::future::ready(blame.applies_to(run)))
         .map(|(key, blame)| (key.0, blame))
         .collect()
         .await;
+
+    let offences: BTreeMap<PeerId, u32> = all_blame
+        .iter()
+        .map(|(&peer, blame)| (peer, blame.offences))
+        .collect();
+
+    let blamed: BTreeMap<PeerId, Blame> = all_blame
+        .into_iter()
+        .filter(|(_, blame)| blame.applies_to(run))
+        .collect();
 
     let disputes: BTreeSet<(PeerId, PeerId)> = dbtx
         .find_by_prefix(&Bolt12DisputePrefix)
@@ -165,13 +285,29 @@ pub async fn committee(
         .collect()
         .await;
 
+    if let Some(sticky) = dbtx.get_value(&Bolt12PoolStickyCommitteeKey).await
+        && sticky.remaining > 0
+        && sticky.committee.len() == size
+        && sticky
+            .committee
+            .iter()
+            .all(|p| peers.contains(p) && !blamed.contains_key(p))
+        && sticky.committee.iter().enumerate().all(|(i, a)| {
+            sticky.committee[i + 1..]
+                .iter()
+                .all(|b| !is_disputed(&disputes, *a, *b))
+        })
+    {
+        return sticky.committee;
+    }
+
     let eligible: Vec<PeerId> = order
         .iter()
         .copied()
         .filter(|peer| !blamed.contains_key(peer))
         .collect();
 
-    if let Some(committee) = first_undisputed(&eligible, size, &disputes) {
+    if let Some(committee) = pick_undisputed(&eligible, size, &offences, &disputes) {
         return committee;
     }
 
@@ -290,6 +426,77 @@ pub async fn process_shares(
     Ok(())
 }
 
+/// Decay a guardian's or pair's blame record by one completed clean run.
+async fn decay_blame(dbtx: &mut DatabaseTransaction<'_>, peer: PeerId) {
+    if let Some(blame) = dbtx.get_value(&Bolt12BlameKey(peer)).await {
+        match blame.record_clean_run() {
+            Some(updated) => {
+                dbtx.insert_entry(&Bolt12BlameKey(peer), &updated).await;
+            }
+            None => {
+                dbtx.remove_entry(&Bolt12BlameKey(peer)).await;
+            }
+        }
+    }
+}
+
+async fn decay_dispute(dbtx: &mut DatabaseTransaction<'_>, a: PeerId, b: PeerId) {
+    let key = dispute_key(a, b);
+    if let Some(blame) = dbtx.get_value(&key).await {
+        match blame.record_clean_run() {
+            Some(updated) => {
+                dbtx.insert_entry(&key, &updated).await;
+            }
+            None => {
+                dbtx.remove_entry(&key).await;
+            }
+        }
+    }
+}
+
+/// Keep a unanimously agreeing committee sticky for `STICKY_COMMITTEE_RUNS`
+/// total runs before rotating; drop stickiness if anyone disagreed.
+async fn update_sticky_committee(
+    dbtx: &mut DatabaseTransaction<'_>,
+    committee: &[PeerId],
+    unanimous: bool,
+) {
+    if !unanimous {
+        dbtx.remove_entry(&Bolt12PoolStickyCommitteeKey).await;
+        return;
+    }
+
+    let existing = dbtx.get_value(&Bolt12PoolStickyCommitteeKey).await;
+    match existing {
+        Some(sticky) if sticky.committee == committee => {
+            if sticky.remaining > 1 {
+                dbtx.insert_entry(
+                    &Bolt12PoolStickyCommitteeKey,
+                    &StickyCommittee {
+                        committee: sticky.committee,
+                        remaining: sticky.remaining - 1,
+                    },
+                )
+                .await;
+            } else {
+                dbtx.remove_entry(&Bolt12PoolStickyCommitteeKey).await;
+            }
+        }
+        _ => {
+            if STICKY_COMMITTEE_RUNS > 1 {
+                dbtx.insert_entry(
+                    &Bolt12PoolStickyCommitteeKey,
+                    &StickyCommittee {
+                        committee: committee.to_vec(),
+                        remaining: STICKY_COMMITTEE_RUNS - 1,
+                    },
+                )
+                .await;
+            }
+        }
+    }
+}
+
 /// Add the run's preimages to the pool and end it.
 async fn finish(
     dbtx: &mut DatabaseTransaction<'_>,
@@ -298,20 +505,9 @@ async fn finish(
 ) {
     clear(dbtx, active.run).await;
 
-    // A completed run clears its members' records.
-    for member in &active.committee {
-        dbtx.remove_entry(&Bolt12BlameKey(*member)).await;
-
-        for other in &active.committee {
-            if member < other {
-                dbtx.remove_entry(&dispute_key(*member, *other)).await;
-            }
-        }
-    }
-
     // Honest members end a run with the same hashes and are a majority, so
     // the hashes a majority submitted are the run's output. Members that
-    // disagree are not honest; their shares are dropped.
+    // disagree are not honest; their shares are dropped and they are blamed.
     let hashes = |shares: &[PoolShare]| shares.iter().map(|s| s.payment_hash).collect::<Vec<_>>();
 
     let Some(agreed) = submissions
@@ -325,14 +521,49 @@ async fn finish(
                 >= active.threshold()
         })
     else {
+        dbtx.remove_entry(&Bolt12PoolStickyCommitteeKey).await;
         return;
     };
 
-    let agreeing: Vec<(u16, &Vec<PoolShare>)> = submissions
+    let agreeing: Vec<(PeerId, u16, &Vec<PoolShare>)> = submissions
         .iter()
         .filter(|(_, s)| hashes(s) == agreed)
-        .filter_map(|(peer, s)| Some((active.position(*peer)?, s)))
+        .filter_map(|(peer, s)| Some((*peer, active.position(*peer)?, s)))
         .collect();
+
+    let next_run = dbtx.get_value(&Bolt12PoolRunCountKey).await.unwrap_or(0);
+    let agreeing_peers: BTreeSet<PeerId> = agreeing.iter().map(|(peer, _, _)| *peer).collect();
+
+    // Blame any member whose submitted hash list disagreed with the majority.
+    for member in &active.committee {
+        if !agreeing_peers.contains(member) {
+            let previous = dbtx.get_value(&Bolt12BlameKey(*member)).await;
+            dbtx.insert_entry(
+                &Bolt12BlameKey(*member),
+                &Blame::repeat(previous.as_ref(), next_run),
+            )
+            .await;
+        }
+    }
+
+    // Completed clean runs slowly decay blame and mutual disputes rather than
+    // wiping accumulated offences in a single run.
+    for member in &agreeing_peers {
+        decay_blame(dbtx, *member).await;
+
+        for other in &agreeing_peers {
+            if member < other {
+                decay_dispute(dbtx, *member, *other).await;
+            }
+        }
+    }
+
+    update_sticky_committee(
+        dbtx,
+        &active.committee,
+        agreeing.len() == active.committee.len(),
+    )
+    .await;
 
     let threshold = u16::try_from(active.threshold()).expect("committees are small");
 
@@ -350,7 +581,7 @@ async fn finish(
 
         let shares = agreeing
             .iter()
-            .map(|(position, shares)| SealedShare {
+            .map(|(_, position, shares)| SealedShare {
                 position: *position,
                 ciphertext: shares[item].ciphertext,
             })
@@ -375,11 +606,38 @@ async fn finish(
     dbtx.insert_entry(&Bolt12PoolNextKey, &next).await;
 }
 
-/// Delete the run and its submissions.
+/// Delete the run, its submissions and any abort reports.
 async fn clear(dbtx: &mut DatabaseTransaction<'_>, run: u64) {
     dbtx.remove_entry(&Bolt12PoolRunKey).await;
     dbtx.remove_by_prefix(&Bolt12PoolSubmissionRunPrefix(run))
         .await;
+    dbtx.remove_by_prefix(&Bolt12PoolAbortRunPrefix(run)).await;
+}
+
+/// Transition an active run into `AbandonedRun` for judging and clear any
+/// sticky committee so the next run rotates past faulty members.
+async fn abandon_active(dbtx: &mut DatabaseTransaction<'_>, active: PoolRun, now: u64) {
+    let run = active.run;
+    let submitted = dbtx
+        .find_by_prefix(&Bolt12PoolSubmissionRunPrefix(run))
+        .await
+        .map(|(key, _)| key.1)
+        .collect()
+        .await;
+
+    clear(dbtx, run).await;
+    dbtx.remove_entry(&Bolt12PoolStickyCommitteeKey).await;
+
+    dbtx.insert_new_entry(
+        &Bolt12PoolAbandonedKey(run),
+        &AbandonedRun {
+            run: active,
+            abandoned_at: now,
+            submitted,
+            evidence: BTreeMap::new(),
+        },
+    )
+    .await;
 }
 
 /// Whether the run in progress has outlived its timeout at `now`.
@@ -405,25 +663,51 @@ pub async fn process_abandon(
 
     ensure!(is_overdue(&active, now), "the run has not timed out");
 
-    let submitted = dbtx
-        .find_by_prefix(&Bolt12PoolSubmissionRunPrefix(run))
+    abandon_active(dbtx, active, now).await;
+
+    Ok(())
+}
+
+/// A committee member reports that its local execution of `run` aborted. Once
+/// `f + 1` members report an abort, consensus abandons the run immediately
+/// without waiting for `POOL_RUN_TIMEOUT`.
+pub async fn process_abort(
+    dbtx: &mut DatabaseTransaction<'_>,
+    cfg: &LightningConfig,
+    peer: PeerId,
+    run: u64,
+    now: u64,
+) -> Result<()> {
+    pool_config(cfg)?;
+
+    let Some(active) = dbtx
+        .get_value(&Bolt12PoolRunKey)
         .await
-        .map(|(key, _)| key.1)
-        .collect()
+        .filter(|active| active.run == run)
+    else {
+        bail!("the run is not in progress");
+    };
+
+    ensure!(
+        active.position(peer).is_some(),
+        "the guardian is not on the run's committee"
+    );
+    ensure!(
+        dbtx.insert_entry(&Bolt12PoolAbortKey(run, peer), &())
+            .await
+            .is_none(),
+        "the guardian already reported an abort"
+    );
+
+    let aborts = dbtx
+        .find_by_prefix(&Bolt12PoolAbortRunPrefix(run))
+        .await
+        .count()
         .await;
 
-    clear(dbtx, run).await;
-
-    dbtx.insert_new_entry(
-        &Bolt12PoolAbandonedKey(run),
-        &AbandonedRun {
-            run: active,
-            abandoned_at: now,
-            submitted,
-            evidence: BTreeMap::new(),
-        },
-    )
-    .await;
+    if aborts >= active.threshold() {
+        abandon_active(dbtx, active, now).await;
+    }
 
     Ok(())
 }
@@ -599,19 +883,27 @@ impl Lightning {
         if let Some(active) = dbtx.get_value(&Bolt12PoolRunKey).await {
             if is_overdue(&active, now) {
                 items.push(LightningConsensusItem::Bolt12PoolAbandon { run: active.run });
-            } else if dbtx
-                .get_value(&Bolt12PoolSubmissionKey(active.run, me))
-                .await
-                .is_none()
-                && let Some(shares) = dbtx
-                    .get_value(&Bolt12PoolLocalRunKey(active.run))
+            } else if let Some(local) = dbtx.get_value(&Bolt12PoolLocalRunKey(active.run)).await {
+                if dbtx
+                    .get_value(&Bolt12PoolSubmissionKey(active.run, me))
                     .await
-                    .and_then(|local| local.submission)
-            {
-                items.push(LightningConsensusItem::Bolt12PoolShares {
-                    run: active.run,
-                    shares,
-                });
+                    .is_none()
+                    && let Some(shares) = local.submission
+                {
+                    items.push(LightningConsensusItem::Bolt12PoolShares {
+                        run: active.run,
+                        shares,
+                    });
+                } else if local.submission.is_none()
+                    && local.evidence.is_some()
+                    && active.position(me).is_some()
+                    && dbtx
+                        .get_value(&Bolt12PoolAbortKey(active.run, me))
+                        .await
+                        .is_none()
+                {
+                    items.push(LightningConsensusItem::Bolt12PoolAbort { run: active.run });
+                }
             }
         }
 

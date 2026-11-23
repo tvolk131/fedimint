@@ -38,7 +38,8 @@ use fedimint_lnv2_common::bolt12::{
     terms_hash,
 };
 use fedimint_lnv2_common::endpoint_constants::{
-    BOLT12_DECRYPTION_SHARES_ENDPOINT, BOLT12_NEXT_POOL_ENDPOINT, BOLT12_SET_GATEWAY_VOTE_ENDPOINT,
+    BOLT12_DECRYPTION_SHARES_ENDPOINT, BOLT12_MPC_FETCH_ENDPOINT, BOLT12_MPC_RELAY_ENDPOINT,
+    BOLT12_NEXT_POOL_ENDPOINT, BOLT12_SET_GATEWAY_VOTE_ENDPOINT,
 };
 use fedimint_lnv2_common::gateway_api::PaymentFee;
 use fedimint_lnv2_common::{LightningOutput, LightningOutputV0};
@@ -713,6 +714,87 @@ async fn generated_preimages_take_over_when_stock_runs_out() -> Result<()> {
         .pool_fee;
 
     await_balance_at_least(&wallet, balance + net - pool_fee - sats(100)).await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pool_generation_keeps_working_with_one_guardian_offline() -> Result<()> {
+    // Peer 3 is offline; peers 0, 1, 2 form the 2f + 1 = 3 committee.
+    // Verifies real multi-guardian GF(2^8) parallel-king MPC generates
+    // recoverable preimages and that the sticky committee keeps producing
+    // across consecutive pool receives without stalling on the offline peer.
+    let fed = fixtures().new_fed_degraded().await;
+    let gateway = TestGateway::new(&fed).await?;
+
+    gateway.approve(&fed, 3).await?;
+    gateway.await_approved().await?;
+
+    let wallet = wallet(&fed, 13).await;
+    fund(&wallet, sats(1_000)).await?;
+
+    let lightning = wallet.get_first_module::<LightningClientModule>()?;
+    let (offer, _) = create_offer_with(
+        &lightning,
+        Bolt12OfferParams {
+            allow_pool: true,
+            ..offer_params(1)
+        },
+    )
+    .await?;
+
+    // Drain the single initial stock item so subsequent receives come from the
+    // generated preimage pool.
+    let initial = issue_invoice(&gateway, &offer, INVOICE_AMOUNT).await?;
+    assert!(matches!(initial.reservation.source, Source::Stock { .. }));
+
+    // Unauthenticated / invalid fetch and relay calls to online guardians must
+    // be rejected by the live module API.
+    let api = gateway.api()?;
+    assert!(
+        api.request_single_peer::<Vec<String>>(
+            BOLT12_MPC_FETCH_ENDPOINT.to_owned(),
+            ApiRequestErased::new("deadbeef"),
+            PeerId::from(0),
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        api.request_single_peer::<Vec<String>>(
+            BOLT12_MPC_RELAY_ENDPOINT.to_owned(),
+            ApiRequestErased::new("deadbeef"),
+            PeerId::from(0),
+        )
+        .await
+        .is_err()
+    );
+
+    let net = INVOICE_AMOUNT.saturating_sub(GATEWAY_FEE);
+
+    // Reserve, fund, and recover two consecutive pool-backed receives.
+    for _ in 0..2 {
+        let issued = retry(
+            "pool preimage with one guardian offline",
+            backoff_util::custom_backoff(Duration::from_secs(1), Duration::from_secs(2), Some(300)),
+            || issue_invoice(&gateway, &offer, INVOICE_AMOUNT),
+        )
+        .await?;
+
+        assert!(matches!(issued.reservation.source, Source::Pool { .. }));
+
+        let id = Reservation::id(issued.reservation.registration, issued.reservation.source);
+        let outpoint = gateway.submit(Bolt12Output::Receive(id), net).await?;
+
+        let preimage = released_preimage(&gateway, outpoint, &issued.reservation)
+            .await?
+            .context("degraded federation pool shares must recover the preimage")?;
+
+        assert_eq!(
+            sha256::Hash::hash(&preimage).to_byte_array(),
+            issued.reservation.payment_hash
+        );
+    }
 
     Ok(())
 }

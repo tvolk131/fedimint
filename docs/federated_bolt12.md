@@ -249,29 +249,36 @@ The pool is enabled when `pool_target > 0`. Each guardian proposes
 counter's value), recording its committee, `pool_batch` and the consensus
 time.
 
-- **Committee.** `2f + 1` guardians taken in `PeerId` order starting at
-  offset `run mod n` and wrapping, skipping blamed guardians and never seating
-  both guardians of a disputed pair (see Blame). A member's position in the
-  committee is its party index in the MPC.
-- **MPC** (`fedimint-mpc`). Degree-`f` Shamir sharing over GF(2^64) among the
-  committee, which is honest-majority with abort because at most `f` members
-  are malicious. Each member's contributions are XORed into `r`; the circuit
-  publishes `SHA256(r)`. The MPC then turns `r` into field elements, draws
-  `f` random coefficients nobody knows, and sends each member, privately, its
-  sharing of that member's Shamir share of `r` (threshold `f + 1`), which the
-  member checks like any opening. Only the contributions to `r` are
-  bit-checked circuit inputs. Malicious members can make a run abort but not
-  change its output or learn `r`.
-- **Transport.** Members exchange messages through the module API endpoint
-  `bolt12_mpc`. Each message is Schnorr-signed by its sender under its
-  transport key, bound to run, sender, recipient and round, then chunked and
-  encrypted with ChaCha20-Poly1305 under a key from the two guardians'
-  transport keys, bound to run, direction, round and chunk. Senders retry
-  until the recipient reaches the round. Recipients keep every message with
-  its signature.
+- **Committee.** `2f + 1` guardians. Once a committee completes a run with
+  unanimous agreement it stays sticky for up to `STICKY_COMMITTEE_RUNS` (32)
+  consecutive runs before rotating; on abandonment or expiry, selection picks
+  an undisputed, unblamed committee using lowest-dispute-degree ordering with
+  bounded backtracking so large federations (`N >= 25`) never stall consensus
+  CPU. A member's position in the committee is its party index in the MPC.
+- **MPC** (`fedimint-mpc`). Degree-`f` Shamir sharing over `GF(2^8)` among the
+  committee (up to `MAX_PARTIES = 32`, supporting federations up to `N = 46`),
+  evaluating a pure-Rust low-depth SHA-256 circuit (CSA + Sklansky +
+  carry-skip, depth 456) in SIMD lanes with live-wire slot recycling.
+  Double-random sharings use seed-expanded Vandermonde extraction; online
+  multiplications use load-balanced parallel-king DN07 (`O(1)` per-guardian
+  egress and CPU per gate); all multiplications and input bit-checks are
+  verified together with 128-bit soundness via a 4-way recursive BBCGI19
+  inner-product proof over `GF((2^8)^16)` before any public output or share is
+  opened. Malicious members can make a run abort but cannot change its output
+  or learn `r`.
+- **Transport and relay fallback.** Members exchange messages through
+  `bolt12_mpc`. Each message is Schnorr-signed by its sender, split into
+  chunks, encrypted with ChaCha20-Poly1305 under an ephemeral ECDH key derived
+  deterministically from the sender's run seed (providing forward secrecy while
+  live and deterministic verification after abandonment), and outer-signed with
+  an `envelope_sig`. If direct delivery stalls past `RELAY_TRIGGER` (10 s), the
+  recipient sends a signed `RelayRequest` to other committee members
+  (`bolt12_mpc_relay`), which pull the opaque encrypted chunks from the sender
+  via a signed `FetchRequest` (`bolt12_mpc_fetch`), verify `envelope_sig`, and
+  forward them—or record a relay witness if the sender refuses.
 - **Durability.** Before sending anything, a member records the run and the
   seed all its randomness comes from. A restarted member does not rejoin; the
-  run times out instead.
+  run aborts or times out instead.
 - **Submission.** A member that finishes encrypts each share to the
   federation's TPE key, bound to `(run, position, payment_hash)`, stores the
   result and proposes `Bolt12PoolShares`. Consensus checks the sender is a
@@ -279,57 +286,65 @@ time.
 - **Completion.** When every member has submitted, the hash list submitted by
   at least `f + 1` members (the honest ones always agree, and are a majority)
   becomes pool items, sealed with the shares of the members who submitted it.
-  Hashes already seen are skipped. The run and its submissions are deleted.
-- **Timeout.** Once the consensus time passes `started_at +
-  POOL_RUN_TIMEOUT` (900 s), guardians propose `Bolt12PoolAbandon { run }`,
-  which deletes the run and its submissions and records it for judging.
-  Results of an abandoned run are never used, so no share of a
-  later-published preimage ever leaves a member.
+  Members whose hash list disagrees with the majority are blamed. Hashes
+  already seen are skipped. The run and its submissions are deleted.
+- **Early abort and timeout.** A committee member whose local MPC run aborts
+  proposes `Bolt12PoolAbort { run }`; once `f + 1` members report an abort,
+  consensus immediately abandons the run without waiting for timeout.
+  Otherwise, once consensus time passes `started_at + POOL_RUN_TIMEOUT`
+  (300 s), guardians propose `Bolt12PoolAbandon { run }`. Results of an
+  abandoned run are never used, so no share of a later-published preimage ever
+  leaves a member.
 - **Release.** Funding a pool receive stores each guardian's decryption share
   for every member's ciphertext. The gateway and the recipient aggregate a
-  threshold of these per ciphertext, decrypt the `2f + 1` shares and
-  reconstruct `r` by trying subsets of `f + 1` until one hashes to the payment
-  hash. At least `f + 1` shares come from honest members, so this succeeds
-  whatever the others sealed.
+  threshold of these per ciphertext, decrypt the shares and reconstruct `r`
+  over `GF(2^8)` using polynomial-time Berlekamp–Welch Reed–Solomon decoding
+  (with subset fallback if more than `(n - threshold) / 2` shares are
+  corrupted). At least `f + 1` shares come from honest members, so this
+  succeeds whatever the others sealed.
 
 ### Blame
 
 A run fails when a member deviates, stays silent, or finishes without
 submitting. Every message a member sends is a deterministic function of its
-seed and the messages it received, so once a run is abandoned and its
-results can never be used, the run can be replayed.
+seed and the messages it received, so once a run is abandoned and its results
+can never be used, the run can be replayed.
 
 1. **Evidence.** When its part in a run ends, a member stores the signed
-   messages it received. If consensus abandons the run, the member proposes
-   `Bolt12PoolEvidence { run, digest }`, committing to its seed and those
-   messages, within `EVIDENCE_WINDOW` (300 s), and serves them through the
-   `bolt12_mpc_evidence` endpoint, which refuses to reveal anything about a
-   run that has not been abandoned.
-2. **Judging.** After the window, every guardian fetches the committed
-   evidence, discards messages whose sender's signature does not verify,
-   replays each member, and compares what each member should have sent with
-   what the others hold under its signature. In this order it finds:
+   messages it received together with its relay witnesses and any
+   envelope-signed packets that failed AEAD decryption. If consensus abandons
+   the run, the member proposes `Bolt12PoolEvidence { run, digest }` within
+   `EVIDENCE_WINDOW` (90 s) and serves them through `bolt12_mpc_evidence`,
+   which refuses to reveal anything about a run that has not been abandoned.
+   Once every committee member has committed evidence, the window closes early.
+2. **Judging.** Once the evidence window closes, every guardian fetches the
+   committed evidence, verifies message signatures, checks any reported
+   `BadPacket`s against the sender's seed-derived ephemeral key, replays each
+   member, and compares what each member should have sent with what the others
+   hold under its signature. In this order it finds:
    members that committed no evidence or whose evidence cannot be fetched or
-   does not match; members whose signed messages differ from their replay,
-   or who hold back received messages that their later signed messages prove
-   they had; members whose replay completes but who did not submit. Only if
-   nobody is at fault does it report disputes: for the earliest round in
-   which a member lacks a message, the pair of that member and the missing
-   sender. One of them is at fault, but not provably which.
+   does not match; members whose signed messages differ from their replay, who
+   signed an undecryptable packet, or who hold back received messages that
+   their later signed messages prove they had; members whose replay completes
+   but who did not submit; and silent senders at the earliest stall round
+   witnessed missing by at least `f` third-party relays (an honest sender can
+   face at most `f - 1` colluding relays if a malicious recipient fakes a
+   stall). Only if nobody is provably at fault does it report pairwise
+   disputes.
 3. **Verdicts.** Each guardian proposes `Bolt12PoolVerdict { run, verdict }`.
    Once a quorum has voted, every culprit and every pair named by at least
-   `f + 1` verdicts is blamed: honest guardians replay the same evidence to
-   the same verdict, and `f` malicious guardians cannot reach `f + 1`
-   alone. No new run starts while a run is being judged, up to
-   `JUDGE_TIMEOUT` (1800 s), after which it is dropped unjudged.
-4. **Exclusion.** A blamed guardian sits out the next 8 runs, a disputed pair
-   never shares a committee for 8 runs, and each repeat doubles that, up to
-   64. Completing a run clears its members' blame and their mutual disputes.
-   Honest guardians are never blamed and never dispute each other, and there
-   are at least `2f + 1` of them, so a committee without blamed guardians or
-   disputed pairs exists unless honest guardians failed. If it does not, the
-   committee ignores disputes, and if it must, seats the blamed guardians
-   released soonest: a committee never has fewer than `2f + 1` members.
+   `f + 1` verdicts is blamed. No new run starts while a run is being judged,
+   up to `JUDGE_TIMEOUT` (600 s), after which it is dropped unjudged.
+4. **Exclusion and slow decay.** A blamed guardian sits out the next 8 runs, a
+   disputed pair never shares a committee for 8 runs, and each repeat doubles
+   that, up to 64. Completing a clean run does not wipe accumulated offences
+   immediately; instead, each offence level decays only after
+   `BLAME_DECAY_RUNS` (16) clean runs, preventing sleeper-reset attacks. Honest
+   guardians are never blamed and never dispute each other, and there are at
+   least `2f + 1` of them, so a committee without blamed guardians or disputed
+   pairs exists unless honest guardians failed. If it does not, the committee
+   ignores disputes, and if it must, seats the blamed guardians released
+   soonest: a committee never has fewer than `2f + 1` members.
 
 Reasoning recorded for review: openings check that all `2f + 1` shares lie on
 one degree-`f` polynomial, which the `f + 1` honest shares fix, so no digest
