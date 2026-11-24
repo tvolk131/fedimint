@@ -187,6 +187,14 @@ impl Signer {
 
         let key = key_package(cfg)?;
 
+        // Re-verify inside the write transaction that the reservation was not
+        // funded or expired since `approve()` ran, preventing orphaned nonce
+        // rows from leaking into the local database.
+        ensure!(
+            dbtx.get_value(&Bolt12ReservationKey(id.0)).await.is_some(),
+            "reservation is no longer active"
+        );
+
         let attempts = dbtx
             .get_value(&Bolt12NonceCountKey(id.0))
             .await

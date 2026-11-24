@@ -348,5 +348,83 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
             .is_err()
     );
 
+    // Re-delivering an already-funded BOLT12 payment after receives have been
+    // disabled for the federation MUST resume cleanly without sending Cancel.
+    let module = gateway_client.get_first_module::<GatewayClientModuleV2>()?;
+    let funded_res = module
+        .bolt12_reservation_for_hash(payment_hash)
+        .await
+        .context("funded reservation present")?;
+    module
+        .relay_bolt12_htlc(
+            funded_res,
+            payment_hash,
+            fedimint_gwv2_client::IncomingCircuitKey {
+                incoming_chan_id: NO_INCOMING_CIRCUIT.0,
+                htlc_id: NO_INCOMING_CIRCUIT.1,
+            },
+            INVOICE_AMOUNT.msats,
+            100,
+            false,
+        )
+        .await
+        .context("already-funded BOLT12 payment must resume even when receive_enabled == false")?;
+
+    // Front-running the next stock item's payment hash with a BOLT11 invoice
+    // creation must NOT wedge BOLT12 issuance: the gateway skips the collided
+    // stock item and issues an invoice from the next unused item.
+    let registration_id = wallet
+        .get_first_module::<LightningClientModule>()?
+        .bolt12_offers()
+        .await
+        .first()
+        .context("offer record")?
+        .registration;
+    let next_stock = wallet
+        .get_first_module::<LightningClientModule>()?
+        .api
+        .bolt12_next_stock(registration_id)
+        .await?
+        .context("unused stock remains")?;
+    let front_run_hash = sha256::Hash::from_byte_array(next_stock.1.payment_hash);
+    let routing_info = gateway
+        .routing_info_v2(&fed.id())
+        .await?
+        .context("routing info")?;
+    let front_run_amount = Amount::from_sats(1_000);
+    let front_run_contract = fedimint_lnv2_common::contracts::IncomingContract::new(
+        module.cfg.tpe_agg_pk,
+        [42; 32],
+        [7; 32],
+        fedimint_lnv2_common::contracts::PaymentImage::Hash(front_run_hash),
+        routing_info
+            .receive_fee
+            .subtract_from(front_run_amount.msats),
+        u64::MAX,
+        fedimint_core::secp256k1::Keypair::new(SECP256K1, &mut rand::thread_rng()).public_key(),
+        module.keypair.public_key(),
+        fedimint_core::secp256k1::Keypair::new(SECP256K1, &mut rand::thread_rng()).public_key(),
+    );
+    gateway
+        .create_bolt11_invoice_v2(
+            fedimint_lnv2_common::gateway_api::CreateBolt11InvoicePayload {
+                federation_id: fed.id(),
+                contract: front_run_contract,
+                amount: front_run_amount,
+                description: fedimint_lnv2_common::Bolt11InvoiceDescription::Direct(String::new()),
+                expiry_secs: 3_600,
+            },
+        )
+        .await
+        .context("attacker front-runs next stock payment hash via BOLT11")?;
+
+    let request2 = invoice_request(&offer, INVOICE_AMOUNT)?;
+    let invoice2 = answer(&gateway, &request2).await?;
+    assert_ne!(
+        sha256::Hash::from_byte_array(invoice2.payment_hash().0),
+        front_run_hash,
+        "gateway must skip front-run stock payment hash and use next item"
+    );
+
     Ok(())
 }

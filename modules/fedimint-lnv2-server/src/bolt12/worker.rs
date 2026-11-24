@@ -80,23 +80,35 @@ const EVIDENCE_MEMBER_TIMEOUT: Duration = Duration::from_secs(60);
 /// Minimum total decoded transcript byte cap per member for small runs.
 const MIN_MEMBER_EVIDENCE_BYTES: usize = 64 * 1024 * 1024;
 
-/// Authenticated request from any federation guardian asking a committee member
-/// for one page of its evidence about an abandoned run.
+/// Maximum number of committee members whose evidence is fetched concurrently,
+/// bounding in-flight RPC response memory while avoiding single-peer tarpits.
+const MAX_CONCURRENT_EVIDENCE_FETCHES: usize = 4;
+
+/// Authenticated request from any federation guardian asking `target` for one
+/// page of its evidence about an abandoned run.
 #[derive(Debug, Clone, Eq, PartialEq, Encodable, Decodable)]
 pub struct EvidenceRequest {
     pub run: u64,
     pub requester: PeerId,
+    pub target: PeerId,
     pub from_round: u64,
     pub from_peer: u16,
     pub signature: Signature,
 }
 
 impl EvidenceRequest {
-    fn digest(run: u64, requester: PeerId, from_round: u64, from_peer: u16) -> Message {
+    fn digest(
+        run: u64,
+        requester: PeerId,
+        target: PeerId,
+        from_round: u64,
+        from_peer: u16,
+    ) -> Message {
         let hash: sha256::Hash = (
-            "fedimint/bolt12/mpc-evidence-req/v1",
+            "fedimint/bolt12/mpc-evidence-req/v2",
             run,
             requester,
+            target,
             from_round,
             from_peer,
         )
@@ -108,18 +120,20 @@ impl EvidenceRequest {
     pub fn new(
         run: u64,
         requester: PeerId,
+        target: PeerId,
         from_round: u64,
         from_peer: u16,
         signing_key: &Keypair,
     ) -> Self {
         let signature = SECP256K1.sign_schnorr(
-            &Self::digest(run, requester, from_round, from_peer),
+            &Self::digest(run, requester, target, from_round, from_peer),
             signing_key,
         );
 
         Self {
             run,
             requester,
+            target,
             from_round,
             from_peer,
             signature,
@@ -130,7 +144,13 @@ impl EvidenceRequest {
         SECP256K1
             .verify_schnorr(
                 &self.signature,
-                &Self::digest(self.run, self.requester, self.from_round, self.from_peer),
+                &Self::digest(
+                    self.run,
+                    self.requester,
+                    self.target,
+                    self.from_round,
+                    self.from_peer,
+                ),
                 &requester_pk.x_only_public_key().0,
             )
             .is_ok()
@@ -809,8 +829,8 @@ async fn fetch_evidence_page(
     cursor: (u64, u16),
     max_page_hex: usize,
 ) -> Result<EvidencePage> {
-    let req =
-        EvidenceRequest::new(run, me, cursor.0, cursor.1, signing_key).consensus_encode_to_hex();
+    let req = EvidenceRequest::new(run, me, member, cursor.0, cursor.1, signing_key)
+        .consensus_encode_to_hex();
     let mut last_err = anyhow::anyhow!("Evidence fetch failed");
 
     for attempt in 0..EVIDENCE_PAGE_ATTEMPTS {
@@ -1073,7 +1093,7 @@ fn collect_transport_culprits(
     keys: &BTreeMap<PeerId, PublicKey>,
     evidence: &[Option<Evidence>],
     faults_by_member: &[(PeerId, RelayEvidence)],
-    max_chunks: u32,
+    limits: ChannelLimits,
 ) -> BTreeSet<PeerId> {
     let mut culprits = BTreeSet::new();
     let mut lied_r0_eph: BTreeSet<(PeerId, PeerId)> = BTreeSet::new();
@@ -1142,7 +1162,8 @@ fn collect_transport_culprits(
                 &sender_ev.seed,
                 &recipient_ev.seed,
                 fault,
-                max_chunks,
+                limits.chunks,
+                limits.message,
             ) {
                 culprits.insert(sender);
             }
@@ -1206,7 +1227,7 @@ fn evaluate_verdict(
     }
 
     let transport_culprits =
-        collect_transport_culprits(run, keys, &evidence, &faults_by_member, limits.chunks);
+        collect_transport_culprits(run, keys, &evidence, &faults_by_member, limits);
     let circuit = direct::circuit(params, batch)?;
     let found = runtime::block_on(judge(
         params, batch, &circuit, context, &evidence, submitted,
@@ -1242,11 +1263,18 @@ async fn verdict(
     let limits = ChannelLimits::for_run(params.parties(), params.degree(), batch);
     let max_rounds = max_rounds_for_run(params, batch)?;
 
-    // Fetch all committee members' evidence in parallel with bounded timeouts.
+    // Fetch committee members' evidence with bounded concurrency and per-member
+    // timeouts to avoid both single-peer tarpits and unbounded in-flight RPC
+    // buffer amplification.
+    let fetch_sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_EVIDENCE_FETCHES));
     let raw_fetched = join_all(run.committee.iter().map(|&member| {
         let digest = abandoned.evidence.get(&member).copied();
+        let fetch_sem = fetch_sem.clone();
         async move {
             let Some(digest) = digest else {
+                return (member, None);
+            };
+            let Ok(_permit) = fetch_sem.acquire().await else {
                 return (member, None);
             };
             match fetch_evidence(db, api, me, &signing_key, member, run, limits, max_rounds).await {

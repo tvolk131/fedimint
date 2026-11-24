@@ -695,7 +695,12 @@ impl GatewayClientModuleV2 {
         receive_operation_id: OperationId,
         contract: IncomingContract,
         blocks_to_claim_deadline: u32,
+        receive_enabled: bool,
     ) -> Result<TransactionBuilder, RelayIncomingHtlcError> {
+        if !receive_enabled {
+            return Err(RelayIncomingHtlcError::ReceiveDisabled);
+        }
+
         // Funding is irreversible, and the gateway is only reimbursed by
         // settling the HTLC before its claim deadline, so do not fund an
         // HTLC that is about to expire. The margin is small because LDK's
@@ -770,6 +775,32 @@ impl GatewayClientModuleV2 {
         amount_msat: u64,
         blocks_to_claim_deadline: u32,
     ) -> Result<(), RelayIncomingHtlcError> {
+        self.relay_incoming_htlc_with_policy(
+            payment_hash,
+            incoming_chan_id,
+            htlc_id,
+            contract,
+            amount_msat,
+            blocks_to_claim_deadline,
+            true,
+        )
+        .await
+    }
+
+    /// Like [`Self::relay_incoming_htlc`], but enforces `receive_enabled` only
+    /// when funding a fresh receive (`IncomingRelayPlan::CreateReceiveAndCompletion`),
+    /// never cancelling an already-funded contract on restart redelivery.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn relay_incoming_htlc_with_policy(
+        &self,
+        payment_hash: sha256::Hash,
+        incoming_chan_id: u64,
+        htlc_id: u64,
+        contract: IncomingContract,
+        amount_msat: u64,
+        blocks_to_claim_deadline: u32,
+        receive_enabled: bool,
+    ) -> Result<(), RelayIncomingHtlcError> {
         let operation_start = now();
         let receive_operation_id = OperationId::from_encodable(&contract);
         let circuit = IncomingCircuitKey {
@@ -791,6 +822,7 @@ impl GatewayClientModuleV2 {
                     receive_operation_id,
                     contract,
                     blocks_to_claim_deadline,
+                    receive_enabled,
                 )
                 .await
             {
@@ -1270,6 +1302,12 @@ pub enum RelayIncomingHtlcError {
         /// The amount the Lightning node holds.
         received_msat: u64,
     },
+
+    /// Receives are disabled for this federation, so a fresh incoming contract
+    /// is not funded. Already-funded receives are never rejected with this
+    /// error.
+    #[error("Receives are disabled for this federation")]
+    ReceiveDisabled,
 }
 
 impl RelayIncomingHtlcError {

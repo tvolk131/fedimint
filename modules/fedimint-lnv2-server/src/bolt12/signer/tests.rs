@@ -561,6 +561,18 @@ fn approval_for(gateway: PublicKey, digest: [u8; 32]) -> Approval {
     }
 }
 
+async fn database_with_reservations(ids: &[ReservationId]) -> Database {
+    let db = database();
+    let scenario = Scenario::new().expect("scenario");
+    let mut dbtx = db.begin_transaction().await;
+    for &id in ids {
+        dbtx.insert_entry(&Bolt12ReservationKey(id), &scenario.reservation)
+            .await;
+    }
+    dbtx.commit_tx().await;
+    db
+}
+
 #[tokio::test]
 async fn a_nonce_signs_only_the_approved_digest_and_only_once() -> Result<()> {
     let cfgs = configs()?;
@@ -574,7 +586,7 @@ async fn a_nonce_signs_only_the_approved_digest_and_only_once() -> Result<()> {
     let mut commitments = BTreeMap::new();
 
     for peer in (0..3).map(PeerId::from) {
-        let db = database();
+        let db = database_with_reservations(&[reservation]).await;
         let mut signer = Signer::default();
 
         let response = signer
@@ -680,7 +692,7 @@ async fn signing_packages_must_contain_a_quorum_including_our_commitment() -> Re
     let mut signers = BTreeMap::new();
 
     for (index, peer) in (0..3).map(PeerId::from).enumerate() {
-        let db = database();
+        let db = database_with_reservations(&[reservation]).await;
         let mut signer = Signer::default();
 
         // Two attempts each: one per case below.
@@ -735,9 +747,9 @@ async fn the_attempt_budget_survives_a_restart() -> Result<()> {
     let cfg = configs()?
         .remove(&PeerId::from(0))
         .expect("guardian 0 exists");
-    let db = database();
     let reservation = ReservationId(sha256::Hash::hash(b"reservation"));
     let other = ReservationId(sha256::Hash::hash(b"another reservation"));
+    let db = database_with_reservations(&[reservation, other]).await;
     let mut signer = Signer::default();
 
     for attempt in 0..MAX_ATTEMPTS {
@@ -996,9 +1008,16 @@ async fn seven_guardian_signing_succeeds_after_two_offline_attempts() -> Result<
     let reservation = ReservationId(sha256::Hash::hash(b"n7-res"));
     let digest = [5; 32];
 
-    let mut signers: BTreeMap<PeerId, (Signer, Database)> = (0..7u16)
-        .map(|p| (PeerId::from(p), (Signer::default(), database())))
-        .collect();
+    let mut signers: BTreeMap<PeerId, (Signer, Database)> = BTreeMap::new();
+    for p in 0..7u16 {
+        signers.insert(
+            PeerId::from(p),
+            (
+                Signer::default(),
+                database_with_reservations(&[reservation]).await,
+            ),
+        );
+    }
 
     // Two failed attempts prepare on all 5 honest guardians [0..5] without
     // finishing round 2.

@@ -636,7 +636,19 @@ pub async fn process_input(
 
     if let Some(released) = released {
         if !released.rejected_peers.is_empty() {
-            pool::blame_poisoned_shares(dbtx, &released.rejected_peers).await;
+            // Any share disagreement proves at least one committee member
+            // misbehaved, so always stop reusing the sticky committee.
+            dbtx.remove_entry(&Bolt12PoolStickyCommitteeKey).await;
+
+            // Without per-share commitments, individual blame is sound ONLY
+            // when a single share disagrees: any nonzero degree-<=f
+            // perturbation E(x) with E(0) = 0 has at most f - 1 nonzero roots,
+            // so any fake polynomial Q != P with Q(0) = P(0) disagrees with at
+            // least (f + 1) - (f - 1) = 2 honest shares. Thus a unique
+            // rejected share cannot be honest for any f >= 1.
+            if released.rejected_peers.len() == 1 {
+                pool::blame_poisoned_shares(dbtx, &released.rejected_peers).await;
+            }
         }
 
         return Ok(InputEffect {

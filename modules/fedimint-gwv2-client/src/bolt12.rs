@@ -24,7 +24,7 @@ use fedimint_core::db::IDatabaseTransactionOpsCoreTyped;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::{Amounts, CommonModuleInit};
 use fedimint_core::time::duration_since_epoch;
-use fedimint_core::{Amount, impl_db_lookup, impl_db_record};
+use fedimint_core::{Amount, impl_db_record};
 use fedimint_lnv2_common::bolt12::invoice::encode_payment_path;
 use fedimint_lnv2_common::bolt12::{
     Bolt12Output, ReceivePolicy, RegistrationId, Reservation, ReservationId, Reserve, Source,
@@ -46,8 +46,9 @@ use crate::{
     incoming_circuit_operation_id,
 };
 
-/// How often to pick another stock item after losing a race for one.
-const RESERVE_ATTEMPTS: usize = 3;
+/// How many candidate stock or pool items to try after losing a race or
+/// hitting a locally collided payment hash.
+const RESERVE_ATTEMPTS: usize = 8;
 
 /// Blocks a held BOLT12 payment must leave before its claim deadline for the
 /// gateway to fund the recipient's claim.
@@ -62,8 +63,10 @@ pub const BOLT12_CLAIM_DEADLINE_MARGIN: u32 = 36;
 
 #[repr(u8)]
 enum DbKeyPrefix {
-    Bolt12Issued = 0x50,
-    Bolt12Payment = 0x51,
+    Issued = 0x50,
+    Payment = 0x51,
+    IssuedExpiry = 0x52,
+    UnfundedExpiry = 0x53,
 }
 
 /// The invoice issued for an invoice request, keyed by the request's hash, so
@@ -71,31 +74,46 @@ enum DbKeyPrefix {
 #[derive(Debug, Clone, Encodable, Decodable)]
 struct Bolt12IssuedKey(sha256::Hash);
 
-#[derive(Debug, Encodable, Decodable)]
-struct Bolt12IssuedPrefix;
-
 impl_db_record!(
     key = Bolt12IssuedKey,
     value = Vec<u8>,
-    db_prefix = DbKeyPrefix::Bolt12Issued,
+    db_prefix = DbKeyPrefix::Issued,
 );
 
-impl_db_lookup!(key = Bolt12IssuedKey, query_prefix = Bolt12IssuedPrefix);
+/// Expiry index for cached issued invoices (`(expires_at_secs, request_hash)`),
+/// sorted chronologically for `O(PRUNE_PER_ISSUE)` pruning without scanning
+/// live rows.
+#[derive(Debug, Clone, Encodable, Decodable)]
+struct Bolt12IssuedExpiryKey(u64, sha256::Hash);
+
+impl_db_record!(
+    key = Bolt12IssuedExpiryKey,
+    value = (),
+    db_prefix = DbKeyPrefix::IssuedExpiry,
+);
 
 /// The reservation behind a payment hash this gateway issued an invoice for.
 #[derive(Debug, Clone, Encodable, Decodable)]
 struct Bolt12PaymentKey([u8; 32]);
 
-#[derive(Debug, Encodable, Decodable)]
-struct Bolt12PaymentPrefix;
-
 impl_db_record!(
     key = Bolt12PaymentKey,
     value = Reservation,
-    db_prefix = DbKeyPrefix::Bolt12Payment,
+    db_prefix = DbKeyPrefix::Payment,
 );
 
-impl_db_lookup!(key = Bolt12PaymentKey, query_prefix = Bolt12PaymentPrefix);
+/// Expiry index for cached reservations (`(expires_at_secs, payment_hash)`).
+/// Once past the retention window, the index entry is always removed (while
+/// `Bolt12PaymentKey` is kept if a receive operation exists), preventing
+/// funded invoices from stalling pruning of later expired entries.
+#[derive(Debug, Clone, Encodable, Decodable)]
+struct Bolt12UnfundedExpiryKey(u64, [u8; 32]);
+
+impl_db_record!(
+    key = Bolt12UnfundedExpiryKey,
+    value = ReservationId,
+    db_prefix = DbKeyPrefix::UnfundedExpiry,
+);
 
 /// Retention margin past invoice expiry before pruning local BOLT12 cache rows.
 const LOCAL_RECORD_RETENTION_SECS: u64 = 3600;
@@ -226,59 +244,73 @@ impl GatewayClientModuleV2 {
         .await?;
 
         // Stored before the invoice leaves the gateway, so a payment for it
-        // always finds its reservation. Opportunistically prune a bounded
-        // number of expired cached invoices and expired unfunded reservations.
+        // always finds its reservation. Index by expiry so pruning visits only
+        // expired rows in O(PRUNE_PER_ISSUE) without scanning live invoices or
+        // stalling on retained funded reservations.
         let now_secs = duration_since_epoch().as_secs();
+        let invoice_expires_at = invoice
+            .created_at()
+            .as_secs()
+            .saturating_add(invoice.relative_expiry().as_secs());
+        let res_id = Reservation::id(reservation.registration, reservation.source);
+        let cutoff = now_secs.saturating_sub(LOCAL_RECORD_RETENTION_SECS);
         let mut dbtx = db.begin_transaction().await;
 
         dbtx.insert_entry(&Bolt12PaymentKey(reservation.payment_hash), &reservation)
             .await;
+        dbtx.insert_entry(
+            &Bolt12UnfundedExpiryKey(reservation.expires_at(), reservation.payment_hash),
+            &res_id,
+        )
+        .await;
         dbtx.insert_entry(&Bolt12IssuedKey(request_hash), &invoice.encode())
             .await;
+        dbtx.insert_entry(
+            &Bolt12IssuedExpiryKey(invoice_expires_at, request_hash),
+            &(),
+        )
+        .await;
 
-        let expired_issued: Vec<Bolt12IssuedKey> = dbtx
-            .find_by_prefix(&Bolt12IssuedPrefix)
+        let zero_hash = bitcoin::hashes::Hash::all_zeros();
+        let expired_issued: Vec<Bolt12IssuedExpiryKey> = dbtx
+            .find_by_range(
+                Bolt12IssuedExpiryKey(0, zero_hash)..Bolt12IssuedExpiryKey(cutoff, zero_hash),
+            )
             .await
-            .filter_map(|(key, bytes)| async move {
-                let expired = Bolt12Invoice::try_from(bytes).ok().is_none_or(|inv| {
-                    inv.created_at()
-                        .as_secs()
-                        .saturating_add(inv.relative_expiry().as_secs())
-                        .saturating_add(LOCAL_RECORD_RETENTION_SECS)
-                        < now_secs
-                });
-                expired.then_some(key)
-            })
             .take(PRUNE_PER_ISSUE)
+            .map(|(key, ())| key)
             .collect()
             .await;
 
         for key in expired_issued {
-            if key.0 != request_hash {
+            if key.1 != request_hash {
+                dbtx.remove_entry(&Bolt12IssuedKey(key.1)).await;
                 dbtx.remove_entry(&key).await;
             }
         }
 
-        let expired_payments: Vec<(Bolt12PaymentKey, ReservationId)> = dbtx
-            .find_by_prefix(&Bolt12PaymentPrefix)
+        let expired_payments: Vec<(Bolt12UnfundedExpiryKey, ReservationId)> = dbtx
+            .find_by_range(
+                Bolt12UnfundedExpiryKey(0, [0; 32])..Bolt12UnfundedExpiryKey(cutoff, [0; 32]),
+            )
             .await
-            .filter_map(|(key, res)| async move {
-                let expired =
-                    res.expires_at().saturating_add(LOCAL_RECORD_RETENTION_SECS) < now_secs;
-                expired.then(|| (key, Reservation::id(res.registration, res.source)))
-            })
             .take(PRUNE_PER_ISSUE)
             .collect()
             .await;
 
-        for (key, res_id) in expired_payments {
-            if key.0 != reservation.payment_hash
-                && !self
-                    .client_ctx
-                    .operation_exists_dbtx(&mut dbtx.to_ref_nc(), receive_operation_id(res_id))
-                    .await
+        for (key, expired_res_id) in expired_payments {
+            if key.1 == reservation.payment_hash {
+                continue;
+            }
+            // Always drop the expiry-index row once past retention so retained
+            // funded reservations never stall pruning of later expired rows.
+            dbtx.remove_entry(&key).await;
+            if !self
+                .client_ctx
+                .operation_exists_dbtx(&mut dbtx.to_ref_nc(), receive_operation_id(expired_res_id))
+                .await
             {
-                dbtx.remove_entry(&key).await;
+                dbtx.remove_entry(&Bolt12PaymentKey(key.1)).await;
             }
         }
 
@@ -287,27 +319,51 @@ impl GatewayClientModuleV2 {
         Ok(invoice)
     }
 
-    /// The source the next reservation for `registration` should use: its
-    /// lowest unused stock item, or once those are gone and the recipient
-    /// allows it, the next generated preimage.
-    async fn next_bolt12_source(
+    /// Up to 8 candidate sources for `registration`, starting past `min_stock`
+    /// (or past `min_pool` once unused stock is exhausted and the recipient
+    /// allows pool preimages).
+    async fn candidate_bolt12_sources(
         &self,
         registration: RegistrationId,
         policy: &ReceivePolicy,
-    ) -> Result<(Source, [u8; 32])> {
-        if let Some((index, item)) = self.module_api.bolt12_next_stock(registration).await? {
-            return Ok((Source::Stock { index }, item.payment_hash));
+        min_stock: u64,
+        min_pool: u64,
+    ) -> Result<Vec<(Source, [u8; 32])>> {
+        let stock = self
+            .module_api
+            .bolt12_stock_items(registration, min_stock)
+            .await?;
+        if !stock.is_empty() {
+            return Ok(stock
+                .into_iter()
+                .map(|(index, item)| (Source::Stock { index }, item.payment_hash))
+                .collect());
+        }
+
+        // Only fall back to the pool if the offer truly has no unused stock
+        // remaining (not merely because we skipped past `min_stock`).
+        if min_stock > 0
+            && self
+                .module_api
+                .bolt12_next_stock(registration)
+                .await?
+                .is_some()
+        {
+            anyhow::bail!("no usable stock items left without a local payment-hash collision");
         }
 
         ensure!(policy.allow_pool, "offer has no unused stock left");
 
-        let (index, payment_hash) = self
-            .module_api
-            .bolt12_next_pool()
-            .await?
-            .context("offer has no unused stock left and the pool is empty")?;
+        let pool = self.module_api.bolt12_pool_items(min_pool).await?;
+        ensure!(
+            !pool.is_empty(),
+            "offer has no unused stock left and the pool is empty"
+        );
 
-        Ok((Source::Pool { index }, payment_hash))
+        Ok(pool
+            .into_iter()
+            .map(|(index, payment_hash)| (Source::Pool { index }, payment_hash))
+            .collect())
     }
 
     /// Reserve a payment hash for this request. Returns the reservation and
@@ -330,66 +386,92 @@ impl GatewayClientModuleV2 {
             .context("federated BOLT12 is disabled")?;
 
         let mut last_error = None;
+        let mut min_stock = 0u64;
+        let mut min_pool = 0u64;
+        let mut attempts = 0usize;
 
-        // Another gateway may reserve the same item first; that only costs a
-        // retry with the next one.
-        for _ in 0..RESERVE_ATTEMPTS {
-            let (source, payment_hash) = self.next_bolt12_source(registration, policy).await?;
+        // Another gateway may reserve the same item first, or a payment hash
+        // may already be registered locally (e.g. front-run via BOLT11 or an
+        // interrupted previous issuance); skip collided hashes and retry with
+        // the next unused candidate.
+        while attempts < RESERVE_ATTEMPTS {
+            let candidates = self
+                .candidate_bolt12_sources(registration, policy, min_stock, min_pool)
+                .await?;
 
-            ensure!(
-                reservation_is_economical(
-                    &self.cfg.fee_consensus,
-                    policy,
+            for (source, payment_hash) in candidates {
+                if attempts >= RESERVE_ATTEMPTS {
+                    break;
+                }
+                attempts += 1;
+
+                match source {
+                    Source::Stock { index } => min_stock = index.saturating_add(1),
+                    Source::Pool { index } => min_pool = index.saturating_add(1),
+                }
+
+                ensure!(
+                    reservation_is_economical(
+                        &self.cfg.fee_consensus,
+                        policy,
+                        request.amount,
+                        request.gateway_fee,
+                        bolt12.claim_premium(source),
+                    ),
+                    "amount does not cover fees or the fee exceeds the recipient's limit"
+                );
+
+                // The path commits to the payment hash, so it must be built
+                // before the reservation that pins it. If the hash is already
+                // claimed locally (BOLT11 collision or interrupted prior issue),
+                // skip to the next unused item instead of wedging the offer.
+                let path = match payment_path(payment_hash).await {
+                    Ok(path) => encode_payment_path(&path)?,
+                    Err(error) => {
+                        last_error = Some(error);
+                        continue;
+                    }
+                };
+
+                let expected_terms = terms_hash(&request.invoice_request, &path);
+
+                let reserve = Reserve::new(
+                    registration,
+                    source,
                     request.amount,
                     request.gateway_fee,
-                    bolt12.claim_premium(source),
-                ),
-                "amount does not cover fees or the fee exceeds the recipient's limit"
-            );
+                    expected_terms,
+                    &self.keypair,
+                );
+                let id = reserve.reservation_id();
 
-            // The path commits to the payment hash, so it must be built
-            // before the reservation that pins it.
-            let path = encode_payment_path(&payment_path(payment_hash).await?)?;
+                if let Err(error) = self
+                    .submit_bolt12_output(Bolt12Output::Reserve(reserve))
+                    .await
+                {
+                    last_error = Some(error);
+                    continue;
+                }
 
-            let expected_terms = terms_hash(&request.invoice_request, &path);
+                let reservation = self
+                    .module_api
+                    .bolt12_reservation(id)
+                    .await?
+                    .context("accepted reservation is missing")?;
 
-            let reserve = Reserve::new(
-                registration,
-                source,
-                request.amount,
-                request.gateway_fee,
-                expected_terms,
-                &self.keypair,
-            );
-            let id = reserve.reservation_id();
+                ensure!(
+                    reservation.registration == registration
+                        && reservation.source == source
+                        && reservation.payment_hash == payment_hash
+                        && reservation.gateway == self.keypair.public_key()
+                        && reservation.amount == request.amount
+                        && reservation.gateway_fee == request.gateway_fee
+                        && reservation.terms == expected_terms,
+                    "accepted reservation does not match requested terms or payment hash"
+                );
 
-            if let Err(error) = self
-                .submit_bolt12_output(Bolt12Output::Reserve(reserve))
-                .await
-            {
-                last_error = Some(error);
-
-                continue;
+                return Ok((reservation, path));
             }
-
-            let reservation = self
-                .module_api
-                .bolt12_reservation(id)
-                .await?
-                .context("accepted reservation is missing")?;
-
-            ensure!(
-                reservation.registration == registration
-                    && reservation.source == source
-                    && reservation.payment_hash == payment_hash
-                    && reservation.gateway == self.keypair.public_key()
-                    && reservation.amount == request.amount
-                    && reservation.gateway_fee == request.gateway_fee
-                    && reservation.terms == expected_terms,
-                "accepted reservation does not match requested terms or payment hash"
-            );
-
-            return Ok((reservation, path));
         }
 
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no reservation attempt was made")))
@@ -452,6 +534,7 @@ impl GatewayClientModuleV2 {
     /// the invoice, if a fresh receive is not funded because the claim
     /// deadline is too close or the federation does not answer, or if the
     /// funding transaction or completion operation could not be started.
+    #[allow(clippy::too_many_arguments)]
     async fn fresh_bolt12_receive_funding(
         &self,
         id: ReservationId,
@@ -460,7 +543,12 @@ impl GatewayClientModuleV2 {
         receive_operation_id: OperationId,
         amount_msat: u64,
         blocks_to_claim_deadline: u32,
+        receive_enabled: bool,
     ) -> Result<TransactionBuilder, RelayIncomingHtlcError> {
+        if !receive_enabled {
+            return Err(RelayIncomingHtlcError::ReceiveDisabled);
+        }
+
         // Funding pays the recipient the invoice amount less our fee, so
         // the payment we hold must be exactly the invoice amount.
         if amount_msat != reservation.amount.msats {
@@ -519,6 +607,7 @@ impl GatewayClientModuleV2 {
         circuit: IncomingCircuitKey,
         amount_msat: u64,
         blocks_to_claim_deadline: u32,
+        receive_enabled: bool,
     ) -> Result<(), RelayIncomingHtlcError> {
         let id = Reservation::id(reservation.registration, reservation.source);
         let receive_operation_id = receive_operation_id(id);
@@ -538,6 +627,7 @@ impl GatewayClientModuleV2 {
                     receive_operation_id,
                     amount_msat,
                     blocks_to_claim_deadline,
+                    receive_enabled,
                 )
                 .await
             {

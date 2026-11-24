@@ -1334,9 +1334,13 @@ impl Gateway {
             .load_payment_hash_owner(payment_request.payment_hash)
             .await;
 
+        // When a durable owner exists in `gateway_db`, it is authoritative: a
+        // BOLT12-owned hash is never routed to BOLT11 or another federation,
+        // and a BOLT11-owned hash is never routed to BOLT12.
         if let Some(owner) = &owner
             && owner.protocol == fedimint_gateway_server_db::PaymentHashProtocol::Bolt12
-            && self
+        {
+            if self
                 .try_handle_lightning_payment_bolt12(
                     &payment_request,
                     lightning_context,
@@ -1344,8 +1348,18 @@ impl Gateway {
                 )
                 .await
                 .is_ok()
-        {
-            return "bolt12";
+            {
+                return "bolt12";
+            }
+
+            warn!(
+                target: LOG_GATEWAY,
+                payment_hash = %payment_request.payment_hash,
+                federation_id = %owner.federation_id,
+                "BOLT12 payment hash owner did not match a local reservation: cancelling HTLC",
+            );
+            Self::cancel_unmatched_lightning_payment(payment_request, lightning_context).await;
+            return "cancel";
         }
 
         let lnv2_start = fedimint_core::time::now();
@@ -1386,9 +1400,9 @@ impl Gateway {
             return "ignore";
         }
 
-        if owner
-            .as_ref()
-            .is_none_or(|o| o.protocol != fedimint_gateway_server_db::PaymentHashProtocol::Bolt11)
+        // Pre-upgrade legacy BOLT12 fallback: only attempted when no durable
+        // `PaymentHashOwner` record exists at all.
+        if owner.is_none()
             && self
                 .try_handle_lightning_payment_bolt12(&payment_request, lightning_context, None)
                 .await
@@ -1488,8 +1502,8 @@ impl Gateway {
         // HTLC, not the sender-controlled onion forward amount, so a forged
         // `amt_to_forward` cannot satisfy the registered contract's amount
         // check while only a token amount is really locked.
-        let (contract, client) = self
-            .get_registered_incoming_contract_and_client_v2(
+        let (contract, client, federation_id, receive_enabled) = self
+            .get_registered_incoming_contract_and_client_for_htlc_v2(
                 PaymentImage::Hash(htlc_request.payment_hash),
                 htlc_request.incoming_amount_msat,
             )
@@ -1515,16 +1529,26 @@ impl Gateway {
         if let Err(err) = client
             .get_first_module::<GatewayClientModuleV2>()
             .expect("Must have client module")
-            .relay_incoming_htlc(
+            .relay_incoming_htlc_with_policy(
                 htlc_request.payment_hash,
                 htlc_request.incoming_chan_id,
                 htlc_request.htlc_id,
                 contract,
                 htlc_request.incoming_amount_msat,
                 blocks_to_claim_deadline,
+                receive_enabled,
             )
             .await
         {
+            if matches!(
+                err,
+                fedimint_gwv2_client::RelayIncomingHtlcError::ReceiveDisabled
+            ) {
+                return Err(PublicGatewayError::ReceiveDisabled {
+                    federation_id_prefix: federation_id.to_prefix(),
+                });
+            }
+
             if !err.htlc_may_be_failed_back() {
                 // The incoming contract is funded, so the recipient can claim
                 // it and the gateway is reimbursed only by settling this HTLC.
@@ -3857,6 +3881,21 @@ impl Gateway {
             }
         };
 
+        // Also reject any payment hash already claimed by a legacy BOLT12
+        // reservation persisted before `PaymentHashOwner` existed.
+        for client in self.federation_manager.read().await.clients() {
+            if let Ok(module) = client.value().get_first_module::<GatewayClientModuleV2>()
+                && module
+                    .bolt12_reservation_for_hash(payment_hash)
+                    .await
+                    .is_some()
+            {
+                return Err(PublicGatewayError::LNv2(LNv2Error::IncomingPayment(
+                    "PaymentHash is already registered".to_string(),
+                )));
+            }
+        }
+
         // Reserve the payment hash in the database before requesting the
         // invoice so a replayed payment hash is rejected without creating any
         // state on the Lightning node, and so the contract is guaranteed to be
@@ -4071,6 +4110,46 @@ impl Gateway {
             .into_value();
 
         Ok((registered_incoming_contract.contract, client))
+    }
+
+    /// Like [`Self::get_registered_incoming_contract_and_client_v2`], but
+    /// returns `receive_enabled` to the caller so HTLC relay can resume an
+    /// already-funded contract even after receives are disabled.
+    async fn get_registered_incoming_contract_and_client_for_htlc_v2(
+        &self,
+        payment_image: PaymentImage,
+        amount_msats: u64,
+    ) -> Result<(IncomingContract, ClientHandleArc, FederationId, bool)> {
+        let registered_incoming_contract = self
+            .gateway_db
+            .begin_transaction_nc()
+            .await
+            .load_registered_incoming_contract(payment_image)
+            .await
+            .ok_or(PublicGatewayError::LNv2(LNv2Error::IncomingPayment(
+                "No corresponding decryption contract available".to_string(),
+            )))?;
+
+        if registered_incoming_contract.incoming_amount_msats != amount_msats {
+            return Err(PublicGatewayError::LNv2(
+                LNv2Error::IncomingAmountMismatch {
+                    registered_msats: registered_incoming_contract.incoming_amount_msats,
+                    payment_msats: amount_msats,
+                },
+            ));
+        }
+
+        let federation_id = registered_incoming_contract.federation_id;
+        let receive_enabled = self.receive_enabled(federation_id).await;
+
+        let client = self.select_client(federation_id).await?.into_value();
+
+        Ok((
+            registered_incoming_contract.contract,
+            client,
+            federation_id,
+            receive_enabled,
+        ))
     }
 
     /// Completes (settles or cancels) an intercepted HTLC, retrying transient

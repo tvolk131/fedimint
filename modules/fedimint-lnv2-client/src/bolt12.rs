@@ -512,8 +512,9 @@ impl LightningClientModule {
                 .await?
             {
                 let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
-                let inserted = dbtx
-                    .insert_entry(
+                let existed = dbtx.get_value(&Bolt12OfferKey(index)).await.is_some();
+                if !existed {
+                    dbtx.insert_entry(
                         &Bolt12OfferKey(index),
                         &Bolt12OfferRecord {
                             registration,
@@ -521,29 +522,37 @@ impl LightningClientModule {
                             offer: None,
                         },
                     )
-                    .await
-                    .is_none();
+                    .await;
+                }
+                let advanced = index + 1 > highest_next;
                 highest_next = highest_next.max(index + 1);
                 dbtx.insert_entry(&Bolt12NextOfferIndexKey, &highest_next)
                     .await;
+                if !existed || advanced {
+                    // Atomically rewind the receive stream cursor in the same
+                    // transaction so an interruption cannot strand newly
+                    // discovered offers behind an already-advanced cursor.
+                    dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &0u64).await;
+                }
                 dbtx.commit_tx().await;
 
-                if inserted {
+                if !existed {
                     discovered += 1;
                 }
             } else if self.module_api.bolt12_recipient_used(claim_pk).await? {
-                highest_next = highest_next.max(index + 1);
                 let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
+                let advanced = index + 1 > highest_next;
+                highest_next = highest_next.max(index + 1);
                 dbtx.insert_entry(&Bolt12NextOfferIndexKey, &highest_next)
                     .await;
+                if advanced {
+                    // A pruned offer may still have unclaimed funded receives
+                    // earlier in the stream; rewind atomically with the index
+                    // bump so the receive loop scans them.
+                    dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &0u64).await;
+                }
                 dbtx.commit_tx().await;
             }
-        }
-
-        if discovered > 0 {
-            let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
-            dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &0u64).await;
-            dbtx.commit_tx().await;
         }
 
         Ok(discovered)
@@ -622,8 +631,16 @@ impl LightningClientModule {
                 .await;
         }
 
-        dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &next_index)
-            .await;
+        // Only advance the cursor if no concurrent recovery/rescan rewound it
+        // while we were long-polling `await_bolt12_receives`.
+        let current_cursor = dbtx
+            .get_value(&Bolt12ReceiveStreamIndexKey)
+            .await
+            .unwrap_or(0);
+        if current_cursor == stream_index {
+            dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &next_index)
+                .await;
+        }
 
         if let Err(err) = dbtx.commit_tx_result().await {
             warn!(

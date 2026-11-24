@@ -12,8 +12,10 @@ federations up to `N = 46`) jointly picks random preimages `r`, publishes
   active security with abort via a 4-way recursive BBCGI19 inner-product check
   over `GF((2^8)^16)`. Because the check power-batches `M` multiplication
   triples with a single `GF(2^128)` challenge `r` and folds across `k`
-  recursion rounds, the composed Schwartz–Zippel soundness error is at most
-  `(M + 6k + 2) / 2^128` (~110-bit soundness at `batch = 4`, ~103-bit at
+  recursion rounds (remapping the 4 excluded fold points shifts challenge
+  uniformity by at most `4 / 2^128` per fold round), the composed
+  Schwartz–Zippel soundness error is at most `(M + 10k + 2) / 2^128` (~110-bit
+  soundness at `batch = 4`, ~108-bit at `MAX_POOL_BATCH = 32`, ~103-bit at
   `MAX_TRIPLES = 30_000_000`). Every message a party sends is a deterministic
   function of its seed and the messages it received, so an aborted run can be
   replayed to find who deviated.

@@ -570,7 +570,8 @@ impl ReceiveContract {
                 .iter()
                 .zip(shares)
                 .all(|((ciphertext, binding), share)| {
-                    verify_non_identity_ciphertext(ciphertext, binding)
+                    !bool::from(ciphertext.pk.0.is_identity())
+                        && !bool::from(ciphertext.signature.0.is_identity())
                         && verify_dk_share(pk, share, ciphertext, binding)
                 })
     }
@@ -589,7 +590,8 @@ impl ReceiveContract {
                 .iter()
                 .zip(keys)
                 .all(|((ciphertext, binding), key)| {
-                    verify_non_identity_ciphertext(ciphertext, binding)
+                    !bool::from(ciphertext.pk.0.is_identity())
+                        && !bool::from(ciphertext.signature.0.is_identity())
                         && verify_agg_dk(agg_pk, key, ciphertext, binding)
                 })
     }

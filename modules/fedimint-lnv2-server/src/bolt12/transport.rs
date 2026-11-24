@@ -75,14 +75,22 @@ pub const MAX_RELAY_WITNESSES: usize = 256;
 /// committee peer, preventing colluding peers from starving honest victims.
 const MAX_CONCURRENT_RELAY_FETCHES_PER_PEER: usize = 2;
 
-/// Maximum concurrent `serve_packets` calls per committee requester.
-const MAX_CONCURRENT_FETCHES_PER_PEER: usize = 4;
+/// Minimum concurrent `serve_packets` permits per committee requester.
+/// Actual permit count scales with `committee.len() * MAX_CONCURRENT_RELAY_FETCHES_PER_PEER`
+/// so colluding recipients cannot trip rate-limit rejections between two honest
+/// peers.
+const MIN_CONCURRENT_FETCHES_PER_PEER: usize = 8;
 
 /// Number of upstream fetch attempts a relay performs on transient RPC/timeout
 /// failures before recording a `relay_missing` witness.
 const RELAY_FETCH_ATTEMPTS: usize = 3;
 
 const RELAY_FETCH_BACKOFF: Duration = Duration::from_millis(250);
+
+/// Timeout for a recipient's `BOLT12_MPC_RELAY_ENDPOINT` RPC, covering the
+/// relay's internal `RELAY_FETCH_ATTEMPTS * ATTEMPT_TIMEOUT` retry budget plus
+/// slack.
+const RELAY_PULL_TIMEOUT: Duration = Duration::from_secs(35);
 
 /// One bounded page of hex-encoded encrypted packets returned by fetch/relay
 /// endpoints.
@@ -444,6 +452,7 @@ pub fn verify_transport_fault_convicts(
     recipient_seed: &[u8; 32],
     fault: &TransportFault,
     max_chunks: u32,
+    max_message: usize,
 ) -> bool {
     match fault {
         TransportFault::BadPacket(bad) => {
@@ -463,9 +472,11 @@ pub fn verify_transport_fault_convicts(
                 return true;
             };
             // A single-chunk packet that decrypted cleanly still convicts
-            // `sender` if its inner signed message is malformed or invalid.
+            // `sender` if its decrypted payload exceeds the per-run message
+            // cap or its inner signed message is malformed or invalid.
             bad.chunks == 1
-                && !payload_has_valid_inner_sig(run, sender, recipient.0, bad.round, plaintext)
+                && (plaintext.len() > max_message.saturating_add(SIGNATURE_LEN)
+                    || !payload_has_valid_inner_sig(run, sender, recipient.0, bad.round, plaintext))
         }
         TransportFault::ChunkCountConflict(a, b) => {
             a.round == b.round
@@ -509,7 +520,8 @@ pub fn verify_transport_fault_convicts(
                 payload.extend_from_slice(&plaintext);
             }
 
-            !payload_has_valid_inner_sig(run, sender, recipient.0, first.round, payload)
+            payload.len() > max_message.saturating_add(SIGNATURE_LEN)
+                || !payload_has_valid_inner_sig(run, sender, recipient.0, first.round, payload)
         }
         TransportFault::MessageEquivocation {
             round,
@@ -518,6 +530,8 @@ pub fn verify_transport_fault_convicts(
             second,
         } => {
             *fault_sender == sender.0
+                && first.message.len() <= max_message
+                && second.message.len() <= max_message
                 && first.message != second.message
                 && verify_message(run, sender, recipient.0, *round, first)
                 && verify_message(run, sender, recipient.0, *round, second)
@@ -787,6 +801,11 @@ impl Channels {
         let mut relay_sems = BTreeMap::new();
         let mut fetch_sems = BTreeMap::new();
 
+        let fetch_permits = committee
+            .len()
+            .saturating_mul(MAX_CONCURRENT_RELAY_FETCHES_PER_PEER)
+            .max(MIN_CONCURRENT_FETCHES_PER_PEER);
+
         for peer in committee.iter().filter(|peer| **peer != me) {
             let public = transport_keys
                 .get(peer)
@@ -804,7 +823,7 @@ impl Channels {
             inboxes.insert(*peer, Inbox::default());
             public_keys.insert(*peer, *public);
             relay_sems.insert(*peer, Semaphore::new(MAX_CONCURRENT_RELAY_FETCHES_PER_PEER));
-            fetch_sems.insert(*peer, Semaphore::new(MAX_CONCURRENT_FETCHES_PER_PEER));
+            fetch_sems.insert(*peer, Semaphore::new(fetch_permits));
         }
 
         Ok(Arc::new(Self {
@@ -860,37 +879,47 @@ impl Channels {
     }
 
     /// Relay witnesses, round-0 ephemeral-key proofs, and verifiable transport
-    /// faults recorded during this run.
+    /// faults recorded during this run. Each lock is acquired and released
+    /// independently to avoid any lock-order inversion with `receive()`.
     pub fn relay_evidence(&self) -> RelayEvidence {
+        let relay_missing = self
+            .relay_missing
+            .lock()
+            .expect("not poisoned")
+            .iter()
+            .copied()
+            .collect();
+        let faults = self
+            .faults
+            .lock()
+            .expect("not poisoned")
+            .values()
+            .cloned()
+            .collect();
+        let r0_packets = self
+            .state
+            .lock()
+            .expect("not poisoned")
+            .r0_packets
+            .values()
+            .cloned()
+            .collect();
+
         RelayEvidence {
-            relay_missing: self
-                .relay_missing
-                .lock()
-                .expect("not poisoned")
-                .iter()
-                .copied()
-                .collect(),
-            faults: self
-                .faults
-                .lock()
-                .expect("not poisoned")
-                .values()
-                .cloned()
-                .collect(),
-            r0_packets: self
-                .state
-                .lock()
-                .expect("not poisoned")
-                .r0_packets
-                .values()
-                .cloned()
-                .collect(),
+            relay_missing,
+            faults,
+            r0_packets,
         }
     }
 
     /// Serve one bounded page of cached encrypted packets this guardian sent
     /// to `recipient` in `round`, after authenticating `request.requester` and
     /// verifying `request.sender == self.me`.
+    ///
+    /// If `request.start_chunk >= total_chunks`, returns chunk `0` so the
+    /// requesting relay receives a cryptographically signed proof of
+    /// `total_chunks` and does not mistake an out-of-range requester offset for
+    /// sender withholding.
     pub fn serve_packets(&self, request: &FetchRequest) -> Result<(u32, Vec<MpcPacket>)> {
         ensure!(request.run == self.run, "Wrong run");
         ensure!(
@@ -911,17 +940,19 @@ impl Channels {
             "Recipient is not a committee peer"
         );
 
+        // Verify the requester's signature BEFORE consuming a rate-limit permit
+        // so unauthenticated spoofed requests cannot starve an honest relay.
+        ensure!(
+            request.verify(requester_pk),
+            "Fetch request signature is invalid"
+        );
+
         let _permit = self
             .fetch_sems
             .get(&request.requester)
             .context("Requester is not a committee peer")?
             .try_acquire()
             .map_err(|_| anyhow::anyhow!("Fetch rate limit exceeded"))?;
-
-        ensure!(
-            request.verify(requester_pk),
-            "Fetch request signature is invalid"
-        );
 
         let state = self.state.lock().expect("not poisoned");
         ensure!(
@@ -935,10 +966,12 @@ impl Channels {
             .context("Packets for that round are not available")?;
 
         let total_chunks = u32::try_from(packets.len()).expect("bounded by MAX_CHUNKS");
-        ensure!(
-            request.start_chunk < total_chunks,
-            "Fetch start_chunk is out of range"
-        );
+        ensure!(total_chunks > 0, "Empty packet cache");
+
+        if request.start_chunk >= total_chunks {
+            // Return chunk 0 as a signed proof that `total_chunks <= start_chunk`.
+            return Ok((total_chunks, vec![packets[0].clone()]));
+        }
 
         let start = request.start_chunk as usize;
         let end = request
@@ -949,15 +982,7 @@ impl Channels {
         Ok((total_chunks, packets[start..end].to_vec()))
     }
 
-    /// Fetch one bounded page of `request.sender`'s encrypted packets for
-    /// `request.recipient` in `request.round` and verify their outer
-    /// signatures, retrying transient RPC/timeout failures before recording a
-    /// `relay_missing` witness.
-    pub async fn relay_fetch(
-        &self,
-        api: &DynModuleApi,
-        request: &RelayRequest,
-    ) -> Result<(u32, Vec<MpcPacket>)> {
+    fn validate_relay_request(&self, request: &RelayRequest) -> Result<PublicKey> {
         ensure!(request.run == self.run, "Wrong run");
         ensure!(
             request.sender != self.me
@@ -991,6 +1016,20 @@ impl Channels {
                 "Relay request is outside the active round window"
             );
         }
+
+        Ok(sender_pk)
+    }
+
+    /// Fetch one bounded page of `request.sender`'s encrypted packets for
+    /// `request.recipient` in `request.round` and verify their outer
+    /// signatures, retrying transient RPC/timeout failures before recording a
+    /// `relay_missing` witness.
+    pub async fn relay_fetch(
+        &self,
+        api: &DynModuleApi,
+        request: &RelayRequest,
+    ) -> Result<(u32, Vec<MpcPacket>)> {
+        let sender_pk = self.validate_relay_request(request)?;
 
         let _permit = self
             .relay_sems
@@ -1049,20 +1088,31 @@ impl Channels {
             }
         }
 
-        if validated.is_ok() {
-            self.relay_missing.lock().expect("not poisoned").remove(&(
-                request.sender,
-                request.recipient,
-                request.round,
-            ));
-        } else if self.has_received(request.sender, request.round) {
-            let mut missing = self.relay_missing.lock().expect("not poisoned");
-            if missing.len() < MAX_RELAY_WITNESSES {
-                missing.insert((request.sender, request.recipient, request.round));
+        match validated {
+            Ok(RelayedPage::InRange(total_chunks, packets)) => {
+                self.relay_missing.lock().expect("not poisoned").remove(&(
+                    request.sender,
+                    request.recipient,
+                    request.round,
+                ));
+                Ok((total_chunks, packets))
+            }
+            Ok(RelayedPage::OutOfRangeProof) => {
+                // Sender proved via a signed chunk-0 envelope that the actual
+                // message has <= `request.start_chunk` chunks. Reject the
+                // requester's bogus offset WITHOUT recording `relay_missing`.
+                bail!("Relay start_chunk exceeds sender's message chunk count");
+            }
+            Err(err) => {
+                if self.has_received(request.sender, request.round) {
+                    let mut missing = self.relay_missing.lock().expect("not poisoned");
+                    if missing.len() < MAX_RELAY_WITNESSES {
+                        missing.insert((request.sender, request.recipient, request.round));
+                    }
+                }
+                Err(err)
             }
         }
-
-        validated
     }
 
     /// Check the sender's signature on a completed message and record it
@@ -1071,6 +1121,10 @@ impl Channels {
     /// `transcript` if a conflicting signed message arrives for the same round.
     fn accept(&self, sender: PeerId, round: u64, mut payload: Vec<u8>) -> Result<Option<Vec<u8>>> {
         ensure!(payload.len() >= SIGNATURE_LEN, "The message is unsigned");
+        ensure!(
+            payload.len() <= self.limits.message.saturating_add(SIGNATURE_LEN),
+            "The message exceeds the per-run limit"
+        );
 
         let signature = Signature::from_slice(&payload.split_off(payload.len() - SIGNATURE_LEN))?;
 
@@ -1546,6 +1600,13 @@ impl Channels {
     }
 }
 
+enum RelayedPage {
+    InRange(u32, Vec<MpcPacket>),
+    /// Sender returned a validly envelope-signed chunk 0 whose `chunks` field
+    /// proves `start_chunk >= total_chunks`.
+    OutOfRangeProof,
+}
+
 fn validate_relayed_page(
     run: u64,
     sender: (PeerId, &PublicKey),
@@ -1554,15 +1615,29 @@ fn validate_relayed_page(
     start_chunk: u32,
     max_chunks: u32,
     page: &PacketPage,
-) -> Result<(u32, Vec<MpcPacket>)> {
+) -> Result<RelayedPage> {
     ensure!(
         (1..=max_chunks).contains(&page.total_chunks),
         "Relay returned invalid total_chunks"
     );
-    ensure!(
-        start_chunk < page.total_chunks,
-        "Relay start_chunk is out of range"
-    );
+
+    if start_chunk >= page.total_chunks {
+        ensure!(
+            page.packets.len() == 1,
+            "Relay out-of-range proof must carry chunk 0"
+        );
+        let proof = decode_packet(&page.packets[0])?;
+        ensure!(
+            proof.run == run
+                && proof.sender == sender.0
+                && proof.round == round
+                && proof.chunk == 0
+                && proof.chunks == page.total_chunks
+                && verify_packet_envelope(run, sender, recipient, &proof),
+            "Relay out-of-range proof failed verification"
+        );
+        return Ok(RelayedPage::OutOfRangeProof);
+    }
 
     let expected_len = page
         .total_chunks
@@ -1593,7 +1668,7 @@ fn validate_relayed_page(
         packets.push(packet);
     }
 
-    Ok((page.total_chunks, packets))
+    Ok(RelayedPage::InRange(page.total_chunks, packets))
 }
 
 /// Deliver `packet` to `peer`, retrying until it is accepted.
@@ -1635,7 +1710,7 @@ async fn pull_from_relay(
             .consensus_encode_to_hex();
 
         let response = fedimint_core::runtime::timeout(
-            ATTEMPT_TIMEOUT,
+            RELAY_PULL_TIMEOUT,
             api.request_single_peer::<PacketPage>(
                 BOLT12_MPC_RELAY_ENDPOINT.to_owned(),
                 ApiRequestErased::new(request),

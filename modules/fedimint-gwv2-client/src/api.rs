@@ -7,8 +7,8 @@ use fedimint_lnv2_common::bolt12::{
     Registration, RegistrationId, Reservation, ReservationId, StockItem,
 };
 use fedimint_lnv2_common::endpoint_constants::{
-    BOLT12_NEXT_POOL_ENDPOINT, BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
-    BOLT12_RESERVATION_ENDPOINT, CONSENSUS_BLOCK_COUNT_ENDPOINT,
+    BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_POOL_ITEMS_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
+    BOLT12_RESERVATION_ENDPOINT, BOLT12_STOCK_ITEMS_ENDPOINT, CONSENSUS_BLOCK_COUNT_ENDPOINT,
     OUTGOING_CONTRACT_EXPIRATION_ENDPOINT,
 };
 
@@ -34,14 +34,21 @@ pub trait GatewayFederationApi {
         registration: RegistrationId,
     ) -> FederationResult<Option<(u64, StockItem)>>;
 
+    /// Up to 8 unused stock items of `registration` starting at `min_index`.
+    async fn bolt12_stock_items(
+        &self,
+        registration: RegistrationId,
+        min_index: u64,
+    ) -> FederationResult<Vec<(u64, StockItem)>>;
+
     /// An unfunded reservation.
     async fn bolt12_reservation(
         &self,
         reservation: ReservationId,
     ) -> FederationResult<Option<Reservation>>;
 
-    /// The lowest-indexed generated preimage not yet reserved.
-    async fn bolt12_next_pool(&self) -> FederationResult<Option<(u64, [u8; 32])>>;
+    /// Up to 8 unused generated preimages starting at `min_index`.
+    async fn bolt12_pool_items(&self, min_index: u64) -> FederationResult<Vec<(u64, [u8; 32])>>;
 }
 
 #[apply(async_trait_maybe_send!)]
@@ -90,6 +97,18 @@ where
         .await
     }
 
+    async fn bolt12_stock_items(
+        &self,
+        registration: RegistrationId,
+        min_index: u64,
+    ) -> FederationResult<Vec<(u64, StockItem)>> {
+        self.request_current_consensus(
+            BOLT12_STOCK_ITEMS_ENDPOINT.to_string(),
+            ApiRequestErased::new((registration, min_index)),
+        )
+        .await
+    }
+
     async fn bolt12_reservation(
         &self,
         reservation: ReservationId,
@@ -101,10 +120,10 @@ where
         .await
     }
 
-    async fn bolt12_next_pool(&self) -> FederationResult<Option<(u64, [u8; 32])>> {
+    async fn bolt12_pool_items(&self, min_index: u64) -> FederationResult<Vec<(u64, [u8; 32])>> {
         self.request_current_consensus(
-            BOLT12_NEXT_POOL_ENDPOINT.to_string(),
-            ApiRequestErased::new(()),
+            BOLT12_POOL_ITEMS_ENDPOINT.to_string(),
+            ApiRequestErased::new(min_index),
         )
         .await
     }

@@ -16,9 +16,10 @@ use fedimint_lnv2_common::endpoint_constants::{
     BOLT12_AWAIT_RECEIVES_ENDPOINT, BOLT12_CONTRACT_ENDPOINT, BOLT12_DECRYPTION_SHARES_ENDPOINT,
     BOLT12_GATEWAY_APPROVED_ENDPOINT, BOLT12_MPC_ENDPOINT, BOLT12_MPC_EVIDENCE_ENDPOINT,
     BOLT12_MPC_FETCH_ENDPOINT, BOLT12_MPC_RELAY_ENDPOINT, BOLT12_NEXT_POOL_ENDPOINT,
-    BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_NONCE_ENDPOINT, BOLT12_RECIPIENT_USED_ENDPOINT,
-    BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT, BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT,
-    BOLT12_RESERVATION_ENDPOINT, BOLT12_SET_GATEWAY_VOTE_ENDPOINT, BOLT12_SIGN_ENDPOINT,
+    BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_NONCE_ENDPOINT, BOLT12_POOL_ITEMS_ENDPOINT,
+    BOLT12_RECIPIENT_USED_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
+    BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT, BOLT12_RESERVATION_ENDPOINT,
+    BOLT12_SET_GATEWAY_VOTE_ENDPOINT, BOLT12_SIGN_ENDPOINT, BOLT12_STOCK_ITEMS_ENDPOINT,
 };
 use futures::StreamExt;
 use tpe::DecryptionKeyShare;
@@ -27,8 +28,9 @@ use super::{signer, transport, worker};
 use crate::Lightning;
 use crate::db::{
     Bolt12ContractKey, Bolt12DecryptionSharesKey, Bolt12GatewayDesiredVoteKey, Bolt12HandleKey,
-    Bolt12PoolItemPrefix, Bolt12RecipientKey, Bolt12RegistrationKey, Bolt12ReservationKey,
-    Bolt12StockRegistrationPrefix, Bolt12StreamIndexKey, Bolt12StreamKey,
+    Bolt12PoolItemKey, Bolt12PoolItemPrefix, Bolt12RecipientKey, Bolt12RegistrationKey,
+    Bolt12ReservationKey, Bolt12StockKey, Bolt12StockRegistrationPrefix, Bolt12StreamIndexKey,
+    Bolt12StreamKey,
 };
 
 /// Largest batch of receives returned by one stream request.
@@ -72,6 +74,12 @@ async fn await_receives(db: Database, start: u64, n: usize) -> (Vec<StreamedRece
 
 impl Lightning {
     pub(crate) fn bolt12_api_endpoints() -> Vec<ApiEndpoint<Self>> {
+        let mut endpoints = Self::bolt12_registration_endpoints();
+        endpoints.extend(Self::bolt12_receive_and_gateway_endpoints());
+        endpoints
+    }
+
+    fn bolt12_registration_endpoints() -> Vec<ApiEndpoint<Self>> {
         vec![
             public_api_endpoint! {
                 BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
@@ -123,6 +131,30 @@ impl Lightning {
                     Ok(next.map(|(key, item)| (key.1, item)))
                 }
             },
+            public_api_endpoint! {
+                BOLT12_STOCK_ITEMS_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |_module: &Lightning, context, params: (RegistrationId, u64)| -> Vec<(u64, StockItem)> {
+                    let (id, min_index) = params;
+                    let db = context.db();
+                    let mut dbtx = db.begin_transaction_nc().await;
+
+                    let items = dbtx
+                        .find_by_range(Bolt12StockKey(id, min_index)..Bolt12StockKey(id, u64::MAX))
+                        .await
+                        .take(8)
+                        .map(|(key, item)| (key.1, item))
+                        .collect()
+                        .await;
+
+                    Ok(items)
+                }
+            },
+        ]
+    }
+
+    fn bolt12_receive_and_gateway_endpoints() -> Vec<ApiEndpoint<Self>> {
+        vec![
             public_api_endpoint! {
                 BOLT12_RESERVATION_ENDPOINT,
                 ApiVersion::new(0, 0),
@@ -199,6 +231,24 @@ impl Lightning {
                     let next = dbtx.find_by_prefix(&Bolt12PoolItemPrefix).await.next().await;
 
                     Ok(next.map(|(key, item)| (key.0, item.payment_hash)))
+                }
+            },
+            public_api_endpoint! {
+                BOLT12_POOL_ITEMS_ENDPOINT,
+                ApiVersion::new(0, 0),
+                async |_module: &Lightning, context, min_index: u64| -> Vec<(u64, [u8; 32])> {
+                    let db = context.db();
+                    let mut dbtx = db.begin_transaction_nc().await;
+
+                    let items = dbtx
+                        .find_by_range(Bolt12PoolItemKey(min_index)..Bolt12PoolItemKey(u64::MAX))
+                        .await
+                        .take(8)
+                        .map(|(key, item)| (key.0, item.payment_hash))
+                        .collect()
+                        .await;
+
+                    Ok(items)
                 }
             },
             public_api_endpoint! {
@@ -292,6 +342,12 @@ impl Lightning {
 
                     let request = worker::decode_evidence_request(&request)
                         .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+                    if request.target != module.our_peer_id {
+                        return Err(ApiError::bad_request(
+                            "Evidence request is for another guardian".to_string(),
+                        ));
+                    }
 
                     let requester_pk = bolt12
                         .transport_keys

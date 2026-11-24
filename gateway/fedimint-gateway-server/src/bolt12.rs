@@ -16,7 +16,7 @@ use fedimint_core::util::FmtCompact as _;
 use fedimint_core::{Amount, crit};
 use fedimint_gateway_server_db::{GatewayDbtxNcExt as _, PaymentHashOwner, PaymentHashProtocol};
 use fedimint_gwv2_client::bolt12::Bolt12InvoiceRequest;
-use fedimint_gwv2_client::{GatewayClientModuleV2, IncomingCircuitKey, RelayIncomingHtlcError};
+use fedimint_gwv2_client::{GatewayClientModuleV2, IncomingCircuitKey};
 use fedimint_lightning::bolt12::{Bolt12Request, Bolt12RequestFilter};
 use fedimint_lightning::{
     ILnRpcClient, InterceptPaymentRequest, InterceptPaymentResponse, LightningContext,
@@ -392,36 +392,32 @@ impl Gateway {
                 continue;
             };
 
-            let result: std::result::Result<(), Option<RelayIncomingHtlcError>> =
-                if self.receive_enabled(module.federation_id).await {
-                    let current_block_height = lightning_context
-                        .lnrpc
-                        .info()
-                        .await
-                        .ok()
-                        .map(|info| info.block_height);
+            // Consult `relay_bolt12_htlc` BEFORE applying `receive_enabled` so
+            // an already-funded receive redelivered after a restart is always
+            // resumed and settled instead of being cancelled.
+            let receive_enabled = self.receive_enabled(module.federation_id).await;
+            let current_block_height = lightning_context
+                .lnrpc
+                .info()
+                .await
+                .ok()
+                .map(|info| info.block_height);
 
-                    module
-                        .relay_bolt12_htlc(
-                            reservation,
-                            htlc_request.payment_hash,
-                            IncomingCircuitKey {
-                                incoming_chan_id: htlc_request.incoming_chan_id,
-                                htlc_id: htlc_request.htlc_id,
-                            },
-                            htlc_request.incoming_amount_msat,
-                            htlc_request.lnv2_blocks_to_claim_deadline(current_block_height),
-                        )
-                        .await
-                        .map_err(Some)
-                } else {
-                    Err(None)
-                };
-
-            if let Err(err) = result {
-                if let Some(relay_err) = &err
-                    && !relay_err.htlc_may_be_failed_back()
-                {
+            if let Err(relay_err) = module
+                .relay_bolt12_htlc(
+                    reservation,
+                    htlc_request.payment_hash,
+                    IncomingCircuitKey {
+                        incoming_chan_id: htlc_request.incoming_chan_id,
+                        htlc_id: htlc_request.htlc_id,
+                    },
+                    htlc_request.incoming_amount_msat,
+                    htlc_request.lnv2_blocks_to_claim_deadline(current_block_height),
+                    receive_enabled,
+                )
+                .await
+            {
+                if !relay_err.htlc_may_be_failed_back() {
                     crit!(
                         target: LOG_GATEWAY,
                         err = %relay_err.fmt_compact(),
@@ -431,14 +427,7 @@ impl Gateway {
                     return Ok(());
                 }
 
-                match &err {
-                    Some(relay_err) => {
-                        warn!(target: LOG_GATEWAY, err = %relay_err.fmt_compact(), "Failing a federated BOLT12 payment");
-                    }
-                    None => {
-                        warn!(target: LOG_GATEWAY, "Failing a federated BOLT12 payment: receives are disabled for this federation");
-                    }
-                }
+                warn!(target: LOG_GATEWAY, err = %relay_err.fmt_compact(), "Failing a federated BOLT12 payment");
 
                 let outcome = InterceptPaymentResponse {
                     action: PaymentAction::Cancel,

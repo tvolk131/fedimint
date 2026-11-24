@@ -1500,6 +1500,7 @@ async fn transport_faults_convict_malicious_sender() -> Result<()> {
             &seeds[1],
             fault,
             limits.chunks,
+            limits.message,
         )
     };
 
@@ -1621,6 +1622,7 @@ async fn transport_honest_packets_resist_framing() -> Result<()> {
             &seeds[1],
             &TransportFault::BadPacket(to_bad(&honest_single[0])),
             limits.chunks,
+            limits.message,
         ),
         "honest single-chunk packet must never convict sender"
     );
@@ -1642,6 +1644,7 @@ async fn transport_honest_packets_resist_framing() -> Result<()> {
             &seeds[1],
             &TransportFault::BadMultiChunk(honest_multi.iter().map(to_bad).collect()),
             limits.chunks,
+            limits.message,
         ),
         "honest multi-chunk packet must never convict sender"
     );
@@ -1868,6 +1871,7 @@ async fn post_take_equivocation_does_not_overwrite_and_convicts() -> Result<()> 
         &seeds[1],
         &ev.faults[0],
         limits.chunks,
+        limits.message,
     ));
 
     Ok(())
@@ -2142,6 +2146,223 @@ async fn funding_reservation_prunes_local_nonce_keys() -> Result<()> {
             .await
             .is_none()
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn oversized_equivocation_convicts_sender_without_poisoning_evidence() -> Result<()> {
+    use fedimint_core::secp256k1::SecretKey;
+
+    use crate::bolt12::transport::{
+        CHUNK, ChannelLimits, Channels, message_digest, verify_transport_fault_convicts,
+    };
+    use crate::db::TransportFault;
+
+    let committee = peers(&[0, 1, 2]);
+    // Default config: N = 4, f = 1, batch = 4 -> limits.message = 92_441,
+    // limits.chunks = 3 (3 * 32_768 - 64 = 98_240 > limits.message).
+    let limits = ChannelLimits::for_run(3, 1, 4);
+    assert!(limits.chunks as usize * CHUNK - 64 > limits.message);
+
+    let secrets: Vec<SecretKey> = (0..3).map(|_| SecretKey::new(&mut OsRng)).collect();
+    let keys: BTreeMap<PeerId, _> = (0..3u16)
+        .map(|p| {
+            (
+                PeerId::from(p),
+                secrets[usize::from(p)].public_key(SECP256K1),
+            )
+        })
+        .collect();
+    let seeds = [[11u8; 32], [22u8; 32], [33u8; 32]];
+    let signer0 = Keypair::from_secret_key(SECP256K1, &secrets[0]);
+
+    let ch0 = Channels::new(
+        0,
+        PeerId::from(0),
+        committee.clone(),
+        limits,
+        &seeds[0],
+        &secrets[0],
+        &keys,
+    )?;
+    let ch1 = Channels::new(
+        0,
+        PeerId::from(1),
+        committee,
+        limits,
+        &seeds[1],
+        &secrets[1],
+        &keys,
+    )?;
+
+    // First send an honest round-0 message.
+    for pkt in ch0.packets(PeerId::from(1), 0, b"honest-r0")? {
+        ch1.receive(&pkt)?;
+    }
+
+    // Now malicious sender 0 sends a validly signed & encrypted 3-chunk
+    // round-0 message whose plaintext length exceeds `limits.message` by 500
+    // bytes while still fitting inside `limits.chunks * CHUNK - 64`.
+    let oversized_msg = vec![0xab; limits.message + 500];
+    let inner_sig = SECP256K1.sign_schnorr(
+        &message_digest(0, PeerId::from(0), PeerId::from(1), 0, &oversized_msg),
+        &signer0,
+    );
+    let mut payload = oversized_msg;
+    payload.extend_from_slice(inner_sig.as_ref());
+    let chunks: Vec<&[u8]> = payload.chunks(CHUNK).collect();
+    assert_eq!(chunks.len(), limits.chunks as usize);
+
+    let mut last_res = Ok(());
+    for (idx, chunk) in chunks.iter().enumerate() {
+        let pkt = encrypt_test_packet(
+            &seeds[0],
+            &signer0,
+            &keys[&PeerId::from(1)],
+            0,
+            u32::try_from(idx)?,
+            u32::try_from(chunks.len())?,
+            chunk,
+        );
+        last_res = ch1.receive(&pkt);
+    }
+    assert!(last_res.is_err());
+
+    // Victim must record BadMultiChunk (NOT oversized MessageEquivocation),
+    // its evidence must satisfy the strict evidence bounds, and peer 0 must be
+    // convicted.
+    let ev = ch1.relay_evidence();
+    assert!(matches!(
+        ev.faults.as_slice(),
+        [TransportFault::BadMultiChunk(_)]
+    ));
+    assert!(ev.faults[0].max_equivocation_msg_len() <= limits.message);
+    assert!(verify_transport_fault_convicts(
+        0,
+        (PeerId::from(0), &keys[&PeerId::from(0)]),
+        (PeerId::from(1), &keys[&PeerId::from(1)]),
+        &seeds[0],
+        &seeds[1],
+        &ev.faults[0],
+        limits.chunks,
+        limits.message,
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn degree_two_perturbation_cannot_frame_honest_guardians() -> Result<()> {
+    use fedimint_lnv2_common::bolt12::Bolt12Unlock;
+    use mpc::field::evaluate;
+
+    // N = 7 (f = 2, committee = [0, 1, 2, 3, 4], threshold = 3).
+    // Malicious peers {0, 1} perturb their honest shares by E(x) = x * (x + x_3)
+    // (where x_3 = point(3) is honest peer 2's evaluation point). The fake
+    // polynomial Q = P + E satisfies Q(0) = P(0) = preimage and Q(x_3) = P(x_3),
+    // so witness subset [0, 1, 2] recovers the true preimage while reporting
+    // honest peers {3, 4} as rejected. Consensus must clear the sticky committee
+    // WITHOUT blaming honest peers 3 or 4.
+    let mut fed = Federation::with_guardians(7);
+    fed.start(0, NOW).await?;
+    let committee = fed.committee().await.expect("run started");
+    assert_eq!(committee.len(), 5);
+
+    let preimage: [u8; 32] = rand::random();
+    let payment_hash = sha256::Hash::hash(&preimage).to_byte_array();
+    let c1: [u8; 32] = rand::random();
+    let c2: [u8; 32] = rand::random();
+    let x_h0 = point(3); // honest position 2
+
+    let mut submissions: BTreeMap<PeerId, Vec<PoolShare>> = BTreeMap::new();
+    for (pos, &peer) in committee.iter().enumerate() {
+        let x = point(pos + 1);
+        let mut val: [u8; 32] = std::array::from_fn(|b| {
+            let p_x = evaluate(&[F(preimage[b]), F(c1[b]), F(c2[b])], x);
+            if pos < 2 {
+                // Perturb malicious shares 0 and 1 by E(x) = x * (x + x_h0).
+                let e_x = x * (x + x_h0);
+                (p_x + e_x).0
+            } else {
+                p_x.0
+            }
+        });
+        let share = seal(&fed, 0, u16::try_from(pos)?, payment_hash, &val);
+        val.fill(0);
+        // Submit 2 items (batch = 2); item 1 is identical dummy valid share.
+        submissions.insert(peer, vec![share.clone(), share]);
+    }
+
+    // Use a distinct payment hash for item 1 so submissions pass uniqueness.
+    let preimage2: [u8; 32] = rand::random();
+    let payment_hash2 = sha256::Hash::hash(&preimage2).to_byte_array();
+    for (pos, &peer) in committee.iter().enumerate() {
+        let share2 = seal(&fed, 0, u16::try_from(pos)?, payment_hash2, &preimage2);
+        submissions.get_mut(&peer).expect("peer")[1] = share2;
+    }
+
+    for (peer, shares) in &submissions {
+        fed.submit(*peer, 0, shares.clone()).await?;
+    }
+
+    let offer = pooled_offer(&mut fed).await;
+    let gw = gateway();
+    for peer in 0..5u16 {
+        fed.vote(peer, gw.public_key(), true).await?;
+    }
+
+    let request = reserve_pool(&offer, 0, Amount::from_sats(10_000), &gw);
+    let reservation_id = request.reservation_id();
+    fed.apply(Bolt12Output::Reserve(request), NOW).await?;
+    let (outpoint, _) = fed
+        .apply(Bolt12Output::Receive(reservation_id), NOW + 30)
+        .await?;
+
+    // Aggregate decryption keys from 5 of 7 guardians.
+    let contract = fed.contract(outpoint).await;
+    let mut dk_shares: BTreeMap<u64, Vec<tpe::DecryptionKeyShare>> = BTreeMap::new();
+    for peer in 0..5u16 {
+        dk_shares.insert(
+            u64::from(peer),
+            contract
+                .ciphertexts()
+                .iter()
+                .map(|(ct, _)| tpe::create_dk_share(&fed.sks[&PeerId::from(peer)], ct))
+                .collect(),
+        );
+    }
+    let keys: Vec<tpe::AggregateDecryptionKey> = (0..contract.ciphertexts().len())
+        .map(|i| {
+            tpe::aggregate_dk_shares(
+                &dk_shares
+                    .iter()
+                    .map(|(p, shares)| (*p, shares[i]))
+                    .collect(),
+            )
+        })
+        .collect();
+
+    // Spend using the attacker's adversarial witness [0, 1, 2] which agrees
+    // with Q(0) = preimage and flags honest peers [3, 4] as rejected.
+    let adversarial_unlock = Bolt12Unlock::new_pool(keys, Some(vec![0, 1, 2]));
+    fed.spend(outpoint, &adversarial_unlock).await?;
+
+    // Honest peers 3 and 4 MUST NOT be blamed!
+    for peer in 0..7u16 {
+        assert!(
+            fed.blame(peer).await.is_none(),
+            "peer {peer} must not be blamed from ambiguous degree >= 2 decoding"
+        );
+    }
+    // Sticky committee MUST have been cleared so the poisoned committee rotates.
+    let sticky = fed
+        .db
+        .begin_transaction_nc()
+        .await
+        .get_value(&crate::db::Bolt12PoolStickyCommitteeKey)
+        .await;
+    assert!(sticky.is_none(), "sticky committee must be cleared");
 
     Ok(())
 }
