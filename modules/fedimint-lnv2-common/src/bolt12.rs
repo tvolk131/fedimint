@@ -873,8 +873,8 @@ impl Bolt12Config {
     pub const DEFAULT_STOCK_ITEM_FEE: Amount = Amount::from_sats(1);
     pub const DEFAULT_RECEIVE_FEE: Amount = Amount::ZERO;
     pub const DEFAULT_POOL_FEE: Amount = Amount::from_sats(20);
-    pub const DEFAULT_POOL_TARGET: u64 = 8;
-    pub const DEFAULT_POOL_BATCH: u64 = 4;
+    pub const DEFAULT_POOL_TARGET: u64 = 32;
+    pub const DEFAULT_POOL_BATCH: u64 = 8;
 
     /// The extra fee spending a receive from `source` costs. Charged on the
     /// refund too, which only happens if guardians sealed bad shares.

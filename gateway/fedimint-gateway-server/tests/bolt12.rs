@@ -55,7 +55,11 @@ fn enable_bolt12() {
     ENABLE.call_once(|| {
         // SAFETY: runs once, before this test spawns any federation task that
         // reads the environment; other tests block on the `Once` until done.
-        unsafe { std::env::set_var("FM_ENABLE_FEDERATED_BOLT12", "1") };
+        unsafe {
+            std::env::set_var("FM_ENABLE_FEDERATED_BOLT12", "1");
+            std::env::set_var("FM_BOLT12_POOL_TARGET", "8");
+            std::env::set_var("FM_BOLT12_POOL_BATCH", "4");
+        }
     });
 }
 

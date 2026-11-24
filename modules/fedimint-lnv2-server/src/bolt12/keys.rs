@@ -25,6 +25,20 @@ use serde::{Deserialize, Serialize};
 
 /// Set while generating configuration to enable federated BOLT12 receives.
 pub const FM_ENABLE_FEDERATED_BOLT12_ENV: &str = "FM_ENABLE_FEDERATED_BOLT12";
+/// Optional override for `Bolt12Config::pool_target` during federation setup.
+pub const FM_BOLT12_POOL_TARGET_ENV: &str = "FM_BOLT12_POOL_TARGET";
+/// Optional override for `Bolt12Config::pool_batch` during federation setup.
+pub const FM_BOLT12_POOL_BATCH_ENV: &str = "FM_BOLT12_POOL_BATCH";
+
+fn parse_env_u64(name: &str, default: u64) -> Result<u64> {
+    match std::env::var(name) {
+        Ok(raw) => raw
+            .parse::<u64>()
+            .with_context(|| format!("invalid {name} value: {raw:?}")),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(err) => Err(err).with_context(|| format!("failed to read {name}")),
+    }
+}
 
 /// Fewer guardians cannot tolerate a single fault.
 const MIN_GUARDIANS: usize = 4;
@@ -53,10 +67,20 @@ fn config(
     transport_keys: BTreeMap<PeerId, PublicKey>,
 ) -> Result<Bolt12Config> {
     let pool_target = if PoolRun::degree(guardians) <= MAX_POOL_DEGREE {
-        Bolt12Config::DEFAULT_POOL_TARGET
+        let target = parse_env_u64(FM_BOLT12_POOL_TARGET_ENV, Bolt12Config::DEFAULT_POOL_TARGET)?;
+        ensure!(
+            target <= MAX_POOL_TARGET,
+            "{FM_BOLT12_POOL_TARGET_ENV} ({target}) exceeds MAX_POOL_TARGET ({MAX_POOL_TARGET})"
+        );
+        target
     } else {
         0
     };
+    let pool_batch = parse_env_u64(FM_BOLT12_POOL_BATCH_ENV, Bolt12Config::DEFAULT_POOL_BATCH)?;
+    ensure!(
+        (1..=MAX_POOL_BATCH).contains(&pool_batch),
+        "{FM_BOLT12_POOL_BATCH_ENV} ({pool_batch}) must be in 1..={MAX_POOL_BATCH}"
+    );
 
     Ok(Bolt12Config {
         signing_key: PublicKey::from_slice(&public.verifying_key().serialize()?)?,
@@ -67,7 +91,7 @@ fn config(
         receive_fee: Bolt12Config::DEFAULT_RECEIVE_FEE,
         pool_fee: Bolt12Config::DEFAULT_POOL_FEE,
         pool_target,
-        pool_batch: Bolt12Config::DEFAULT_POOL_BATCH,
+        pool_batch,
     })
 }
 

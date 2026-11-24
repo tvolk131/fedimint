@@ -284,6 +284,14 @@ impl ServerModuleInit for LightningInit {
                 name: bolt12::keys::FM_ENABLE_FEDERATED_BOLT12_ENV,
                 description: "Experimental: set while generating a new federation's configuration to enable federated BOLT12 receives. Requires at least four guardians.",
             },
+            EnvVarDoc {
+                name: bolt12::keys::FM_BOLT12_POOL_TARGET_ENV,
+                description: "Experimental: optional override for Bolt12Config::pool_target during federation setup (defaults to 32; 0 disables pool generation).",
+            },
+            EnvVarDoc {
+                name: bolt12::keys::FM_BOLT12_POOL_BATCH_ENV,
+                description: "Experimental: optional override for Bolt12Config::pool_batch during federation setup (defaults to 8; must be in 1..=32).",
+            },
         ]
     }
 
