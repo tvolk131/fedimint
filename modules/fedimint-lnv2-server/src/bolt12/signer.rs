@@ -29,11 +29,13 @@ const MAX_TICKETS: usize = 64;
 /// Nonces held at once for one gateway's reservations, so one gateway that
 /// never finishes signing cannot crowd out the others.
 const MAX_TICKETS_PER_GATEWAY: usize = 16;
-/// Nonces held at once for one reservation. A gateway needs one; a second
-/// covers a retry while the first is outstanding.
+/// Nonces held at once for one reservation. When a gateway starts a new retry
+/// beyond this bound, the oldest in-memory nonce for the same reservation is
+/// evicted (its durable DB marker prevents reuse), so federations with `f >= 2`
+/// can retry past multiple offline guardians without stranding honest signers.
 const MAX_TICKETS_PER_RESERVATION: usize = 2;
 /// Nonces ever issued for one reservation, surviving restarts.
-const MAX_ATTEMPTS: u16 = 16;
+const MAX_ATTEMPTS: u16 = 32;
 /// Upper bound on a serialized signing package.
 const MAX_PACKAGE_BYTES: usize = 16_384;
 
@@ -41,6 +43,7 @@ const MAX_PACKAGE_BYTES: usize = 16_384;
 pub type TicketId = (ReservationId, [u8; 32]);
 
 struct Ticket {
+    seq: u64,
     gateway: PublicKey,
     expires_at: u64,
     digest: [u8; 32],
@@ -51,6 +54,7 @@ struct Ticket {
 #[derive(Default)]
 pub struct Signer {
     tickets: BTreeMap<TicketId, Ticket>,
+    next_seq: u64,
 }
 
 impl std::fmt::Debug for Signer {
@@ -164,17 +168,21 @@ impl Signer {
             }
         }
 
+        // Account for tickets of this reservation that will be evicted once the
+        // new attempt is durably committed, without mutating `self.tickets`
+        // before validation and DB commit succeed.
+        let reservation_tickets = self.tickets.keys().filter(|(r, _)| *r == id.0).count();
+        let evict_count = reservation_tickets.saturating_sub(MAX_TICKETS_PER_RESERVATION - 1);
+
         ensure!(
-            self.tickets.len() < MAX_TICKETS,
+            self.tickets.len().saturating_sub(evict_count) < MAX_TICKETS,
             "invoice signing capacity reached"
         );
         ensure!(
-            self.gateway_tickets(approval.gateway) < MAX_TICKETS_PER_GATEWAY,
+            self.gateway_tickets(approval.gateway)
+                .saturating_sub(evict_count)
+                < MAX_TICKETS_PER_GATEWAY,
             "invoice signing capacity for this gateway reached"
-        );
-        ensure!(
-            self.tickets.keys().filter(|(r, _)| *r == id.0).count() < MAX_TICKETS_PER_RESERVATION,
-            "too many signing attempts in progress for this reservation"
         );
 
         let key = key_package(cfg)?;
@@ -200,14 +208,37 @@ impl Signer {
             .await;
         dbtx.commit_tx_result().await?;
 
+        // Now that the new attempt is durably recorded, evict the oldest
+        // in-memory ticket(s) for this reservation so live attempts stay
+        // bounded at `MAX_TICKETS_PER_RESERVATION` (unblocking retries past
+        // `f >= 2` offline guardians while durable `Bolt12NonceKey` prevents
+        // any evicted attempt from ever being resumed).
+        while self.tickets.keys().filter(|(r, _)| *r == id.0).count() >= MAX_TICKETS_PER_RESERVATION
+        {
+            let Some(oldest) = self
+                .tickets
+                .iter()
+                .filter(|((r, _), _)| *r == id.0)
+                .min_by_key(|(_, ticket)| ticket.seq)
+                .map(|(ticket_id, _)| *ticket_id)
+            else {
+                break;
+            };
+            self.tickets.remove(&oldest);
+        }
+
         let (nonces, commitments) = frost::round1::commit(key.signing_share(), &mut OsRng);
         let response = NonceResponse {
             commitments: commitments.serialize()?,
         };
 
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+
         self.tickets.insert(
             id,
             Ticket {
+                seq,
                 gateway: approval.gateway,
                 expires_at: approval.expires_at,
                 digest: approval.digest,

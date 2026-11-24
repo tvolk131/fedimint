@@ -23,9 +23,19 @@ pub fn inverse(x: F) -> F {
     F(1) / x
 }
 
+fn assert_distinct_points(points: &[usize]) {
+    for (idx, &a) in points.iter().enumerate() {
+        for &b in &points[idx + 1..] {
+            assert_ne!(a, b, "interpolation points must be distinct");
+        }
+    }
+}
+
 /// Lagrange weights that evaluate, at `target`, the polynomial through the
 /// values at `points`.
 pub fn weights(points: &[usize], target: usize) -> Vec<F> {
+    assert_distinct_points(points);
+
     points
         .iter()
         .map(|&i| {
@@ -72,6 +82,8 @@ impl Gf128 {
     /// Evaluate the Lagrange basis polynomials for base-field nodes `points`
     /// at an extension-field point `at`.
     pub fn lagrange_basis(points: &[usize], at: Self) -> Vec<Self> {
+        assert_distinct_points(points);
+
         points
             .iter()
             .map(|&i| {

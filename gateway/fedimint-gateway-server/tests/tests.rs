@@ -2,28 +2,34 @@
 //!
 //! This crate contains integration tests for the gateway API
 //! and business logic.
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use assert_matches::assert_matches;
 use bitcoin::hashes::{Hash, sha256};
-use fedimint_api_client::api::ServerError;
+use fedimint_api_client::api::{
+    DynModuleApi, IModuleFederationApi, IRawFederationApi, ServerError,
+};
 use fedimint_client::ClientHandleArc;
-use fedimint_client::error::{OperationLookupError, TransactionSubmitError};
+use fedimint_client::error::{
+    OperationAlreadyExistsError, OperationLookupError, TransactionSubmitError,
+};
 use fedimint_client::transaction::{
     ClientInput, ClientInputBundle, ClientOutput, ClientOutputBundle, TransactionBuilder,
 };
 use fedimint_client_module::module::OutPointRange;
+use fedimint_connectors::{DynGuaridianConnection, PeerStatus};
 use fedimint_core::config::FederationId;
-use fedimint_core::core::{IntoDynInstance, OperationId};
+use fedimint_core::core::{IntoDynInstance, ModuleInstanceId, OperationId};
 use fedimint_core::encoding::Encodable;
-use fedimint_core::module::{AmountUnit, Amounts};
+use fedimint_core::module::{AmountUnit, Amounts, ApiRequestErased};
 use fedimint_core::task::{TaskGroup, sleep_in_test, timeout};
 use fedimint_core::time::now;
 use fedimint_core::util::{NextOrPending, SafeUrl, backoff_util, retry};
 use fedimint_core::{
-    Amount, OutPoint, TransactionId, apply, async_trait_maybe_send, msats, sats, secp256k1,
+    Amount, OutPoint, PeerId, TransactionId, apply, async_trait_maybe_send, msats, sats, secp256k1,
 };
 use fedimint_dummy_client::{DummyClientInit, DummyClientModule};
 use fedimint_dummy_server::DummyInit;
@@ -45,7 +51,7 @@ use fedimint_gwv2_client::events::{
 };
 use fedimint_gwv2_client::{
     FinalReceiveState, GatewayClientModuleV2, GatewayClientStateMachinesV2, GatewayOperationMetaV2,
-    GatewaySendPaymentError, IncomingCircuitKey,
+    GatewaySendPaymentError, IncomingCircuitKey, RelayIncomingHtlcError,
 };
 use fedimint_lightning::{InterceptPaymentRequest, LightningRpcError};
 use fedimint_ln_client::api::LnFederationApi;
@@ -64,6 +70,7 @@ use fedimint_ln_common::contracts::{
 use fedimint_ln_common::{LightningGateway, LightningInput, LightningOutput, PrunedInvoice};
 use fedimint_ln_server::LightningInit;
 use fedimint_lnv2_common::contracts::{IncomingContract, OutgoingContract, PaymentImage};
+use fedimint_lnv2_common::endpoint_constants::CONSENSUS_BLOCK_COUNT_ENDPOINT;
 use fedimint_lnv2_common::gateway_api::{
     CreateBolt11InvoicePayload, GatewayConnection, PaymentFee, RoutingInfo, SendPaymentPayload,
 };
@@ -78,6 +85,7 @@ use fedimint_testing::fixtures::Fixtures;
 use fedimint_testing::ln::{FakeLightningTest, MOCK_INVOICE_PREIMAGE};
 use fedimint_unknown_server::UnknownInit;
 use futures::Future;
+use futures::stream::BoxStream;
 use itertools::Itertools;
 use lightning_invoice::{
     Bolt11Invoice, Bolt11InvoiceDescription, Currency, Description, InvoiceBuilder, PaymentSecret,
@@ -85,6 +93,7 @@ use lightning_invoice::{
 };
 use secp256k1::schnorr::Signature;
 use secp256k1::{Keypair, PublicKey, SecretKey};
+use tokio::sync::{Notify, watch};
 use tpe::G1Affine;
 use tracing::info;
 
@@ -2100,6 +2109,476 @@ async fn lnv2_relay_persists_every_distinct_incoming_circuit() -> anyhow::Result
     }
 
     Ok(())
+}
+
+/// The gateway pays the recipient by funding the incoming contract, and is
+/// reimbursed only by the completion operation that settles the held HTLC
+/// once the contract reveals the preimage. If the relay fails after funding
+/// but before the completion is persisted, the gateway fails the HTLC back
+/// although the recipient can still claim the contract, and nothing would
+/// settle the HTLC anyway. A failed relay must therefore fund nothing.
+///
+/// Starting the completion is made to fail by an operation log entry that
+/// already uses its operation id.
+#[tokio::test(flavor = "multi_thread")]
+async fn lnv2_relay_failing_to_start_the_completion_funds_nothing() -> anyhow::Result<()> {
+    let fixtures = fixtures();
+    let fed = fixtures.new_fed_degraded().await;
+    let gateway = fixtures.new_gateway().await;
+    fed.connect_gateway(&gateway).await;
+    send_msats_to_gateway(&gateway, fed.id(), 1_000_000_000).await;
+
+    let client = gateway.select_client(fed.id()).await?.into_value();
+    let module = client.get_first_module::<GatewayClientModuleV2>()?;
+    let preimage = [23; 32];
+    let payment_hash = preimage.consensus_hash();
+    let contract = IncomingContract::new(
+        module.cfg.tpe_agg_pk,
+        [42; 32],
+        preimage,
+        PaymentImage::Hash(payment_hash),
+        Amount::from_sats(1000),
+        u64::MAX,
+        Keypair::new(secp256k1::SECP256K1, &mut rand::thread_rng()).public_key(),
+        module.keypair.public_key(),
+        Keypair::new(secp256k1::SECP256K1, &mut rand::thread_rng()).public_key(),
+    );
+    let circuit = IncomingCircuitKey {
+        incoming_chan_id: 0,
+        htlc_id: 0,
+    };
+    let receive_operation_id = OperationId::from_encodable(&contract);
+    let completion_operation_id = OperationId::from_encodable(&(
+        "gateway-lnv2-incoming-circuit",
+        receive_operation_id,
+        circuit,
+    ));
+
+    let mut dbtx = client.db().begin_transaction().await;
+    client
+        .operation_log()
+        .add_operation_log_entry_dbtx(
+            &mut dbtx.to_ref_nc(),
+            completion_operation_id,
+            "lnv2",
+            serde_json::Value::Null,
+        )
+        .await;
+    dbtx.commit_tx().await;
+
+    let error = module
+        .relay_incoming_htlc(
+            payment_hash,
+            circuit.incoming_chan_id,
+            circuit.htlc_id,
+            contract,
+            1_000_000,
+            u32::MAX,
+        )
+        .await
+        .expect_err("starting the completion fails");
+
+    assert_matches!(
+        error,
+        RelayIncomingHtlcError::Transaction(TransactionSubmitError::OperationAlreadyExists(
+            OperationAlreadyExistsError { operation_id }
+        )) if operation_id == completion_operation_id
+    );
+
+    let receive_funded = client.operation_exists(receive_operation_id).await;
+    let completion_started = client.operation_exists(completion_operation_id).await;
+    assert!(
+        !receive_funded || completion_started,
+        "the failed relay funded the incoming contract without starting the operation \
+         that settles its HTLC"
+    );
+
+    Ok(())
+}
+
+/// A relay that cannot add its completion to a contract the gateway has
+/// already funded must keep the HTLC held: the recipient can claim the
+/// contract, and only settling the HTLC reimburses the gateway.
+///
+/// Another circuit funds the contract, and starting this circuit's completion
+/// is made to fail by an operation log entry that already uses its operation
+/// id.
+#[tokio::test(flavor = "multi_thread")]
+async fn lnv2_relay_failing_to_add_a_completion_keeps_the_htlc_held() -> anyhow::Result<()> {
+    let fixtures = fixtures();
+    let fed = fixtures.new_fed_degraded().await;
+    let gateway = fixtures.new_gateway().await;
+    fed.connect_gateway(&gateway).await;
+    send_msats_to_gateway(&gateway, fed.id(), 1_000_000_000).await;
+
+    let client = gateway.select_client(fed.id()).await?.into_value();
+    let module = client.get_first_module::<GatewayClientModuleV2>()?;
+    let preimage = [23; 32];
+    let payment_hash = preimage.consensus_hash();
+    let contract = IncomingContract::new(
+        module.cfg.tpe_agg_pk,
+        [42; 32],
+        preimage,
+        PaymentImage::Hash(payment_hash),
+        Amount::from_sats(1000),
+        u64::MAX,
+        Keypair::new(secp256k1::SECP256K1, &mut rand::thread_rng()).public_key(),
+        module.keypair.public_key(),
+        Keypair::new(secp256k1::SECP256K1, &mut rand::thread_rng()).public_key(),
+    );
+    let receive_operation_id = OperationId::from_encodable(&contract);
+
+    module
+        .relay_incoming_htlc(payment_hash, 0, 0, contract.clone(), 1_000_000, u32::MAX)
+        .await?;
+    assert!(client.operation_exists(receive_operation_id).await);
+
+    let circuit = IncomingCircuitKey {
+        incoming_chan_id: 42,
+        htlc_id: 7,
+    };
+    let completion_operation_id = OperationId::from_encodable(&(
+        "gateway-lnv2-incoming-circuit",
+        receive_operation_id,
+        circuit,
+    ));
+
+    let mut dbtx = client.db().begin_transaction().await;
+    client
+        .operation_log()
+        .add_operation_log_entry_dbtx(
+            &mut dbtx.to_ref_nc(),
+            completion_operation_id,
+            "lnv2",
+            serde_json::Value::Null,
+        )
+        .await;
+    dbtx.commit_tx().await;
+
+    let error = module
+        .relay_incoming_htlc(
+            payment_hash,
+            circuit.incoming_chan_id,
+            circuit.htlc_id,
+            contract,
+            1_000_000,
+            u32::MAX,
+        )
+        .await
+        .expect_err("starting the completion fails");
+
+    assert!(
+        !error.htlc_may_be_failed_back(),
+        "the HTLC of a funded contract must not be failed back, got: {error:?}"
+    );
+    assert_matches!(
+        error,
+        RelayIncomingHtlcError::CompletionNotStarted(
+            TransactionSubmitError::OperationAlreadyExists(OperationAlreadyExistsError {
+                operation_id
+            })
+        ) if operation_id == completion_operation_id
+    );
+
+    Ok(())
+}
+
+/// A receive operation is found by its state machines, which is what funding
+/// the contract creates. An operation log entry under the receive's operation
+/// id without any state machine has funded nothing, so the relay must neither
+/// join it nor start a completion that no receive would drive.
+#[tokio::test(flavor = "multi_thread")]
+async fn lnv2_relay_does_not_join_a_receive_without_state_machines() -> anyhow::Result<()> {
+    let fixtures = fixtures();
+    let fed = fixtures.new_fed_degraded().await;
+    let gateway = fixtures.new_gateway().await;
+    fed.connect_gateway(&gateway).await;
+    send_msats_to_gateway(&gateway, fed.id(), 1_000_000_000).await;
+
+    let client = gateway.select_client(fed.id()).await?.into_value();
+    let module = client.get_first_module::<GatewayClientModuleV2>()?;
+    let (contract, payment_hash) = lnv2_incoming_contract(&module);
+    let circuit = IncomingCircuitKey {
+        incoming_chan_id: 0,
+        htlc_id: 0,
+    };
+    let receive_operation_id = OperationId::from_encodable(&contract);
+    let completion_operation_id = lnv2_completion_operation_id(receive_operation_id, circuit);
+
+    let mut dbtx = client.db().begin_transaction().await;
+    client
+        .operation_log()
+        .add_operation_log_entry_dbtx(
+            &mut dbtx.to_ref_nc(),
+            receive_operation_id,
+            "lnv2",
+            serde_json::Value::Null,
+        )
+        .await;
+    dbtx.commit_tx().await;
+
+    let error = module
+        .relay_incoming_htlc(
+            payment_hash,
+            circuit.incoming_chan_id,
+            circuit.htlc_id,
+            contract,
+            1_000_000,
+            u32::MAX,
+        )
+        .await
+        .expect_err("the contract cannot be funded under an operation id already taken");
+
+    assert!(
+        error.htlc_may_be_failed_back(),
+        "nothing was funded, so the HTLC may be failed back, got: {error:?}"
+    );
+    assert_matches!(
+        error,
+        RelayIncomingHtlcError::Transaction(TransactionSubmitError::OperationAlreadyExists(
+            OperationAlreadyExistsError { operation_id }
+        )) if operation_id == receive_operation_id
+    );
+    assert!(
+        client
+            .operation_log()
+            .get_operation(completion_operation_id)
+            .await
+            .is_none(),
+        "the relay started a completion without a receive to drive it"
+    );
+
+    Ok(())
+}
+
+/// Delegates to the federation, except that the LNv2 gateway's liveness probe
+/// waits until the test releases it and then fails.
+#[derive(Debug)]
+struct PausedLivenessProbe {
+    federation: DynModuleApi,
+    probing: Arc<Notify>,
+    release: watch::Receiver<bool>,
+}
+
+#[apply(async_trait_maybe_send!)]
+impl IRawFederationApi for PausedLivenessProbe {
+    fn all_peers(&self) -> &BTreeSet<PeerId> {
+        self.federation.all_peers()
+    }
+
+    fn self_peer(&self) -> Option<PeerId> {
+        self.federation.self_peer()
+    }
+
+    fn with_module(&self, id: ModuleInstanceId) -> DynModuleApi {
+        self.federation.with_module(id)
+    }
+
+    async fn request_raw(
+        &self,
+        peer_id: PeerId,
+        method: &str,
+        params: &ApiRequestErased,
+    ) -> Result<serde_json::Value, ServerError> {
+        if method != CONSENSUS_BLOCK_COUNT_ENDPOINT {
+            return self.federation.request_raw(peer_id, method, params).await;
+        }
+
+        self.probing.notify_one();
+        self.release
+            .clone()
+            .wait_for(|released| *released)
+            .await
+            .expect("The test releases the probe");
+
+        Err(ServerError::Connection("liveness probe failed".into()))
+    }
+
+    fn connection_status_stream(&self) -> BoxStream<'static, BTreeMap<PeerId, PeerStatus>> {
+        self.federation.connection_status_stream()
+    }
+
+    async fn wait_for_initialized_connections(&self) {
+        self.federation.wait_for_initialized_connections().await;
+    }
+
+    async fn get_peer_connection(
+        &self,
+        peer_id: PeerId,
+    ) -> Result<DynGuaridianConnection, ServerError> {
+        self.federation.get_peer_connection(peer_id).await
+    }
+}
+
+impl IModuleFederationApi for PausedLivenessProbe {}
+
+/// Relays `circuit` through a copy of `module` whose federation liveness probe
+/// fails, after `winner` has relayed `winning_circuit` while the probe was
+/// pending, and returns the refused relay's result.
+async fn relay_refused_while_another_relay_funds(
+    module: &GatewayClientModuleV2,
+    contract: &IncomingContract,
+    payment_hash: sha256::Hash,
+    circuit: IncomingCircuitKey,
+    winning_circuit: IncomingCircuitKey,
+) -> Result<(), RelayIncomingHtlcError> {
+    let probing = Arc::new(Notify::new());
+    let (release_probe, release) = watch::channel(false);
+    let refused = GatewayClientModuleV2 {
+        module_api: DynModuleApi::from(PausedLivenessProbe {
+            federation: module.module_api.clone(),
+            probing: probing.clone(),
+            release,
+        }),
+        ..module.clone()
+    };
+
+    let (refused_result, ()) = timeout(Duration::from_secs(60), async {
+        tokio::join!(
+            refused.relay_incoming_htlc(
+                payment_hash,
+                circuit.incoming_chan_id,
+                circuit.htlc_id,
+                contract.clone(),
+                1_000_000,
+                u32::MAX,
+            ),
+            async {
+                probing.notified().await;
+                module
+                    .relay_incoming_htlc(
+                        payment_hash,
+                        winning_circuit.incoming_chan_id,
+                        winning_circuit.htlc_id,
+                        contract.clone(),
+                        1_000_000,
+                        u32::MAX,
+                    )
+                    .await
+                    .expect("the winning relay funds the contract");
+                release_probe.send_replace(true);
+            },
+        )
+    })
+    .await
+    .expect("both relays finish");
+
+    refused_result
+}
+
+/// A relay of a fresh contract that is refused before funding must not report
+/// an error that lets its HTLC be failed back when a relay of the same
+/// circuit funded the contract and started the completion meanwhile.
+#[tokio::test(flavor = "multi_thread")]
+async fn lnv2_relay_refused_while_its_circuit_funds_joins_the_completion() -> anyhow::Result<()> {
+    let fixtures = fixtures();
+    let fed = fixtures.new_fed_degraded().await;
+    let gateway = fixtures.new_gateway().await;
+    fed.connect_gateway(&gateway).await;
+    send_msats_to_gateway(&gateway, fed.id(), 1_000_000_000).await;
+
+    let client = gateway.select_client(fed.id()).await?.into_value();
+    let module = client.get_first_module::<GatewayClientModuleV2>()?;
+    let (contract, payment_hash) = lnv2_incoming_contract(&module);
+    let circuit = IncomingCircuitKey {
+        incoming_chan_id: 0,
+        htlc_id: 0,
+    };
+
+    relay_refused_while_another_relay_funds(&module, &contract, payment_hash, circuit, circuit)
+        .await
+        .expect("the refused relay joins the completion its circuit already has");
+
+    Ok(())
+}
+
+/// A relay of a fresh contract that is refused before funding, while a relay
+/// of another circuit funds the contract, adds only its own completion to the
+/// receive that relay created.
+#[tokio::test(flavor = "multi_thread")]
+async fn lnv2_relay_refused_while_another_circuit_funds_adds_its_completion() -> anyhow::Result<()>
+{
+    let fixtures = fixtures();
+    let fed = fixtures.new_fed_degraded().await;
+    let gateway = fixtures.new_gateway().await;
+    fed.connect_gateway(&gateway).await;
+    send_msats_to_gateway(&gateway, fed.id(), 1_000_000_000).await;
+
+    let client = gateway.select_client(fed.id()).await?.into_value();
+    let module = client.get_first_module::<GatewayClientModuleV2>()?;
+    let (contract, payment_hash) = lnv2_incoming_contract(&module);
+    let receive_operation_id = OperationId::from_encodable(&contract);
+    let circuit = IncomingCircuitKey {
+        incoming_chan_id: 42,
+        htlc_id: 7,
+    };
+    let winning_circuit = IncomingCircuitKey {
+        incoming_chan_id: 0,
+        htlc_id: 0,
+    };
+
+    relay_refused_while_another_relay_funds(
+        &module,
+        &contract,
+        payment_hash,
+        circuit,
+        winning_circuit,
+    )
+    .await
+    .expect("the refused relay adds its completion to the funded contract");
+
+    let completion_operation_id = lnv2_completion_operation_id(receive_operation_id, circuit);
+    let active = module
+        .client_ctx
+        .get_own_operation_active_states(completion_operation_id)
+        .await;
+    let inactive = module
+        .client_ctx
+        .get_own_operation_inactive_states(completion_operation_id)
+        .await;
+    assert_eq!(active.len() + inactive.len(), 1);
+    assert!(
+        active
+            .into_iter()
+            .map(|(state, _)| state)
+            .chain(inactive.into_iter().map(|(state, _)| state))
+            .all(|state| matches!(state, GatewayClientStateMachinesV2::CircuitComplete(_)))
+    );
+
+    Ok(())
+}
+
+/// Builds an incoming contract the gateway can fund, returning it with its
+/// payment hash.
+fn lnv2_incoming_contract(module: &GatewayClientModuleV2) -> (IncomingContract, sha256::Hash) {
+    let preimage = [23; 32];
+    let payment_hash = preimage.consensus_hash();
+    let contract = IncomingContract::new(
+        module.cfg.tpe_agg_pk,
+        [42; 32],
+        preimage,
+        PaymentImage::Hash(payment_hash),
+        Amount::from_sats(1000),
+        u64::MAX,
+        Keypair::new(secp256k1::SECP256K1, &mut rand::thread_rng()).public_key(),
+        module.keypair.public_key(),
+        Keypair::new(secp256k1::SECP256K1, &mut rand::thread_rng()).public_key(),
+    );
+
+    (contract, payment_hash)
+}
+
+/// The operation id of the completion of `circuit` for the receive operation
+/// `receive_operation_id`.
+fn lnv2_completion_operation_id(
+    receive_operation_id: OperationId,
+    circuit: IncomingCircuitKey,
+) -> OperationId {
+    OperationId::from_encodable(&(
+        "gateway-lnv2-incoming-circuit",
+        receive_operation_id,
+        circuit,
+    ))
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -256,16 +256,19 @@ time.
   bounded backtracking so large federations (`N >= 25`) never stall consensus
   CPU. A member's position in the committee is its party index in the MPC.
 - **MPC** (`fedimint-mpc`). Degree-`f` Shamir sharing over `GF(2^8)` among the
-  committee (up to `MAX_PARTIES = 32`, supporting federations up to `N = 46`),
-  evaluating a pure-Rust low-depth SHA-256 circuit (CSA + Sklansky +
+  committee (pool generation capped at `MAX_POOL_DEGREE = 7`, `N <= 24`, so
+  worst-case `2f + 1` refund subset search stays within `C(15, 8) = 6,435`
+  trials), evaluating a pure-Rust low-depth SHA-256 circuit (CSA + Sklansky +
   carry-skip, depth 456) in SIMD lanes with live-wire slot recycling.
   Double-random sharings use seed-expanded Vandermonde extraction; online
   multiplications use load-balanced parallel-king DN07 (`O(1)` per-guardian
-  egress and CPU per gate); all multiplications and input bit-checks are
-  verified together with 128-bit soundness via a 4-way recursive BBCGI19
-  inner-product proof over `GF((2^8)^16)` before any public output or share is
-  opened. Malicious members can make a run abort but cannot change its output
-  or learn `r`.
+  egress and CPU per gate); all `M` multiplications and input bit-checks are
+  verified together via a 4-way recursive BBCGI19 inner-product proof over
+  `GF((2^8)^16)` with composed Schwartz–Zippel soundness error at most
+  `(M + 6k + 2) / 2^128` (~110-bit at `batch = 4`, ~103-bit at
+  `MAX_TRIPLES = 30_000_000`) before any public output or share is opened.
+  Malicious members can make a run abort but cannot change its output or learn
+  `r`.
 - **Transport and relay fallback.** Members exchange messages through
   `bolt12_mpc`. Each message is Schnorr-signed by its sender, split into
   chunks, encrypted with ChaCha20-Poly1305 under an ephemeral ECDH key derived

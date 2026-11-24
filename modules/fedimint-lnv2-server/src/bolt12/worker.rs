@@ -10,28 +10,29 @@
 //! Evidence is revealed only once consensus has abandoned the run, so it
 //! never exposes a preimage that can still be used.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use fedimint_api_client::api::{DynModuleApi, FederationApiExt as _};
-use fedimint_core::bitcoin::hashes::sha256;
+use fedimint_core::bitcoin::hashes::{Hash as _, sha256};
 use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::ApiRequestErased;
 use fedimint_core::module::registry::ModuleRegistry;
+use fedimint_core::secp256k1::schnorr::Signature;
+use fedimint_core::secp256k1::{Keypair, Message, PublicKey, SECP256K1};
 use fedimint_core::task::{TaskGroup, sleep};
-use fedimint_core::time::duration_since_epoch;
-use fedimint_core::{PeerId, runtime};
+use fedimint_core::{NumPeersExt as _, PeerId, runtime};
 use fedimint_lnv2_common::bolt12::{
-    AbandonedRun, EVIDENCE_WINDOW, POOL_RUN_TIMEOUT, PoolRun, PoolShare, PoolVerdict,
-    pool_share_binding,
+    AbandonedRun, POOL_RUN_TIMEOUT, PoolRun, PoolShare, PoolVerdict, pool_share_binding,
 };
 use fedimint_lnv2_common::config::LightningConfig;
 use fedimint_lnv2_common::endpoint_constants::BOLT12_MPC_EVIDENCE_ENDPOINT;
 use fedimint_logging::LOG_MODULE_LNV2;
 use futures::StreamExt as _;
+use futures::future::join_all;
 use mpc::direct;
 use mpc::engine::Params;
 use mpc::replay::{Evidence, Received, judge};
@@ -42,42 +43,126 @@ use zeroize::Zeroizing;
 
 use super::transport::{
     ApiTransport, CHUNK, ChannelLimits, Channels, FetchRequest, MAX_FAULT_CIPHERTEXT_LEN,
-    MAX_RELAY_WITNESSES, MpcPacket, RelayRequest, verify_message, verify_transport_fault_convicts,
+    MAX_RELAY_WITNESSES, MpcPacket, RelayRequest, verify_message, verify_r0_ephemeral_fault,
+    verify_transport_fault_convicts,
 };
 use crate::db::{
     Bolt12PoolAbandonedKey, Bolt12PoolAbandonedPrefix, Bolt12PoolLocalRunKey,
     Bolt12PoolLocalRunPrefix, Bolt12PoolLocalVerdictKey, Bolt12PoolLocalVerdictPrefix,
     Bolt12PoolRelayEvidenceKey, Bolt12PoolRelayEvidencePrefix, Bolt12PoolRunKey,
     Bolt12PoolTranscriptKey, Bolt12PoolTranscriptRunPrefix, Bolt12PoolVerdictKey, LocalRun,
-    RelayEvidence, SignedMessage,
+    RelayEvidence, SignedMessage, UnixTimeVotePrefix,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// How long after the evidence window closes, by this guardian's clock, it
-/// waits before judging, so late commitments are in.
-const JUDGE_MARGIN: u64 = 30;
+/// Target decoded evidence payload bytes per page. Sized so every hex-encoded
+/// page stays comfortably below the 10 MiB WebSocket response cap even on page
+/// 0 (which includes `RelayEvidence`) and when a single message is up to
+/// `1.48 MiB`.
+const EVIDENCE_PAGE_BYTES: usize = 512 * 1024;
 
-/// Message bytes in one page of evidence.
-const EVIDENCE_PAGE_BYTES: usize = 1024 * 1024;
+/// Longest hex-encoded [`EvidenceRequest`] accepted by the evidence endpoint.
+pub const MAX_EVIDENCE_REQUEST_HEX: usize = 512;
 
-/// The most rounds a run may have; bounds the evidence a peer can make us
-/// fetch.
-const MAX_ROUNDS: usize = 100_000;
+/// Per-page timeout when fetching a peer's evidence.
+const EVIDENCE_PAGE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Retries per evidence page on transient network/timeout errors.
+const EVIDENCE_PAGE_ATTEMPTS: usize = 3;
+
+const EVIDENCE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+
+/// Total wall-clock timeout for fetching all evidence pages of one committee
+/// member so a stalling peer cannot starve judging or exhaust `JUDGE_TIMEOUT`.
+const EVIDENCE_MEMBER_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Minimum total decoded transcript byte cap per member for small runs.
 const MIN_MEMBER_EVIDENCE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Authenticated request from any federation guardian asking a committee member
+/// for one page of its evidence about an abandoned run.
+#[derive(Debug, Clone, Eq, PartialEq, Encodable, Decodable)]
+pub struct EvidenceRequest {
+    pub run: u64,
+    pub requester: PeerId,
+    pub from_round: u64,
+    pub from_peer: u16,
+    pub signature: Signature,
+}
+
+impl EvidenceRequest {
+    fn digest(run: u64, requester: PeerId, from_round: u64, from_peer: u16) -> Message {
+        let hash: sha256::Hash = (
+            "fedimint/bolt12/mpc-evidence-req/v1",
+            run,
+            requester,
+            from_round,
+            from_peer,
+        )
+            .consensus_hash();
+
+        Message::from_digest(hash.to_byte_array())
+    }
+
+    pub fn new(
+        run: u64,
+        requester: PeerId,
+        from_round: u64,
+        from_peer: u16,
+        signing_key: &Keypair,
+    ) -> Self {
+        let signature = SECP256K1.sign_schnorr(
+            &Self::digest(run, requester, from_round, from_peer),
+            signing_key,
+        );
+
+        Self {
+            run,
+            requester,
+            from_round,
+            from_peer,
+            signature,
+        }
+    }
+
+    pub fn verify(&self, requester_pk: &PublicKey) -> bool {
+        SECP256K1
+            .verify_schnorr(
+                &self.signature,
+                &Self::digest(self.run, self.requester, self.from_round, self.from_peer),
+                &requester_pk.x_only_public_key().0,
+            )
+            .is_ok()
+    }
+}
+
+/// Decode an [`EvidenceRequest`] from its hex form.
+pub fn decode_evidence_request(hex: &str) -> Result<EvidenceRequest> {
+    if hex.len() > MAX_EVIDENCE_REQUEST_HEX {
+        bail!("Oversized evidence request");
+    }
+
+    Ok(EvidenceRequest::consensus_decode_hex(
+        hex,
+        &ModuleRegistry::default(),
+    )?)
+}
 
 /// A page of a member's evidence, as the evidence endpoint returns it.
 #[derive(Debug, Encodable, Decodable)]
 pub struct EvidencePage {
     pub seed: [u8; 32],
-    /// Rounds from the requested one on.
-    pub rounds: Vec<Vec<Option<SignedMessage>>>,
-    /// Relay witnesses and undecryptable signed packets (populated on page 0).
+    /// Total number of transcript rounds recorded for this run.
+    pub total_rounds: u64,
+    /// Non-empty `(round, position, signed_message)` entries from the requested
+    /// cursor onward, in strictly ascending `(round, position)` order.
+    pub entries: Vec<(u64, u16, SignedMessage)>,
+    /// Relay witnesses, round-0 ephemeral proofs, and transport faults
+    /// (populated only on page 0 when `(from_round, from_peer) == (0, 0)`).
     pub relay: RelayEvidence,
-    /// Whether rounds remain after these.
-    pub more: bool,
+    /// Next `(round, position)` cursor if more entries remain.
+    pub next_cursor: Option<(u64, u16)>,
 }
 
 pub(super) type Rounds = Vec<Vec<Option<SignedMessage>>>;
@@ -89,7 +174,7 @@ pub(super) fn evidence_digest(
     relay: &RelayEvidence,
 ) -> sha256::Hash {
     (
-        "fedimint/bolt12/mpc-evidence/v2",
+        "fedimint/bolt12/mpc-evidence/v3",
         *seed,
         rounds.clone(),
         relay.clone(),
@@ -120,6 +205,30 @@ fn run_params(cfg: &LightningConfig, run: &PoolRun) -> Result<(Params, usize)> {
         Params::new(run.committee.len(), degree)?,
         usize::try_from(run.batch)?,
     ))
+}
+
+/// Tight upper bound on rounds an honest MPC execution for `(params, batch)`
+/// can ever produce.
+fn max_rounds_for_run(params: Params, batch: usize) -> Result<usize> {
+    let circuit = direct::circuit(params, batch)?;
+    let depth = circuit.schedule().depth();
+    Ok(depth.saturating_mul(2).saturating_add(128))
+}
+
+async fn consensus_unix_time(cfg: &LightningConfig, db: &Database) -> u64 {
+    let num_peers = cfg.consensus.tpe_pks.to_num_peers();
+    let mut dbtx = db.begin_transaction_nc().await;
+    let mut times = dbtx
+        .find_by_prefix(&UnixTimeVotePrefix)
+        .await
+        .map(|entry| entry.1)
+        .collect::<Vec<u64>>()
+        .await;
+
+    times.sort_unstable();
+    times.reverse();
+
+    times.get(num_peers.threshold() - 1).copied().unwrap_or(0)
 }
 
 pub struct Worker {
@@ -162,13 +271,24 @@ impl Worker {
         });
 
         let this = worker.clone();
+        let gen_cfg = cfg.clone();
+        let gen_db = db.clone();
+        let gen_api = api.clone();
 
         task_group.spawn_cancellable("bolt12 preimage generation", async move {
             loop {
-                if let Err(err) = this.tick(&cfg, me, &db, &api).await {
+                if let Err(err) = this.tick(&gen_cfg, me, &gen_db, &gen_api).await {
                     warn!(target: LOG_MODULE_LNV2, err = %format!("{err:#}"), "Preimage generation failed");
                 }
 
+                sleep(POLL_INTERVAL).await;
+            }
+        });
+
+        // Judging runs in an independent task so slow or adversarial evidence
+        // fetches can never block generation ticks.
+        task_group.spawn_cancellable("bolt12 abandoned run judge", async move {
+            loop {
                 if let Err(err) = judge_abandoned(&cfg, me, &db, &api).await {
                     warn!(target: LOG_MODULE_LNV2, err = %format!("{err:#}"), "Judging an abandoned run failed");
                 }
@@ -203,17 +323,17 @@ impl Worker {
         self.active_channels(packet.run)?.receive(packet)
     }
 
-    /// Serve cached encrypted packets for an authenticated committee
-    /// [`FetchRequest`]. Remains available after `run_ends` until the next run
-    /// starts so staggered polling across guardians cannot trigger false relay
-    /// witnesses.
-    pub fn serve_packets(&self, request: &FetchRequest) -> Result<Vec<MpcPacket>> {
+    /// Serve a bounded page of cached encrypted packets for an authenticated
+    /// committee [`FetchRequest`]. Remains available after `run_ends` until
+    /// the next run starts so staggered polling across guardians cannot trigger
+    /// false relay witnesses.
+    pub fn serve_packets(&self, request: &FetchRequest) -> Result<(u32, Vec<MpcPacket>)> {
         self.outbox_channels(request.run)?.serve_packets(request)
     }
 
-    /// Fetch and return `request.sender`'s encrypted packets for
-    /// `request.recipient`, recording a witness if `sender` refuses.
-    pub async fn relay(&self, request: &RelayRequest) -> Result<Vec<MpcPacket>> {
+    /// Fetch and return a bounded page of `request.sender`'s encrypted packets
+    /// for `request.recipient`, recording a witness if `sender` refuses.
+    pub async fn relay(&self, request: &RelayRequest) -> Result<(u32, Vec<MpcPacket>)> {
         let channels = self.active_channels(request.run)?;
 
         channels.relay_fetch(&self.api, request).await
@@ -256,6 +376,7 @@ impl Worker {
                 seed: *seed,
                 submission: None,
                 evidence: None,
+                transcript_rounds: 0,
             },
         )
         .await;
@@ -300,7 +421,7 @@ impl Worker {
             () = run_ends(db, active.run) => RunOutcome::ConsensusEnded,
         };
 
-        self.finish_run(db, active.run, *seed, &channels, outcome)
+        self.finish_run(db, active.run, seed, &channels, outcome)
             .await
     }
 
@@ -308,7 +429,7 @@ impl Worker {
         &self,
         db: &Database,
         run: u64,
-        seed: [u8; 32],
+        seed: Zeroizing<[u8; 32]>,
         channels: &Channels,
         outcome: RunOutcome,
     ) -> Result<()> {
@@ -323,9 +444,10 @@ impl Worker {
                 dbtx.insert_entry(
                     &Bolt12PoolLocalRunKey(run),
                     &LocalRun {
-                        seed,
+                        seed: *seed,
                         submission: Some(submission.clone()),
                         evidence: None,
+                        transcript_rounds: 0,
                     },
                 )
                 .await;
@@ -344,7 +466,7 @@ impl Worker {
                     .await
                     .is_some()
                 {
-                    save_evidence(db, run, seed, Some(submission), channels).await?;
+                    save_evidence(db, run, &seed, Some(submission), channels).await?;
                 }
             }
             RunOutcome::Aborted(err) => {
@@ -355,14 +477,14 @@ impl Worker {
                 // keeps serving cached packets until the next run starts.
                 *self.channels.lock().expect("not poisoned") = None;
 
-                save_evidence(db, run, seed, None, channels).await?;
+                save_evidence(db, run, &seed, None, channels).await?;
             }
             RunOutcome::ConsensusEnded => {
                 warn!(target: LOG_MODULE_LNV2, run, "Consensus ended the run");
 
                 *self.channels.lock().expect("not poisoned") = None;
 
-                save_evidence(db, run, seed, None, channels).await?;
+                save_evidence(db, run, &seed, None, channels).await?;
             }
         }
 
@@ -375,13 +497,14 @@ impl Worker {
 async fn save_evidence(
     db: &Database,
     run: u64,
-    seed: [u8; 32],
+    seed: &Zeroizing<[u8; 32]>,
     submission: Option<Vec<PoolShare>>,
     channels: &Channels,
 ) -> Result<()> {
     let rounds = channels.transcript();
     let relay = channels.relay_evidence();
-    let evidence = evidence_digest(&seed, &rounds, &relay);
+    let transcript_rounds = u64::try_from(rounds.len())?;
+    let evidence = evidence_digest(seed, &rounds, &relay);
 
     let mut dbtx = db.begin_transaction().await;
 
@@ -394,9 +517,10 @@ async fn save_evidence(
     dbtx.insert_entry(
         &Bolt12PoolLocalRunKey(run),
         &LocalRun {
-            seed,
+            seed: **seed,
             submission,
             evidence: Some(evidence),
+            transcript_rounds,
         },
     )
     .await;
@@ -531,9 +655,15 @@ async fn generate(
     Ok((shares, transport))
 }
 
-/// A page of this guardian's evidence about run `run`, from round `from`.
-/// Refused unless consensus has abandoned the run.
-pub async fn serve_evidence(db: &Database, run: u64, from: u64) -> Result<EvidencePage> {
+/// Lazily stream one page of this guardian's evidence about abandoned run
+/// `run`, starting at `(from_round, from_peer)`. Refused unless consensus has
+/// abandoned the run.
+pub async fn serve_evidence(
+    db: &Database,
+    run: u64,
+    from_round: u64,
+    from_peer: u16,
+) -> Result<EvidencePage> {
     let mut dbtx = db.begin_transaction_nc().await;
 
     ensure!(
@@ -547,34 +677,41 @@ pub async fn serve_evidence(db: &Database, run: u64, from: u64) -> Result<Eviden
         .filter(|local| local.evidence.is_some())
         .context("This guardian has no evidence about the run")?;
 
-    let rows: Vec<(Bolt12PoolTranscriptKey, Vec<Option<SignedMessage>>)> = dbtx
-        .find_by_range(Bolt12PoolTranscriptKey(run, from)..Bolt12PoolTranscriptKey(run, u64::MAX))
-        .await
-        .collect()
-        .await;
+    let mut entries = Vec::new();
+    let mut bytes = 0usize;
+    let mut next_cursor = None;
 
-    let mut rounds = vec![];
-    let mut bytes = 0;
+    {
+        let mut stream = dbtx
+            .find_by_range(
+                Bolt12PoolTranscriptKey(run, from_round)..Bolt12PoolTranscriptKey(run, u64::MAX),
+            )
+            .await;
 
-    for (_, row) in &rows {
-        if bytes >= EVIDENCE_PAGE_BYTES {
-            break;
+        'outer: while let Some((key, row)) = stream.next().await {
+            let round = key.1;
+            let start_pos = if round == from_round {
+                usize::from(from_peer)
+            } else {
+                0
+            };
+
+            for (pos, slot) in row.into_iter().enumerate().skip(start_pos) {
+                let Some(signed) = slot else {
+                    continue;
+                };
+                let pos_u16 = u16::try_from(pos).expect("committee position fits in u16");
+                if bytes >= EVIDENCE_PAGE_BYTES {
+                    next_cursor = Some((round, pos_u16));
+                    break 'outer;
+                }
+                bytes = bytes.saturating_add(signed.message.len().saturating_add(80));
+                entries.push((round, pos_u16, signed));
+            }
         }
-
-        // Account for per-row and per-entry framing plus the 64-byte Schnorr
-        // signature so encoded pages stay strictly below `max_evidence_page_hex`.
-        bytes = bytes.saturating_add(8);
-        for entry in row {
-            bytes = bytes.saturating_add(match entry {
-                Some(signed) => signed.message.len().saturating_add(80),
-                None => 1,
-            });
-        }
-
-        rounds.push(row.clone());
     }
 
-    let relay = if from == 0 {
+    let relay = if from_round == 0 && from_peer == 0 {
         dbtx.get_value(&Bolt12PoolRelayEvidenceKey(run))
             .await
             .unwrap_or_default()
@@ -584,24 +721,26 @@ pub async fn serve_evidence(db: &Database, run: u64, from: u64) -> Result<Eviden
 
     Ok(EvidencePage {
         seed: local.seed,
-        more: rounds.len() < rows.len(),
-        rounds,
+        total_rounds: local.transcript_rounds,
+        entries,
         relay,
+        next_cursor,
     })
 }
 
 pub(super) fn max_evidence_page_hex(committee_len: usize, limits: ChannelLimits) -> usize {
     let max_chunks = usize::try_from(limits.chunks).expect("bounded by MAX_CHUNKS");
-    let max_msg_wire = max_chunks.saturating_mul(CHUNK);
-    let max_row = committee_len.saturating_mul(max_msg_wire.saturating_add(128));
+    let max_single_msg = max_chunks.saturating_mul(CHUNK).saturating_add(128);
     let fault_meta = committee_len
         .saturating_mul(max_chunks.saturating_add(2))
-        .saturating_mul(160);
+        .saturating_mul(200);
+    let r0_meta = committee_len.saturating_mul(MAX_FAULT_CIPHERTEXT_LEN.saturating_add(200));
     let relay_meta = MAX_RELAY_WITNESSES.saturating_mul(16);
     let raw_limit = EVIDENCE_PAGE_BYTES
-        .saturating_add(max_row)
+        .saturating_add(max_single_msg)
         .saturating_add(limits.fault_bytes)
         .saturating_add(fault_meta)
+        .saturating_add(r0_meta)
         .saturating_add(relay_meta)
         .saturating_add(65_536);
 
@@ -627,12 +766,27 @@ fn validate_relay_evidence(
         relay.faults.len() <= committee_len,
         "Too many transport faults in evidence"
     );
+    ensure!(
+        relay.r0_packets.len() <= committee_len,
+        "Too many round-0 packets in evidence"
+    );
+
+    for r0 in &relay.r0_packets {
+        ensure!(
+            r0.ciphertext.len() <= MAX_FAULT_CIPHERTEXT_LEN,
+            "Oversized round-0 packet in evidence"
+        );
+    }
 
     let mut total_fault_bytes = 0usize;
     for fault in &relay.faults {
         ensure!(
-            fault.max_ciphertext_len() <= MAX_FAULT_CIPHERTEXT_LEN,
+            fault.max_chunk_ciphertext_len() <= MAX_FAULT_CIPHERTEXT_LEN,
             "Oversized ciphertext in transport fault evidence"
+        );
+        ensure!(
+            fault.max_equivocation_msg_len() <= limits.message,
+            "Oversized equivocation message in transport fault evidence"
         );
         total_fault_bytes = total_fault_bytes.saturating_add(fault.ciphertext_bytes());
         ensure!(
@@ -644,62 +798,149 @@ fn validate_relay_evidence(
     Ok(())
 }
 
-/// A member's evidence: from our database for ourselves, from its endpoint
-/// otherwise.
+/// Request one authenticated evidence page from `member`, retrying transient
+/// RPC/timeout errors.
+async fn fetch_evidence_page(
+    api: &DynModuleApi,
+    me: PeerId,
+    signing_key: &Keypair,
+    member: PeerId,
+    run: u64,
+    cursor: (u64, u16),
+    max_page_hex: usize,
+) -> Result<EvidencePage> {
+    let req =
+        EvidenceRequest::new(run, me, cursor.0, cursor.1, signing_key).consensus_encode_to_hex();
+    let mut last_err = anyhow::anyhow!("Evidence fetch failed");
+
+    for attempt in 0..EVIDENCE_PAGE_ATTEMPTS {
+        let fetched = runtime::timeout(
+            EVIDENCE_PAGE_TIMEOUT,
+            api.request_single_peer::<String>(
+                BOLT12_MPC_EVIDENCE_ENDPOINT.to_owned(),
+                ApiRequestErased::new(req.clone()),
+                member,
+            ),
+        )
+        .await;
+
+        match fetched {
+            Ok(Ok(hex)) => {
+                ensure!(hex.len() <= max_page_hex, "Oversized evidence page");
+                return Ok(EvidencePage::consensus_decode_hex(
+                    &hex,
+                    &ModuleRegistry::default(),
+                )?);
+            }
+            Ok(Err(err)) => {
+                last_err = err.into();
+            }
+            Err(_) => {
+                last_err = anyhow::anyhow!("Evidence page request timed out");
+            }
+        }
+
+        if attempt + 1 < EVIDENCE_PAGE_ATTEMPTS {
+            sleep(EVIDENCE_RETRY_BACKOFF).await;
+        }
+    }
+
+    Err(last_err)
+}
+
+/// Fetch one committee member's evidence, enforcing strict cursor progress,
+/// per-entry signature overhead accounting, and total byte/round/time caps.
+#[allow(clippy::too_many_arguments)]
 async fn fetch_evidence(
     db: &Database,
     api: &DynModuleApi,
     me: PeerId,
+    signing_key: &Keypair,
     member: PeerId,
     run: &PoolRun,
     limits: ChannelLimits,
+    max_rounds: usize,
+) -> Result<([u8; 32], Rounds, RelayEvidence)> {
+    runtime::timeout(
+        EVIDENCE_MEMBER_TIMEOUT,
+        fetch_evidence_inner(db, api, me, signing_key, member, run, limits, max_rounds),
+    )
+    .await
+    .context("Timed out fetching member evidence")?
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_evidence_inner(
+    db: &Database,
+    api: &DynModuleApi,
+    me: PeerId,
+    signing_key: &Keypair,
+    member: PeerId,
+    run: &PoolRun,
+    limits: ChannelLimits,
+    max_rounds: usize,
 ) -> Result<([u8; 32], Rounds, RelayEvidence)> {
     let committee_len = run.committee.len();
+    let committee_u16 = u16::try_from(committee_len).expect("committees are small");
     let max_page_hex = max_evidence_page_hex(committee_len, limits);
     let max_total_bytes = max_member_evidence_bytes(committee_len, limits);
+
     let mut seed = None;
-    let mut rounds = vec![];
+    let mut total_rounds: Option<usize> = None;
+    let mut rounds: Rounds = vec![];
     let mut relay = None;
     let mut total_bytes = 0usize;
+    let mut cursor = (0u64, 0u16);
 
     loop {
         let page = if member == me {
-            serve_evidence(db, run.run, rounds.len() as u64).await?
+            serve_evidence(db, run.run, cursor.0, cursor.1).await?
         } else {
-            let hex: String = api
-                .request_single_peer(
-                    BOLT12_MPC_EVIDENCE_ENDPOINT.to_owned(),
-                    ApiRequestErased::new((run.run, rounds.len() as u64)),
-                    member,
-                )
-                .await?;
-
-            ensure!(hex.len() <= max_page_hex, "Oversized evidence page");
-
-            EvidencePage::consensus_decode_hex(&hex, &ModuleRegistry::default())?
+            fetch_evidence_page(api, me, signing_key, member, run.run, cursor, max_page_hex).await?
         };
 
         ensure!(
-            seed.is_none_or(|seed| seed == page.seed),
+            seed.is_none_or(|s| s == page.seed),
             "The seed changed between pages"
         );
+        let page_total_rounds = usize::try_from(page.total_rounds)?;
         ensure!(
-            !page.rounds.is_empty() || !page.more,
-            "An empty page claims more follow"
+            page_total_rounds <= max_rounds,
+            "Evidence declares too many rounds"
+        );
+        ensure!(
+            total_rounds.is_none_or(|n| n == page_total_rounds),
+            "Total rounds changed between pages"
         );
 
-        for row in &page.rounds {
+        if rounds.is_empty() && page_total_rounds > 0 {
+            rounds = vec![vec![None; committee_len]; page_total_rounds];
+        }
+
+        let mut page_bytes = 0usize;
+        let mut last_seen: Option<(u64, u16)> = None;
+
+        for (round, pos, signed) in page.entries {
+            let round_idx = usize::try_from(round)?;
             ensure!(
-                row.len() <= committee_len,
-                "Evidence round row exceeds committee size"
+                round_idx < page_total_rounds && pos < committee_u16,
+                "Evidence entry out of bounds"
             );
-            for signed in row.iter().flatten() {
-                total_bytes = total_bytes.saturating_add(signed.message.len());
-                ensure!(
-                    total_bytes <= max_total_bytes,
-                    "Evidence exceeds total byte cap"
-                );
-            }
+            ensure!(
+                (round, pos) >= cursor && last_seen.is_none_or(|prev| (round, pos) > prev),
+                "Evidence entries are out of order"
+            );
+
+            let entry_bytes = signed.message.len().saturating_add(80);
+            page_bytes = page_bytes.saturating_add(entry_bytes);
+            total_bytes = total_bytes.saturating_add(entry_bytes);
+            ensure!(
+                total_bytes <= max_total_bytes,
+                "Evidence exceeds total byte cap"
+            );
+
+            rounds[round_idx][usize::from(pos)] = Some(signed);
+            last_seen = Some((round, pos));
         }
 
         if relay.is_none() {
@@ -707,12 +948,25 @@ async fn fetch_evidence(
             relay = Some(page.relay);
         }
         seed = Some(page.seed);
-        rounds.extend(page.rounds);
+        total_rounds = Some(page_total_rounds);
 
-        ensure!(rounds.len() <= MAX_ROUNDS, "Too many rounds of evidence");
-
-        if !page.more {
-            break;
+        match page.next_cursor {
+            Some(next) => {
+                ensure!(
+                    usize::try_from(next.0)? < page_total_rounds && next.1 < committee_u16,
+                    "Evidence next_cursor out of bounds"
+                );
+                ensure!(
+                    last_seen.is_some_and(|prev| next > prev),
+                    "Evidence next_cursor did not advance"
+                );
+                ensure!(
+                    page_bytes >= EVIDENCE_PAGE_BYTES,
+                    "Evidence page made insufficient progress"
+                );
+                cursor = next;
+            }
+            None => break,
         }
     }
 
@@ -723,15 +977,18 @@ async fn fetch_evidence(
     ))
 }
 
-/// Judge abandoned runs whose evidence is in and that this guardian has not
-/// judged yet.
+/// Judge abandoned runs whose evidence window has closed according to the
+/// consensus clock and that this guardian has not judged yet.
 async fn judge_abandoned(
     cfg: &LightningConfig,
     me: PeerId,
     db: &Database,
     api: &DynModuleApi,
 ) -> Result<()> {
-    let now = duration_since_epoch().as_secs();
+    let now = consensus_unix_time(cfg, db).await;
+    if now == 0 {
+        return Ok(());
+    }
 
     let abandoned: Vec<AbandonedRun> = db
         .begin_transaction_nc()
@@ -745,13 +1002,7 @@ async fn judge_abandoned(
     for abandoned in abandoned {
         let run = abandoned.run.run;
 
-        let ready = abandoned.all_evidence_committed()
-            || now
-                >= abandoned
-                    .abandoned_at
-                    .saturating_add(EVIDENCE_WINDOW + JUDGE_MARGIN);
-
-        if !ready || abandoned.is_stale(now) {
+        if abandoned.collecting_evidence(now) || abandoned.is_stale(now) {
             continue;
         }
 
@@ -788,19 +1039,12 @@ async fn judge_abandoned(
 /// Only the messages in `rounds` whose sender signed them, as `member`
 /// received them.
 pub(super) fn signed_messages(
-    cfg: &LightningConfig,
+    keys: &BTreeMap<PeerId, PublicKey>,
     run: &PoolRun,
     member: PeerId,
     rounds: &Rounds,
-) -> Result<Received> {
-    let keys = &cfg
-        .consensus
-        .bolt12
-        .as_ref()
-        .context("Federated BOLT12 is disabled")?
-        .transport_keys;
-
-    Ok(rounds
+) -> Received {
+    rounds
         .iter()
         .enumerate()
         .map(|(round, row)| {
@@ -818,29 +1062,69 @@ pub(super) fn signed_messages(
                 })
                 .collect()
         })
-        .collect())
+        .collect()
 }
 
-/// Convict any sender proven to have sent a corrupt, conflicting, or
-/// improperly-signed transport packet (verified against its outer envelope
-/// signature and revealed seed-derived ephemeral key).
+/// Convict any sender proven to have advertised a fake Round-0 ephemeral key
+/// or sent a corrupt, conflicting, equivocating, or improperly-signed
+/// transport packet.
 fn collect_transport_culprits(
     run: &PoolRun,
-    keys: &std::collections::BTreeMap<PeerId, fedimint_core::secp256k1::PublicKey>,
+    keys: &BTreeMap<PeerId, PublicKey>,
     evidence: &[Option<Evidence>],
     faults_by_member: &[(PeerId, RelayEvidence)],
     max_chunks: u32,
 ) -> BTreeSet<PeerId> {
     let mut culprits = BTreeSet::new();
+    let mut lied_r0_eph: BTreeSet<(PeerId, PeerId)> = BTreeSet::new();
+
+    // First verify every member's advertised Round-0 ephemeral keys against
+    // their revealed seeds. A peer that lied about its `recv_ephemeral_pk` is
+    // convicted and cannot use Round >= 1 decryption failures to frame the
+    // honest sender that encrypted to that fake key.
+    for (receiver, relay) in faults_by_member {
+        for r0 in &relay.r0_packets {
+            let Some(sender_pos) = run.position(r0.sender).map(usize::from) else {
+                continue;
+            };
+            let Some(sender_pk) = keys.get(&r0.sender) else {
+                continue;
+            };
+            let Some(sender_ev) = evidence.get(sender_pos).and_then(Option::as_ref) else {
+                continue;
+            };
+
+            if verify_r0_ephemeral_fault(
+                run.run,
+                (r0.sender, sender_pk),
+                *receiver,
+                &sender_ev.seed,
+                r0,
+            ) {
+                culprits.insert(r0.sender);
+                lied_r0_eph.insert((r0.sender, *receiver));
+            }
+        }
+    }
 
     for (recipient, relay) in faults_by_member {
         let Some(recipient_pk) = keys.get(recipient) else {
             continue;
         };
+        let Some(recipient_pos) = run.position(*recipient).map(usize::from) else {
+            continue;
+        };
+        let Some(recipient_ev) = evidence.get(recipient_pos).and_then(Option::as_ref) else {
+            continue;
+        };
+
         for fault in &relay.faults {
             let Some(sender) = fault.sender() else {
                 continue;
             };
+            if lied_r0_eph.contains(&(*recipient, sender)) {
+                continue;
+            }
             let Some(sender_pos) = run.position(sender).map(usize::from) else {
                 continue;
             };
@@ -856,6 +1140,7 @@ fn collect_transport_culprits(
                 (sender, sender_pk),
                 (*recipient, recipient_pk),
                 &sender_ev.seed,
+                &recipient_ev.seed,
                 fault,
                 max_chunks,
             ) {
@@ -865,6 +1150,69 @@ fn collect_transport_culprits(
     }
 
     culprits
+}
+
+type MemberEvidence = ([u8; 32], Vec<Vec<Option<SignedMessage>>>, RelayEvidence);
+type RawFetchedEvidence = Vec<(PeerId, Option<(sha256::Hash, MemberEvidence)>)>;
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_verdict(
+    run: &PoolRun,
+    keys: &BTreeMap<PeerId, PublicKey>,
+    params: mpc::engine::Params,
+    batch: usize,
+    context: &[u8],
+    limits: ChannelLimits,
+    raw_fetched: RawFetchedEvidence,
+    submitted: &[bool],
+) -> Result<(mpc::replay::Verdict, BTreeSet<PeerId>)> {
+    let mut evidence = Vec::with_capacity(run.committee.len());
+    let mut faults_by_member: Vec<(PeerId, RelayEvidence)> =
+        Vec::with_capacity(run.committee.len());
+
+    for (member, entry) in raw_fetched {
+        let parsed = match entry {
+            Some((digest, (seed, rounds, relay)))
+                if evidence_digest(&seed, &rounds, &relay) == digest =>
+            {
+                let relay_missing: BTreeSet<(usize, usize, u64)> = relay
+                    .relay_missing
+                    .iter()
+                    .filter_map(|&(sender, recipient, round)| {
+                        Some((
+                            usize::from(run.position(sender)?),
+                            usize::from(run.position(recipient)?),
+                            round,
+                        ))
+                    })
+                    .collect();
+
+                let received = signed_messages(keys, run, member, &rounds);
+                faults_by_member.push((member, relay));
+
+                Some(Evidence {
+                    seed,
+                    received,
+                    relay_missing,
+                })
+            }
+            Some(_) => {
+                warn!(target: LOG_MODULE_LNV2, run = run.run, %member, "Evidence does not match its commitment");
+                None
+            }
+            None => None,
+        };
+        evidence.push(parsed);
+    }
+
+    let transport_culprits =
+        collect_transport_culprits(run, keys, &evidence, &faults_by_member, limits.chunks);
+    let circuit = direct::circuit(params, batch)?;
+    let found = runtime::block_on(judge(
+        params, batch, &circuit, context, &evidence, submitted,
+    ))?;
+
+    Ok((found, transport_culprits))
 }
 
 /// Replay an abandoned run from its members' evidence and find who is to
@@ -884,57 +1232,33 @@ async fn verdict(
         .context("Federated BOLT12 is disabled")?
         .transport_keys
         .clone();
+    let private = cfg
+        .private
+        .bolt12
+        .as_ref()
+        .context("Missing private BOLT12 configuration")?;
+    let signing_key = Keypair::from_secret_key(SECP256K1, &private.transport_secret);
     let (params, batch) = run_params(cfg, run)?;
     let limits = ChannelLimits::for_run(params.parties(), params.degree(), batch);
+    let max_rounds = max_rounds_for_run(params, batch)?;
 
-    let mut evidence = Vec::with_capacity(run.committee.len());
-    let mut faults_by_member: Vec<(PeerId, RelayEvidence)> =
-        Vec::with_capacity(run.committee.len());
-
-    for member in &run.committee {
-        let Some(digest) = abandoned.evidence.get(member) else {
-            evidence.push(None);
-            continue;
-        };
-
-        // Evidence we cannot fetch, or that does not match the commitment,
-        // counts as withheld.
-        let fetched = match fetch_evidence(db, api, me, *member, run, limits).await {
-            Ok((seed, rounds, relay)) if evidence_digest(&seed, &rounds, &relay) == *digest => {
-                let relay_missing: BTreeSet<(usize, usize, u64)> = relay
-                    .relay_missing
-                    .iter()
-                    .filter_map(|&(sender, recipient, round)| {
-                        Some((
-                            usize::from(run.position(sender)?),
-                            usize::from(run.position(recipient)?),
-                            round,
-                        ))
-                    })
-                    .collect();
-
-                faults_by_member.push((*member, relay));
-
-                Some(Evidence {
-                    seed,
-                    received: signed_messages(cfg, run, *member, &rounds)?,
-                    relay_missing,
-                })
+    // Fetch all committee members' evidence in parallel with bounded timeouts.
+    let raw_fetched = join_all(run.committee.iter().map(|&member| {
+        let digest = abandoned.evidence.get(&member).copied();
+        async move {
+            let Some(digest) = digest else {
+                return (member, None);
+            };
+            match fetch_evidence(db, api, me, &signing_key, member, run, limits, max_rounds).await {
+                Ok(data) => (member, Some((digest, data))),
+                Err(err) => {
+                    warn!(target: LOG_MODULE_LNV2, run = run.run, %member, err = %format!("{err:#}"), "Could not fetch evidence");
+                    (member, None)
+                }
             }
-            Ok(_) => {
-                warn!(target: LOG_MODULE_LNV2, run = run.run, %member, "Evidence does not match its commitment");
-
-                None
-            }
-            Err(err) => {
-                warn!(target: LOG_MODULE_LNV2, run = run.run, %member, err = %format!("{err:#}"), "Could not fetch evidence");
-
-                None
-            }
-        };
-
-        evidence.push(fetched);
-    }
+        }
+    }))
+    .await;
 
     let submitted: Vec<bool> = run
         .committee
@@ -945,21 +1269,20 @@ async fn verdict(
     let context = run_context(cfg, run)?;
     let run_cloned = run.clone();
 
-    // Replaying every member and verifying transport faults is CPU-intensive.
+    // Hashing transcripts, verifying all inner Schnorr signatures, verifying
+    // transport faults, and replaying every member are all CPU-intensive: keep
+    // all of them off the async executor.
     let (found, transport_culprits) = runtime::spawn_blocking(move || {
-        let transport_culprits = collect_transport_culprits(
+        evaluate_verdict(
             &run_cloned,
             &keys,
-            &evidence,
-            &faults_by_member,
-            limits.chunks,
-        );
-        let circuit = direct::circuit(params, batch)?;
-        let found = runtime::block_on(judge(
-            params, batch, &circuit, &context, &evidence, &submitted,
-        ))?;
-
-        Ok::<_, anyhow::Error>((found, transport_culprits))
+            params,
+            batch,
+            &context,
+            limits,
+            raw_fetched,
+            &submitted,
+        )
     })
     .await?;
 

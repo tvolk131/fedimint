@@ -17,7 +17,7 @@ use bitcoin::secp256k1::Message;
 use events::{IncomingPaymentStarted, OutgoingPaymentStarted};
 use fedimint_api_client::api::{DynModuleApi, FederationError};
 use fedimint_client::ClientHandleArc;
-use fedimint_client_module::error::ClientModuleError;
+use fedimint_client_module::error::{ClientModuleError, OperationAlreadyExistsError};
 use fedimint_client_module::module::init::{ClientModuleInit, ClientModuleInitArgs};
 use fedimint_client_module::module::recovery::NoModuleBackup;
 use fedimint_client_module::module::{ClientContext, ClientModule, IClientModule, OutPointRange};
@@ -30,7 +30,7 @@ use fedimint_client_module::{
 };
 use fedimint_core::config::FederationId;
 use fedimint_core::core::{Decoder, IntoDynInstance, ModuleInstanceId, ModuleKind, OperationId};
-use fedimint_core::db::DatabaseTransaction;
+use fedimint_core::db::{AutocommitError, DatabaseTransaction};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::{
     Amounts, ApiVersion, CommonModuleInit, ModuleCommon, ModuleInit, MultiApiVersion,
@@ -137,13 +137,6 @@ fn incoming_relay_plan(
     } else {
         IncomingRelayPlan::CreateReceiveAndCompletion
     }
-}
-
-fn operation_creation_failed_permanently(
-    creation_failed: bool,
-    operation_exists_after_failure: bool,
-) -> bool {
-    creation_failed && !operation_exists_after_failure
 }
 
 /// Identifies the role of an LNv2 gateway operation.
@@ -675,19 +668,99 @@ impl GatewayClientModuleV2 {
         }
     }
 
+    /// Plans a relay of `circuit` from the operations persisted so far.
+    async fn read_incoming_relay_plan(
+        &self,
+        receive_operation_id: OperationId,
+        completion_operation_id: OperationId,
+        circuit: IncomingCircuitKey,
+    ) -> IncomingRelayPlan {
+        let receive_exists = self.client_ctx.operation_exists(receive_operation_id).await;
+        let completion_exists = self
+            .client_ctx
+            .operation_exists(completion_operation_id)
+            .await;
+        let legacy_completion_exists = self
+            .legacy_completion_exists(receive_operation_id, circuit)
+            .await;
+
+        incoming_relay_plan(receive_exists, completion_exists, legacy_completion_exists)
+    }
+
+    /// Checks that a fresh incoming contract may be funded and builds the
+    /// transaction funding it.
+    async fn fresh_receive_funding(
+        &self,
+        payment_hash: sha256::Hash,
+        receive_operation_id: OperationId,
+        contract: IncomingContract,
+        blocks_to_claim_deadline: u32,
+    ) -> Result<TransactionBuilder, RelayIncomingHtlcError> {
+        // Funding is irreversible, and the gateway is only reimbursed by
+        // settling the HTLC before its claim deadline, so do not fund an
+        // HTLC that is about to expire. The margin is small because LDK's
+        // default invoices leave only 3 blocks before the claim deadline.
+        if blocks_to_claim_deadline < LNV2_CLAIM_DEADLINE_MARGIN {
+            return Err(RelayIncomingHtlcError::ClaimDeadlineTooClose {
+                blocks_to_claim_deadline,
+            });
+        }
+        self.ensure_federation_responsive(payment_hash).await?;
+
+        let refund_keypair = self.keypair;
+        let client_output = ClientOutput::<LightningOutput> {
+            output: LightningOutput::V0(LightningOutputV0::Incoming(contract.clone())),
+            amounts: Amounts::new_bitcoin(contract.commitment.amount),
+        };
+        let client_output_sm = ClientOutputSM::<GatewayClientStateMachinesV2> {
+            state_machines: Arc::new(move |range: OutPointRange| {
+                assert_eq!(range.count(), 1);
+
+                vec![GatewayClientStateMachinesV2::Receive(ReceiveStateMachine {
+                    common: ReceiveSMCommon {
+                        operation_id: receive_operation_id,
+                        contract: contract.clone(),
+                        outpoint: range.into_iter().next().unwrap(),
+                        refund_keypair,
+                    },
+                    state: ReceiveSMState::Funding,
+                })]
+            }),
+        };
+
+        let client_output = self.client_ctx.make_client_outputs(ClientOutputBundle::new(
+            vec![client_output],
+            vec![client_output_sm],
+        ));
+        let funding = TransactionBuilder::new().with_outputs(client_output);
+
+        Ok(funding)
+    }
+
     /// Funds the incoming contract of an intercepted LNv2 HTLC and starts the
     /// operation that completes the HTLC's circuit.
     ///
     /// A contract or circuit that is already being handled is joined rather
     /// than started twice.
     ///
+    /// # Concurrency
+    ///
+    /// A relay that refuses to fund a fresh contract reads the persisted
+    /// operations again and joins a receive or completion that a concurrent
+    /// relay created in the meantime. A concurrent relay can still fund the
+    /// contract just after that read, so the caller must not let another relay
+    /// of the same circuit that can fund a fresh contract run between this
+    /// relay and the decision to fail the HTLC back.
+    ///
     /// # Errors
     ///
     /// Fails with a [`RelayIncomingHtlcError`] if a fresh contract is not
     /// funded because the HTLC's claim deadline is too close or the federation
-    /// does not answer, or if the funding
-    /// transaction or the completion operation could not be started and no
-    /// earlier attempt had started it.
+    /// does not answer, or if the funding transaction and the completion
+    /// operation could not be started and no earlier attempt had started them.
+    /// Only [`RelayIncomingHtlcError::CompletionNotStarted`] and
+    /// [`RelayIncomingHtlcError::ReceiveVanished`] can leave a funded contract
+    /// behind; see [`RelayIncomingHtlcError::htlc_may_be_failed_back`].
     pub async fn relay_incoming_htlc(
         &self,
         payment_hash: sha256::Hash,
@@ -704,140 +777,206 @@ impl GatewayClientModuleV2 {
             htlc_id,
         };
         let completion_operation_id = incoming_circuit_operation_id(receive_operation_id, circuit);
-        let receive_exists = self.client_ctx.operation_exists(receive_operation_id).await;
-        let completion_exists = self
-            .client_ctx
-            .operation_exists(completion_operation_id)
-            .await;
-        let legacy_completion_exists = self
-            .legacy_completion_exists(receive_operation_id, circuit)
-            .await;
-        let plan = incoming_relay_plan(receive_exists, completion_exists, legacy_completion_exists);
-        if plan == IncomingRelayPlan::Replay {
-            return Ok(());
-        }
-
         let commitment = contract.commitment.clone();
-        if plan == IncomingRelayPlan::CreateReceiveAndCompletion {
-            // Only gate fresh funding: the other plans resume an already
-            // funded contract and must not be cancelled.
-            //
-            // Funding is irreversible, and the gateway is only reimbursed by
-            // settling the HTLC before its claim deadline, so do not fund an
-            // HTLC that is about to expire. The margin is small because LDK's
-            // default invoices leave only 3 blocks before the claim deadline.
-            if blocks_to_claim_deadline < LNV2_CLAIM_DEADLINE_MARGIN {
-                return Err(RelayIncomingHtlcError::ClaimDeadlineTooClose {
-                    blocks_to_claim_deadline,
-                });
-            }
-            self.ensure_federation_responsive(payment_hash).await?;
 
-            let refund_keypair = self.keypair;
-            let client_output = ClientOutput::<LightningOutput> {
-                output: LightningOutput::V0(LightningOutputV0::Incoming(contract.clone())),
-                amounts: Amounts::new_bitcoin(contract.commitment.amount),
-            };
-            let client_output_sm = ClientOutputSM::<GatewayClientStateMachinesV2> {
-                state_machines: Arc::new(move |range: OutPointRange| {
-                    assert_eq!(range.count(), 1);
-
-                    vec![GatewayClientStateMachinesV2::Receive(ReceiveStateMachine {
-                        common: ReceiveSMCommon {
-                            operation_id: receive_operation_id,
-                            contract: contract.clone(),
-                            outpoint: range.into_iter().next().unwrap(),
-                            refund_keypair,
-                        },
-                        state: ReceiveSMState::Funding,
-                    })]
-                }),
-            };
-
-            let client_output = self.client_ctx.make_client_outputs(ClientOutputBundle::new(
-                vec![client_output],
-                vec![client_output_sm],
-            ));
-            let transaction = TransactionBuilder::new().with_outputs(client_output);
-
-            let creation_result = self
-                .client_ctx
-                .finalize_and_submit_transaction(
+        let funding = match self
+            .read_incoming_relay_plan(receive_operation_id, completion_operation_id, circuit)
+            .await
+        {
+            IncomingRelayPlan::Replay => return Ok(()),
+            IncomingRelayPlan::AddCompletion => None,
+            IncomingRelayPlan::CreateReceiveAndCompletion => match self
+                .fresh_receive_funding(
+                    payment_hash,
                     receive_operation_id,
-                    LightningCommonInit::KIND.as_str(),
-                    |_| GatewayOperationMetaV2::role(GatewayOperationRoleV2::Receive),
-                    transaction,
+                    contract,
+                    blocks_to_claim_deadline,
                 )
-                .await;
-            if let Err(error) = creation_result {
-                let operation_exists = self.client_ctx.operation_exists(receive_operation_id).await;
-                if operation_creation_failed_permanently(true, operation_exists) {
-                    return Err(error.into());
-                }
-            } else {
-                let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
-                self.client_ctx
-                    .log_event(
-                        &mut dbtx,
-                        IncomingPaymentStarted {
-                            operation_start,
-                            incoming_contract_commitment: commitment,
-                            invoice_amount: Amount::from_msats(amount_msat),
-                        },
+                .await
+            {
+                Ok(funding) => Some(funding),
+                // A concurrent relay of this circuit may have funded the
+                // contract while these checks ran, and an error would then
+                // let the caller fail back an HTLC the gateway has paid for.
+                Err(error) => match self
+                    .read_incoming_relay_plan(
+                        receive_operation_id,
+                        completion_operation_id,
+                        circuit,
                     )
-                    .await;
-                dbtx.commit_tx().await;
-            }
-        }
+                    .await
+                {
+                    IncomingRelayPlan::Replay => return Ok(()),
+                    IncomingRelayPlan::AddCompletion => None,
+                    IncomingRelayPlan::CreateReceiveAndCompletion => return Err(error),
+                },
+            },
+        };
 
-        self.start_circuit_completion(
+        self.commit_receive_and_completion(
             receive_operation_id,
             completion_operation_id,
             payment_hash,
             circuit,
+            funding,
+            Some((operation_start, commitment, amount_msat)),
         )
         .await
     }
 
-    /// Start the operation that settles or fails one incoming circuit once
-    /// its receive operation reaches a final state.
-    async fn start_circuit_completion(
+    /// Atomically commit optional `funding` transaction (plus optional LNv2
+    /// `IncomingPaymentStarted` event) together with `CircuitCompleteStateMachine`
+    /// in a single database transaction.
+    pub(crate) async fn commit_receive_and_completion(
         &self,
         receive_operation_id: OperationId,
         completion_operation_id: OperationId,
         payment_hash: sha256::Hash,
         circuit: IncomingCircuitKey,
+        funding: Option<TransactionBuilder>,
+        incoming_event: Option<(
+            std::time::SystemTime,
+            fedimint_lnv2_common::contracts::Commitment,
+            u64,
+        )>,
     ) -> Result<(), RelayIncomingHtlcError> {
         let completion =
-            GatewayClientStateMachinesV2::CircuitComplete(CircuitCompleteStateMachine {
-                common: CircuitCompleteSMCommon {
-                    operation_id: completion_operation_id,
-                    receive_operation_id,
-                    payment_hash,
-                    circuit,
-                },
-                state: CompleteSMState::Pending,
-            });
-        let creation_result = self
+            self.client_ctx
+                .make_dyn_state(GatewayClientStateMachinesV2::CircuitComplete(
+                    CircuitCompleteStateMachine {
+                        common: CircuitCompleteSMCommon {
+                            operation_id: completion_operation_id,
+                            receive_operation_id,
+                            payment_hash,
+                            circuit,
+                        },
+                        state: CompleteSMState::Pending,
+                    },
+                ));
+
+        // Funding the incoming contract pays the recipient, and only the
+        // completion operation settles the HTLC that reimburses the gateway.
+        // Both are committed in one transaction: a relay that stops anywhere
+        // (a crash, a power loss) leaves either both or neither, and an
+        // error means neither was written by this call.
+        let result = self
             .client_ctx
-            .manual_operation_start(
-                completion_operation_id,
-                LightningCommonInit::KIND.as_str(),
-                GatewayOperationMetaV2::role(GatewayOperationRoleV2::CircuitCompletion),
-                vec![self.client_ctx.make_dyn_state(completion)],
+            .module_db()
+            .autocommit(
+                |dbtx, _| {
+                    let funding = funding.clone();
+                    let completion = completion.clone();
+                    let incoming_event = incoming_event.clone();
+                    Box::pin(async move {
+                        // The receive is found by its state machines, as the
+                        // plan found it. A concurrent relay of another circuit
+                        // for the same contract may have funded it since the
+                        // plan was made; its receive is joined rather than
+                        // funded twice.
+                        if !self
+                            .client_ctx
+                            .operation_exists_dbtx(dbtx, receive_operation_id)
+                            .await
+                        {
+                            // State machines are never removed, so only a
+                            // fresh receive plan finds none.
+                            let Some(funding) = funding else {
+                                return Err(RelayIncomingHtlcError::ReceiveVanished);
+                            };
+
+                            // An operation log entry without state machines
+                            // funds nothing, and its operation id cannot be
+                            // used to fund the contract.
+                            if self
+                                .client_ctx
+                                .get_operation_dbtx(dbtx, receive_operation_id)
+                                .await
+                                .is_some()
+                            {
+                                return Err(TransactionSubmitError::from(
+                                    OperationAlreadyExistsError {
+                                        operation_id: receive_operation_id,
+                                    },
+                                )
+                                .into());
+                            }
+
+                            self.client_ctx
+                                .finalize_and_submit_transaction_dbtx(
+                                    dbtx,
+                                    receive_operation_id,
+                                    LightningCommonInit::KIND.as_str(),
+                                    |_| {
+                                        GatewayOperationMetaV2::role(
+                                            GatewayOperationRoleV2::Receive,
+                                        )
+                                    },
+                                    funding,
+                                )
+                                .await?;
+
+                            if let Some((operation_start, commitment, amount_msat)) = incoming_event
+                            {
+                                self.client_ctx
+                                    .log_event(
+                                        dbtx,
+                                        IncomingPaymentStarted {
+                                            operation_start,
+                                            incoming_contract_commitment: commitment,
+                                            invoice_amount: Amount::from_msats(amount_msat),
+                                        },
+                                    )
+                                    .await;
+                            }
+                        }
+
+                        self.client_ctx
+                            .manual_operation_start_dbtx(
+                                dbtx,
+                                completion_operation_id,
+                                LightningCommonInit::KIND.as_str(),
+                                GatewayOperationMetaV2::role(
+                                    GatewayOperationRoleV2::CircuitCompletion,
+                                ),
+                                vec![completion],
+                            )
+                            .await
+                            .map_err(TransactionSubmitError::from)?;
+
+                        Ok::<_, RelayIncomingHtlcError>(())
+                    })
+                },
+                Some(100),
             )
             .await;
-        if let Err(error) = creation_result {
-            let operation_exists = self
-                .client_ctx
-                .operation_exists(completion_operation_id)
-                .await;
-            if operation_creation_failed_permanently(true, operation_exists) {
-                return Err(error.into());
+
+        let error = match result {
+            Ok(()) => return Ok(()),
+            Err(AutocommitError::ClosureError { error, .. }) => error,
+            Err(AutocommitError::CommitFailed { last_error, .. }) => {
+                TransactionSubmitError::Database(last_error).into()
             }
+        };
+
+        // Nothing was written by this call, but a concurrent relay of this
+        // circuit may have started its completion, or one of another circuit
+        // of this contract may have funded it.
+        if self
+            .client_ctx
+            .operation_exists(completion_operation_id)
+            .await
+        {
+            return Ok(());
         }
 
-        Ok(())
+        match error {
+            RelayIncomingHtlcError::Transaction(error)
+                if self.client_ctx.operation_exists(receive_operation_id).await =>
+            {
+                Err(RelayIncomingHtlcError::CompletionNotStarted(error))
+            }
+            error => Err(error),
+        }
     }
 
     /// Funds the incoming contract of a direct swap and waits for its final
@@ -1101,10 +1240,26 @@ pub enum RelayIncomingHtlcError {
         blocks_to_claim_deadline: u32,
     },
 
-    /// The funding transaction or the completion operation could not be
-    /// started.
+    /// The funding transaction and the completion operation could not be
+    /// started, so nothing was funded.
     #[error("The incoming contract could not be funded")]
     Transaction(#[from] TransactionSubmitError),
+
+    /// The incoming contract is funded, but the operation that settles the
+    /// HTLC could not be started. The HTLC must stay held: failing it back
+    /// would leave the gateway having paid the recipient without being
+    /// reimbursed. Relaying it again adds the missing operation once the
+    /// cause has cleared, and fails again while it persists.
+    #[error("The incoming contract is funded but its HTLC completion could not be started")]
+    CompletionNotStarted(#[source] TransactionSubmitError),
+
+    /// The relay found the receive operation that funds the incoming contract
+    /// when it planned, but not when it came to start the operation that
+    /// settles the HTLC, so it wrote nothing. State machines are never
+    /// removed, so this should not happen; as the contract may be funded, the
+    /// HTLC must stay held.
+    #[error("The incoming contract's receive operation disappeared during the relay")]
+    ReceiveVanished,
 
     /// The held payment's amount is not the amount of the federated BOLT12
     /// invoice it pays, so funding the recipient would not be covered.
@@ -1115,6 +1270,20 @@ pub enum RelayIncomingHtlcError {
         /// The amount the Lightning node holds.
         received_msat: u64,
     },
+}
+
+impl RelayIncomingHtlcError {
+    /// Whether the HTLC may be failed back after this error.
+    ///
+    /// This is `false` once the incoming contract is or may be funded, as the
+    /// recipient can then claim it and the gateway is reimbursed only by
+    /// settling the HTLC. A `true` answer holds only while no other relay
+    /// of the same circuit can fund the contract before the HTLC is failed
+    /// back; see the caller's obligations on
+    /// [`GatewayClientModuleV2::relay_incoming_htlc`].
+    pub fn htlc_may_be_failed_back(&self) -> bool {
+        !matches!(self, Self::CompletionNotStarted(_) | Self::ReceiveVanished)
+    }
 }
 
 impl From<FederationError> for GatewaySendPaymentError {

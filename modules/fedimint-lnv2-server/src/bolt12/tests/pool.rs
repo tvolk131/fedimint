@@ -1005,8 +1005,16 @@ async fn evidence_is_revealed_only_for_abandoned_runs_and_only_signed_messages_c
         Some(sign(2, 1, 0, b"from two")),
     ]];
 
+    let transport_keys = &fed
+        .cfg
+        .consensus
+        .bolt12
+        .as_ref()
+        .expect("enabled")
+        .transport_keys;
+
     assert_eq!(
-        signed_messages(&fed.cfg, &run, PeerId::from(0), &rounds)?,
+        signed_messages(transport_keys, &run, PeerId::from(0), &rounds),
         vec![vec![None, Some(b"from one".to_vec()), None]]
     );
 
@@ -1020,6 +1028,7 @@ async fn evidence_is_revealed_only_for_abandoned_runs_and_only_signed_messages_c
             seed: [7; 32],
             submission: None,
             evidence: Some(evidence_digest(&[7; 32], &rounds, &relay)),
+            transcript_rounds: u64::try_from(rounds.len()).expect("small"),
         },
     )
     .await;
@@ -1028,16 +1037,21 @@ async fn evidence_is_revealed_only_for_abandoned_runs_and_only_signed_messages_c
     dbtx.commit_tx().await;
 
     // While the run could still finish, the seed stays secret.
-    assert!(serve_evidence(&fed.db, 0, 0).await.is_err());
+    assert!(serve_evidence(&fed.db, 0, 0, 0).await.is_err());
 
     fed.abandon(0, NOW + POOL_RUN_TIMEOUT).await?;
 
-    let page = serve_evidence(&fed.db, 0, 0).await?;
+    let page = serve_evidence(&fed.db, 0, 0, 0).await?;
 
     assert_eq!(page.seed, [7; 32]);
-    assert!(!page.more);
+    assert!(page.next_cursor.is_none());
+    let mut reconstructed =
+        vec![vec![None; run.committee.len()]; usize::try_from(page.total_rounds)?];
+    for (round, pos, msg) in page.entries {
+        reconstructed[usize::try_from(round)?][usize::from(pos)] = Some(msg);
+    }
     assert_eq!(
-        evidence_digest(&page.seed, &page.rounds, &page.relay),
+        evidence_digest(&page.seed, &reconstructed, &page.relay),
         evidence_digest(&[7; 32], &rounds, &relay)
     );
 
@@ -1301,17 +1315,54 @@ async fn transport_relay_recovers_blocked_link() -> Result<()> {
     let msg = b"round-0-share-bytes";
     let _sent = ch0.packets(PeerId::from(1), 0, msg)?;
 
-    // Unauthenticated / forged or outsider fetch requests must be rejected.
+    // Unauthenticated / forged, outsider, or wrong-sender fetch requests must
+    // be rejected.
     let outsider_key = Keypair::new(SECP256K1, &mut OsRng);
-    let forged = FetchRequest::new(0, PeerId::from(2), PeerId::from(1), 0, &outsider_key);
+    let forged = FetchRequest::new(
+        0,
+        PeerId::from(0),
+        PeerId::from(2),
+        PeerId::from(1),
+        0,
+        0,
+        &outsider_key,
+    );
     assert!(ch0.serve_packets(&forged).is_err());
-    let outsider = FetchRequest::new(0, PeerId::from(3), PeerId::from(1), 0, &outsider_key);
+    let outsider = FetchRequest::new(
+        0,
+        PeerId::from(0),
+        PeerId::from(3),
+        PeerId::from(1),
+        0,
+        0,
+        &outsider_key,
+    );
     assert!(ch0.serve_packets(&outsider).is_err());
 
     let relay_signer = Keypair::from_secret_key(SECP256K1, &secrets[2]);
-    let valid_fetch = FetchRequest::new(0, PeerId::from(2), PeerId::from(1), 0, &relay_signer);
-    let relayed = ch0.serve_packets(&valid_fetch)?;
+    let wrong_sender = FetchRequest::new(
+        0,
+        PeerId::from(2),
+        PeerId::from(2),
+        PeerId::from(1),
+        0,
+        0,
+        &relay_signer,
+    );
+    assert!(ch0.serve_packets(&wrong_sender).is_err());
 
+    let valid_fetch = FetchRequest::new(
+        0,
+        PeerId::from(0),
+        PeerId::from(2),
+        PeerId::from(1),
+        0,
+        0,
+        &relay_signer,
+    );
+    let (total_chunks, relayed) = ch0.serve_packets(&valid_fetch)?;
+
+    assert_eq!(total_chunks, 1);
     assert_eq!(relayed.len(), 1);
     assert!(verify_packet_envelope(
         0,
@@ -1346,10 +1397,14 @@ fn encrypt_test_packet(
     use fedimint_core::encoding::Encodable as _;
 
     use crate::bolt12::keys::transport_key;
-    use crate::bolt12::transport::{MpcPacket, ephemeral_secret, packet_digest};
+    use crate::bolt12::transport::{
+        MpcPacket, ephemeral_secret, packet_digest, recipient_ephemeral_secret,
+    };
 
     let eph = ephemeral_secret(seed, 0, PeerId::from(0), PeerId::from(1));
     let eph_pk = eph.public_key(SECP256K1);
+    let recv_eph_pk =
+        recipient_ephemeral_secret(seed, 0, PeerId::from(0), PeerId::from(1)).public_key(SECP256K1);
     let domain = (
         "fedimint/bolt12/mpc-channel/v2",
         0u64,
@@ -1380,6 +1435,7 @@ fn encrypt_test_packet(
             chunk,
             chunks,
             eph_pk,
+            recv_eph_pk,
             &ciphertext,
         ),
         signer,
@@ -1391,6 +1447,7 @@ fn encrypt_test_packet(
         chunk,
         chunks,
         ephemeral_pk: eph_pk,
+        recv_ephemeral_pk: recv_eph_pk,
         ciphertext,
         envelope_sig,
     }
@@ -1406,7 +1463,7 @@ async fn transport_faults_convict_malicious_sender() -> Result<()> {
     use crate::db::TransportFault;
 
     let committee = peers(&[0, 1, 2]);
-    // Batch 32 permits up to 3 chunks so multi-chunk and 2-vs-3 conflict tests
+    // Batch 32 permits multiple chunks so multi-chunk and 2-vs-3 conflict tests
     // stay within the run's per-run chunk cap.
     let limits = ChannelLimits::for_run(3, 1, 32);
     assert!(limits.chunks >= 3);
@@ -1435,7 +1492,15 @@ async fn transport_faults_convict_malicious_sender() -> Result<()> {
         )
     };
     let convicts = |fault: &TransportFault| {
-        verify_transport_fault_convicts(0, sender, recipient, &seeds[0], fault, limits.chunks)
+        verify_transport_fault_convicts(
+            0,
+            sender,
+            recipient,
+            &seeds[0],
+            &seeds[1],
+            fault,
+            limits.chunks,
+        )
     };
 
     let enc = |chunk: u32, chunks: u32, pt: &[u8]| {
@@ -1446,7 +1511,7 @@ async fn transport_faults_convict_malicious_sender() -> Result<()> {
     let ch1 = new_ch1()?;
     let bad_ct = vec![0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33];
     let bad_eph = secrets[0].public_key(SECP256K1);
-    let digest = packet_digest(0, sender.0, recipient.0, 1, 0, 1, bad_eph, &bad_ct);
+    let digest = packet_digest(0, sender.0, recipient.0, 1, 0, 1, bad_eph, bad_eph, &bad_ct);
     let forged = MpcPacket {
         run: 0,
         sender: sender.0,
@@ -1454,6 +1519,7 @@ async fn transport_faults_convict_malicious_sender() -> Result<()> {
         chunk: 0,
         chunks: 1,
         ephemeral_pk: bad_eph,
+        recv_ephemeral_pk: bad_eph,
         ciphertext: bad_ct,
         envelope_sig: SECP256K1.sign_schnorr(&digest, &signer0),
     };
@@ -1519,10 +1585,19 @@ async fn transport_honest_packets_resist_framing() -> Result<()> {
     let ch0 = Channels::new(
         0,
         PeerId::from(0),
-        committee,
+        committee.clone(),
         limits,
         &seeds[0],
         &secrets[0],
+        &keys,
+    )?;
+    let ch1 = Channels::new(
+        0,
+        PeerId::from(1),
+        committee,
+        limits,
+        &seeds[1],
+        &secrets[1],
         &keys,
     )?;
     let to_bad = |p: &MpcPacket| BadPacket {
@@ -1531,6 +1606,7 @@ async fn transport_honest_packets_resist_framing() -> Result<()> {
         chunk: p.chunk,
         chunks: p.chunks,
         ephemeral_pk: p.ephemeral_pk,
+        recv_ephemeral_pk: p.recv_ephemeral_pk,
         ciphertext: p.ciphertext.clone(),
         envelope_sig: p.envelope_sig,
     };
@@ -1542,11 +1618,18 @@ async fn transport_honest_packets_resist_framing() -> Result<()> {
             sender,
             recipient,
             &seeds[0],
+            &seeds[1],
             &TransportFault::BadPacket(to_bad(&honest_single[0])),
             limits.chunks,
         ),
         "honest single-chunk packet must never convict sender"
     );
+
+    // Deliver peer 1's Round-0 packet to ch0 so ch0 learns peer 1's ephemeral
+    // receive key for mutual forward secrecy on rounds >= 1.
+    for pkt in ch1.packets(PeerId::from(0), 0, b"peer1-r0")? {
+        ch0.receive(&pkt)?;
+    }
 
     let honest_multi = ch0.packets(PeerId::from(1), 1, &vec![0x55u8; CHUNK + 128])?;
     assert_eq!(honest_multi.len(), 2);
@@ -1556,6 +1639,7 @@ async fn transport_honest_packets_resist_framing() -> Result<()> {
             sender,
             recipient,
             &seeds[0],
+            &seeds[1],
             &TransportFault::BadMultiChunk(honest_multi.iter().map(to_bad).collect()),
             limits.chunks,
         ),
@@ -1574,7 +1658,6 @@ async fn per_run_limits_block_oversized_messages_and_cover_max_faults() -> Resul
 
     let committee = peers(&[0, 1, 2]);
     let limits = ChannelLimits::for_run(3, 1, 4);
-    assert_eq!(limits.chunks, 1);
 
     let secrets: Vec<SecretKey> = (0..3).map(|_| SecretKey::new(&mut OsRng)).collect();
     let keys: BTreeMap<PeerId, _> = (0..3u16)
@@ -1597,33 +1680,468 @@ async fn per_run_limits_block_oversized_messages_and_cover_max_faults() -> Resul
         &keys,
     )?;
 
-    // A 2-chunk packet exceeds batch=4's per-run `max_chunks = 1` and must be
-    // rejected immediately without entering transcript or faults.
+    // A packet exceeding the run's per-run `limits.chunks` must be rejected
+    // immediately without entering transcript or faults.
     let oversized = encrypt_test_packet(
         &seeds[0],
         &signer0,
         &keys[&PeerId::from(1)],
         0,
         0,
-        2,
+        limits.chunks + 1,
         &[0xaa; 64],
     );
     assert!(ch1.receive(&oversized).is_err());
     assert_eq!(ch1.transcript(), vec![] as Vec<Vec<Option<_>>>);
     assert_eq!(ch1.relay_evidence().faults, vec![]);
 
-    // Across every federation size and batch up to MAX_BATCH, `max_fault_bytes`
-    // must cover a full `max_chunks` bad-inner-sig message from every possible
-    // malicious sender, and `max_evidence_page_hex` must strictly exceed the
-    // largest possible encoded Page 0.
-    for (n, t, batch) in [(3, 1, 4), (3, 1, 512), (15, 7, 64), (31, 15, 512)] {
+    // Across every valid federation size (degree <= MAX_POOL_DEGREE) and batch
+    // up to MAX_POOL_BATCH, `fault_bytes` must cover a full `chunks`
+    // bad-inner-sig message from every possible malicious sender, and
+    // `max_evidence_page_hex` must strictly exceed the largest possible encoded
+    // Page 0 while staying under the 10 MiB WebSocket response cap.
+    for (n, t, batch) in [(3, 1, 4), (3, 1, 32), (7, 3, 32), (15, 7, 32)] {
         let lim = ChannelLimits::for_run(n, t, batch);
         let one_max_multi = usize::try_from(lim.chunks).expect("small") * (CHUNK + 16);
         assert!(lim.fault_bytes >= one_max_multi * t);
-        let worst_row = (n - 1) * (usize::try_from(lim.chunks).expect("small") * CHUNK + 80);
-        let worst_page_hex = 2 * (1024 * 1024 + worst_row + lim.fault_bytes + 8192);
-        assert!(max_evidence_page_hex(n, lim) > worst_page_hex);
+        let max_single_msg = usize::try_from(lim.chunks).expect("small") * CHUNK + 128;
+        let worst_page_hex = 2 * (512 * 1024 + max_single_msg + lim.fault_bytes + 8192);
+        let page_cap = max_evidence_page_hex(n, lim);
+        assert!(page_cap > worst_page_hex);
+        assert!(
+            page_cap < 10 * 1024 * 1024,
+            "n={n} t={t} batch={batch}: page_cap={page_cap} exceeds 10 MiB WS cap"
+        );
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn poisoned_pool_share_blames_culprit_and_rejects_bad_subset_witness() -> Result<()> {
+    use fedimint_lnv2_common::LightningInputError;
+    use fedimint_lnv2_common::bolt12::Bolt12Unlock;
+
+    let mut fed = Federation::new();
+    fed.start(0, NOW).await?;
+    let committee = fed.committee().await.expect("run started");
+    let mut dealt = deal(&fed, 0, &committee, 2);
+
+    // Peer 2 (position 2 in committee [0, 1, 2]) submits a corrupted share for
+    // item 0 while peers 0 and 1 submit honest shares.
+    let bad_peer = committee[2];
+    let bad_hash = dealt.submissions[&bad_peer][0].payment_hash;
+    dealt.submissions.get_mut(&bad_peer).expect("present")[0] =
+        seal(&fed, 0, 2, bad_hash, &[0xde; 32]);
+
+    for (peer, shares) in &dealt.submissions {
+        fed.submit(*peer, 0, shares.clone()).await?;
+    }
+
+    let offer = pooled_offer(&mut fed).await;
+    let gw = gateway();
+    fed.approve(&gw).await;
+
+    let request = reserve_pool(&offer, 0, Amount::from_sats(10_000), &gw);
+    let reservation_id = request.reservation_id();
+    let (_, _) = fed.apply(Bolt12Output::Reserve(request), NOW).await?;
+
+    let (outpoint, _) = fed
+        .apply(Bolt12Output::Receive(reservation_id), NOW + 30)
+        .await?;
+
+    let Bolt12Unlock::Pool { keys, .. } = fed.unlock(outpoint).await else {
+        panic!("expected pool unlock");
+    };
+
+    // An invalid witness subset (referencing the corrupted share at index 2)
+    // must be rejected immediately.
+    let bad_unlock = Bolt12Unlock::new_pool(keys.clone(), Some(vec![0, 2]));
+    assert!(matches!(
+        fed.spend(outpoint, &bad_unlock).await,
+        Err(LightningInputError::InvalidDecryptionKey)
+    ));
+
+    // A valid witness subset [0, 1] succeeds, blames peer 2, and clears the
+    // sticky committee.
+    let good_unlock = Bolt12Unlock::new_pool(keys, Some(vec![0, 1]));
+    fed.spend(outpoint, &good_unlock).await?;
+
+    assert!(
+        fed.blame(u16::from(bad_peer)).await.is_some(),
+        "poisoned pool share submitter must be blamed on spend"
+    );
+    assert!(fed.blame(u16::from(committee[0])).await.is_none());
+    assert!(fed.blame(u16::from(committee[1])).await.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn post_take_equivocation_does_not_overwrite_and_convicts() -> Result<()> {
+    use fedimint_core::secp256k1::SecretKey;
+
+    use crate::bolt12::transport::{ChannelLimits, Channels, verify_transport_fault_convicts};
+    use crate::db::TransportFault;
+
+    let committee = peers(&[0, 1, 2]);
+    let limits = ChannelLimits::for_run(3, 1, 4);
+    let secrets: Vec<SecretKey> = (0..3).map(|_| SecretKey::new(&mut OsRng)).collect();
+    let keys: BTreeMap<PeerId, _> = (0..3u16)
+        .map(|p| {
+            (
+                PeerId::from(p),
+                secrets[usize::from(p)].public_key(SECP256K1),
+            )
+        })
+        .collect();
+    let seeds = [[11u8; 32], [22u8; 32], [33u8; 32]];
+
+    let ch0_first = Channels::new(
+        0,
+        PeerId::from(0),
+        committee.clone(),
+        limits,
+        &seeds[0],
+        &secrets[0],
+        &keys,
+    )?;
+    let ch0_second = Channels::new(
+        0,
+        PeerId::from(0),
+        committee.clone(),
+        limits,
+        &seeds[0],
+        &secrets[0],
+        &keys,
+    )?;
+    let ch1 = Channels::new(
+        0,
+        PeerId::from(1),
+        committee,
+        limits,
+        &seeds[1],
+        &secrets[1],
+        &keys,
+    )?;
+
+    let first_pkts = ch0_first.packets(PeerId::from(1), 0, b"message-A")?;
+    for pkt in &first_pkts {
+        ch1.receive(pkt)?;
+    }
+
+    // Consume peer 0's round-0 message from inbox (simulating normal MPC
+    // execution).
+    let taken = ch1.take(PeerId::from(0), 0).await;
+    assert_eq!(taken, b"message-A");
+    assert_eq!(
+        ch1.transcript()[0][0]
+            .as_ref()
+            .map(|m| m.message.as_slice()),
+        Some(b"message-A".as_slice())
+    );
+
+    // Peer 0 now sends a DIFFERENT validly signed message for the same round 0.
+    let second_pkts = ch0_second.packets(PeerId::from(1), 0, b"message-B")?;
+    for pkt in &second_pkts {
+        let _ = ch1.receive(pkt);
+    }
+
+    // Transcript must keep the original message immutably and record a
+    // MessageEquivocation fault that convicts peer 0.
+    assert_eq!(
+        ch1.transcript()[0][0]
+            .as_ref()
+            .map(|m| m.message.as_slice()),
+        Some(b"message-A".as_slice())
+    );
+    let ev = ch1.relay_evidence();
+    assert!(matches!(
+        ev.faults.as_slice(),
+        [TransportFault::MessageEquivocation { .. }]
+    ));
+    assert!(verify_transport_fault_convicts(
+        0,
+        (PeerId::from(0), &keys[&PeerId::from(0)]),
+        (PeerId::from(1), &keys[&PeerId::from(1)]),
+        &seeds[0],
+        &seeds[1],
+        &ev.faults[0],
+        limits.chunks,
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn fake_round0_ephemeral_key_convicts_sender_and_protects_honest() -> Result<()> {
+    use fedimint_core::secp256k1::SecretKey;
+
+    use crate::bolt12::transport::{
+        ChannelLimits, Channels, MpcPacket, packet_digest, verify_r0_ephemeral_fault,
+    };
+    use crate::db::BadPacket;
+
+    let committee = peers(&[0, 1, 2]);
+    let limits = ChannelLimits::for_run(3, 1, 4);
+    let secrets: Vec<SecretKey> = (0..3).map(|_| SecretKey::new(&mut OsRng)).collect();
+    let keys: BTreeMap<PeerId, _> = (0..3u16)
+        .map(|p| {
+            (
+                PeerId::from(p),
+                secrets[usize::from(p)].public_key(SECP256K1),
+            )
+        })
+        .collect();
+    let seeds = [[11u8; 32], [22u8; 32], [33u8; 32]];
+    let signer0 = Keypair::from_secret_key(SECP256K1, &secrets[0]);
+    let ch0 = Channels::new(
+        0,
+        PeerId::from(0),
+        committee,
+        limits,
+        &seeds[0],
+        &secrets[0],
+        &keys,
+    )?;
+
+    let to_bad = |p: &MpcPacket| BadPacket {
+        sender: p.sender,
+        round: p.round,
+        chunk: p.chunk,
+        chunks: p.chunks,
+        ephemeral_pk: p.ephemeral_pk,
+        recv_ephemeral_pk: p.recv_ephemeral_pk,
+        ciphertext: p.ciphertext.clone(),
+        envelope_sig: p.envelope_sig,
+    };
+
+    let honest_r0 = ch0.packets(PeerId::from(1), 0, b"r0")?;
+    assert!(!verify_r0_ephemeral_fault(
+        0,
+        (PeerId::from(0), &keys[&PeerId::from(0)]),
+        PeerId::from(1),
+        &seeds[0],
+        &to_bad(&honest_r0[0]),
+    ));
+
+    // Forge a Round-0 packet carrying a wrong recv_ephemeral_pk signed by peer 0.
+    let fake_recv_eph = secrets[2].public_key(SECP256K1);
+    let digest = packet_digest(
+        0,
+        PeerId::from(0),
+        PeerId::from(1),
+        0,
+        0,
+        1,
+        honest_r0[0].ephemeral_pk,
+        fake_recv_eph,
+        &honest_r0[0].ciphertext,
+    );
+    let fake_bad = BadPacket {
+        recv_ephemeral_pk: fake_recv_eph,
+        envelope_sig: SECP256K1.sign_schnorr(&digest, &signer0),
+        ..to_bad(&honest_r0[0])
+    };
+    assert!(verify_r0_ephemeral_fault(
+        0,
+        (PeerId::from(0), &keys[&PeerId::from(0)]),
+        PeerId::from(1),
+        &seeds[0],
+        &fake_bad,
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn verdict_rejects_mixed_culprits_and_disputes() -> Result<()> {
+    let fed = Federation::new();
+    fed.abandon_run(0, NOW).await;
+
+    let mixed = PoolVerdict {
+        culprits: vec![PeerId::from(0)],
+        disputes: vec![(PeerId::from(1), PeerId::from(2))],
+    };
+    assert!(
+        fed.verdict(0, 0, mixed, NOW + POOL_RUN_TIMEOUT + EVIDENCE_WINDOW)
+            .await
+            .is_err()
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn keys_validate_rejects_duplicate_xonly_and_high_degree() -> Result<()> {
+    use crate::bolt12::keys;
+
+    let make_cfg = |guardians: u16, public, private| {
+        let mut fed = Federation::with_guardians(guardians);
+        fed.cfg.consensus.bolt12 = Some(public);
+        fed.cfg.private.bolt12 = Some(private);
+        fed.cfg
+    };
+
+    let peer_ids = peers(&[0, 1, 2, 3]);
+    let (mut public, privates) = keys::fixture(&peer_ids)?;
+    let cfg = make_cfg(4, public.clone(), privates[&PeerId::from(0)].clone());
+    keys::validate(PeerId::from(0), &cfg)?;
+
+    // Duplicate x-only transport key (negated secret key -> opposite parity,
+    // same x-only coordinate) must be rejected.
+    let pk0 = public.transport_keys[&PeerId::from(0)];
+    let negated = pk0.negate(SECP256K1);
+    assert_ne!(pk0, negated);
+    public.transport_keys.insert(PeerId::from(1), negated);
+    let bad_xonly = make_cfg(4, public, privates[&PeerId::from(0)].clone());
+    assert!(keys::validate(PeerId::from(0), &bad_xonly).is_err());
+
+    // pool_batch exceeding MAX_POOL_BATCH must be rejected.
+    let (mut public2, privates2) = keys::fixture(&peer_ids)?;
+    public2.pool_batch = fedimint_lnv2_common::bolt12::MAX_POOL_BATCH + 1;
+    let bad_batch = make_cfg(4, public2, privates2[&PeerId::from(0)].clone());
+    assert!(keys::validate(PeerId::from(0), &bad_batch).is_err());
+
+    // Degree > MAX_POOL_DEGREE with pool_target > 0 must be rejected.
+    let big_peers: Vec<PeerId> = (0..25u16).map(PeerId::from).collect();
+    let (mut big_pub, big_privs) = keys::fixture(&big_peers)?;
+    assert_eq!(big_pub.pool_target, 0, "high degree auto-disables pool");
+    let big_ok = make_cfg(25, big_pub.clone(), big_privs[&PeerId::from(0)].clone());
+    keys::validate(PeerId::from(0), &big_ok)?;
+    big_pub.pool_target = 4;
+    let big_bad = make_cfg(25, big_pub, big_privs[&PeerId::from(0)].clone());
+    assert!(keys::validate(PeerId::from(0), &big_bad).is_err());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn serve_evidence_streams_multiple_pages_by_entry() -> Result<()> {
+    use crate::bolt12::worker::{evidence_digest, serve_evidence};
+    use crate::db::{
+        Bolt12PoolLocalRunKey, Bolt12PoolTranscriptKey, LocalRun, RelayEvidence, SignedMessage,
+    };
+
+    let fed = Federation::new();
+    fed.start(0, NOW).await?;
+    fed.abandon(0, NOW + POOL_RUN_TIMEOUT).await?;
+
+    let dummy_sig = SECP256K1.sign_schnorr(
+        &fedimint_core::secp256k1::Message::from_digest([1; 32]),
+        &Keypair::new(SECP256K1, &mut OsRng),
+    );
+    // 2 rounds * 3 entries * 300 KiB = 1.8 MiB > 512 KiB page budget -> spans
+    // multiple pages cleanly.
+    let rounds: Vec<Vec<Option<SignedMessage>>> = (0..2)
+        .map(|r| {
+            (0..3)
+                .map(|p| {
+                    Some(SignedMessage {
+                        message: vec![u8::try_from(r * 10 + p).expect("small"); 300 * 1024],
+                        signature: dummy_sig,
+                    })
+                })
+                .collect()
+        })
+        .collect();
+
+    let relay = RelayEvidence::default();
+    let expected_digest = evidence_digest(&[9; 32], &rounds, &relay);
+
+    let mut dbtx = fed.db.begin_transaction().await;
+    dbtx.insert_entry(
+        &Bolt12PoolLocalRunKey(0),
+        &LocalRun {
+            seed: [9; 32],
+            submission: None,
+            evidence: Some(expected_digest),
+            transcript_rounds: 2,
+        },
+    )
+    .await;
+    for (r, row) in rounds.iter().enumerate() {
+        dbtx.insert_entry(&Bolt12PoolTranscriptKey(0, r as u64), row)
+            .await;
+    }
+    dbtx.commit_tx().await;
+
+    let mut from_round = 0u64;
+    let mut from_peer = 0u16;
+    let mut pages = 0usize;
+    let mut reconstructed = vec![vec![None; 3]; 2];
+
+    loop {
+        let page = serve_evidence(&fed.db, 0, from_round, from_peer).await?;
+        pages += 1;
+        assert_eq!(page.total_rounds, 2);
+        for (r, p, msg) in page.entries {
+            reconstructed[usize::try_from(r)?][usize::from(p)] = Some(msg);
+        }
+        match page.next_cursor {
+            Some((nr, np)) => {
+                assert!((nr, np) > (from_round, from_peer));
+                from_round = nr;
+                from_peer = np;
+            }
+            None => break,
+        }
+    }
+
+    assert!(pages >= 3, "expected >= 3 streamed pages, got {pages}");
+    assert_eq!(
+        evidence_digest(&[9; 32], &reconstructed, &relay),
+        expected_digest
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn funding_reservation_prunes_local_nonce_keys() -> Result<()> {
+    use crate::db::{Bolt12NonceCountKey, Bolt12NonceKey};
+
+    let mut fed = Federation::new();
+    fed.fill(0).await;
+    let offer = pooled_offer(&mut fed).await;
+    let gw = gateway();
+    fed.approve(&gw).await;
+
+    let request = reserve_pool(&offer, 0, Amount::from_sats(10_000), &gw);
+    let reservation_id = request.reservation_id();
+    let (_, _) = fed.apply(Bolt12Output::Reserve(request), NOW).await?;
+
+    // Seed local FROST nonce tracking rows for this reservation.
+    let mut dbtx = fed.db.begin_transaction().await;
+    dbtx.insert_entry(&Bolt12NonceKey(reservation_id, [1; 32]), &true)
+        .await;
+    dbtx.insert_entry(&Bolt12NonceKey(reservation_id, [2; 32]), &true)
+        .await;
+    dbtx.insert_entry(&Bolt12NonceCountKey(reservation_id), &2u16)
+        .await;
+    dbtx.commit_tx().await;
+
+    // Funding consumes the reservation and must prune all local nonce rows.
+    let _ = fed
+        .apply(Bolt12Output::Receive(reservation_id), NOW + 30)
+        .await?;
+
+    let mut dbtx = fed.db.begin_transaction_nc().await;
+    assert!(
+        dbtx.get_value(&Bolt12NonceCountKey(reservation_id))
+            .await
+            .is_none()
+    );
+    assert!(
+        dbtx.get_value(&Bolt12NonceKey(reservation_id, [1; 32]))
+            .await
+            .is_none()
+    );
+    assert!(
+        dbtx.get_value(&Bolt12NonceKey(reservation_id, [2; 32]))
+            .await
+            .is_none()
+    );
 
     Ok(())
 }

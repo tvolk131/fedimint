@@ -233,7 +233,7 @@ impl Lightning {
             public_api_endpoint! {
                 BOLT12_MPC_FETCH_ENDPOINT,
                 ApiVersion::new(0, 0),
-                async |module: &Lightning, _context, request: String| -> Vec<String> {
+                async |module: &Lightning, _context, request: String| -> transport::PacketPage {
                     let worker = module
                         .bolt12_worker
                         .as_ref()
@@ -244,11 +244,12 @@ impl Lightning {
 
                     worker
                         .serve_packets(&request)
-                        .map(|packets| {
-                            packets
+                        .map(|(total_chunks, packets)| transport::PacketPage {
+                            total_chunks,
+                            packets: packets
                                 .into_iter()
                                 .map(|packet| packet.consensus_encode_to_hex())
-                                .collect()
+                                .collect(),
                         })
                         .map_err(|e| ApiError::bad_request(e.to_string()))
                 }
@@ -256,7 +257,7 @@ impl Lightning {
             public_api_endpoint! {
                 BOLT12_MPC_RELAY_ENDPOINT,
                 ApiVersion::new(0, 0),
-                async |module: &Lightning, _context, request: String| -> Vec<String> {
+                async |module: &Lightning, _context, request: String| -> transport::PacketPage {
                     let worker = module
                         .bolt12_worker
                         .as_ref()
@@ -268,11 +269,12 @@ impl Lightning {
                     worker
                         .relay(&request)
                         .await
-                        .map(|packets| {
-                            packets
+                        .map(|(total_chunks, packets)| transport::PacketPage {
+                            total_chunks,
+                            packets: packets
                                 .into_iter()
                                 .map(|packet| packet.consensus_encode_to_hex())
-                                .collect()
+                                .collect(),
                         })
                         .map_err(|e| ApiError::bad_request(e.to_string()))
                 }
@@ -280,8 +282,27 @@ impl Lightning {
             public_api_endpoint! {
                 BOLT12_MPC_EVIDENCE_ENDPOINT,
                 ApiVersion::new(0, 0),
-                async |_module: &Lightning, context, params: (u64, u64)| -> String {
-                    worker::serve_evidence(&context.db(), params.0, params.1)
+                async |module: &Lightning, context, request: String| -> String {
+                    let bolt12 = module
+                        .cfg
+                        .consensus
+                        .bolt12
+                        .as_ref()
+                        .ok_or_else(|| ApiError::bad_request("Federated BOLT12 is disabled".to_string()))?;
+
+                    let request = worker::decode_evidence_request(&request)
+                        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+                    let requester_pk = bolt12
+                        .transport_keys
+                        .get(&request.requester)
+                        .ok_or_else(|| ApiError::bad_request("Unknown guardian requester".to_string()))?;
+
+                    if !request.verify(requester_pk) {
+                        return Err(ApiError::bad_request("Invalid evidence request signature".to_string()));
+                    }
+
+                    worker::serve_evidence(&context.db(), request.run, request.from_round, request.from_peer)
                         .await
                         .map(|page| page.consensus_encode_to_hex())
                         .map_err(|e| ApiError::bad_request(e.to_string()))

@@ -153,7 +153,7 @@ impl LightningClientModule {
                 continue;
             };
 
-            if ingress.message_path().is_err() {
+            if !ingress.verify(self.federation_id) || ingress.message_path().is_err() {
                 continue;
             }
 
@@ -191,7 +191,17 @@ impl LightningClientModule {
             "Stock must be between 1 and {MAX_STOCK}"
         );
 
-        let index = self.allocate_bolt12_offer_index().await;
+        // Peek the next offer index and validate the offer locally before
+        // committing the index increment, so local validation errors never burn
+        // an offer index and create unnecessary recovery gaps.
+        let index = self
+            .client_ctx
+            .module_db()
+            .begin_transaction_nc()
+            .await
+            .get_value(&Bolt12NextOfferIndexKey)
+            .await
+            .unwrap_or(0);
         let secrets = OfferSecrets::derive(&self.bolt12_secret, index);
 
         let mut builder = OfferBuilder::new(bolt12.signing_key)
@@ -208,6 +218,26 @@ impl LightningClientModule {
         let offer = builder
             .build()
             .map_err(|e| anyhow::anyhow!("Invalid offer: {e:?}"))?;
+
+        let allocated = self.allocate_bolt12_offer_index().await;
+        let (index, secrets, offer) = if allocated == index {
+            (index, secrets, offer)
+        } else {
+            let secrets = OfferSecrets::derive(&self.bolt12_secret, allocated);
+            let mut builder = OfferBuilder::new(bolt12.signing_key)
+                .chain(self.cfg.network)
+                .metadata(routing_metadata(self.federation_id, secrets.handle))
+                .map_err(|e| anyhow::anyhow!("Invalid offer metadata: {e:?}"))?
+                .description(offer.description().map_or_default(|d| d.0.to_owned()))
+                .absolute_expiry(Duration::from_secs(params.expires_at));
+            for path in offer.paths() {
+                builder = builder.path(path.clone());
+            }
+            let offer = builder
+                .build()
+                .map_err(|e| anyhow::anyhow!("Invalid offer: {e:?}"))?;
+            (allocated, secrets, offer)
+        };
 
         let policy = ReceivePolicy {
             handle: secrets.handle,
@@ -456,6 +486,69 @@ impl LightningClientModule {
         Ok(())
     }
 
+    /// Extended recovery scan up to `max_index` (exclusive) for wallets that
+    /// may have skipped more than `OFFER_GAP_LIMIT` offer indices. Resets the
+    /// receive stream cursor if any previously unknown offer is found so the
+    /// receive loop re-scans and claims its receives.
+    pub async fn rescan_bolt12_offers_up_to(&self, max_index: u64) -> FederationResult<u64> {
+        let mut discovered = 0u64;
+        let mut highest_next = self
+            .client_ctx
+            .module_db()
+            .begin_transaction_nc()
+            .await
+            .get_value(&Bolt12NextOfferIndexKey)
+            .await
+            .unwrap_or(0);
+
+        for index in 0..max_index {
+            let claim_pk = OfferSecrets::derive(&self.bolt12_secret, index)
+                .claim_key
+                .public_key();
+
+            if let Some((registration, _)) = self
+                .module_api
+                .bolt12_registration_by_recipient(claim_pk)
+                .await?
+            {
+                let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
+                let inserted = dbtx
+                    .insert_entry(
+                        &Bolt12OfferKey(index),
+                        &Bolt12OfferRecord {
+                            registration,
+                            claim_pk,
+                            offer: None,
+                        },
+                    )
+                    .await
+                    .is_none();
+                highest_next = highest_next.max(index + 1);
+                dbtx.insert_entry(&Bolt12NextOfferIndexKey, &highest_next)
+                    .await;
+                dbtx.commit_tx().await;
+
+                if inserted {
+                    discovered += 1;
+                }
+            } else if self.module_api.bolt12_recipient_used(claim_pk).await? {
+                highest_next = highest_next.max(index + 1);
+                let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
+                dbtx.insert_entry(&Bolt12NextOfferIndexKey, &highest_next)
+                    .await;
+                dbtx.commit_tx().await;
+            }
+        }
+
+        if discovered > 0 {
+            let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
+            dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &0u64).await;
+            dbtx.commit_tx().await;
+        }
+
+        Ok(discovered)
+    }
+
     /// Claim keys of every offer index in use, plus a gap of unused ones.
     /// Watching the gap catches receives for offers the federation has since
     /// pruned, which [`Self::recover_bolt12_offers`] cannot find.
@@ -569,7 +662,7 @@ impl LightningClientModule {
             .map_or(Amount::ZERO, |bolt12| bolt12.unlock_premium(&unlock));
 
         if !self
-            .is_worth_claiming(receive.contract.amount.saturating_sub(premium))
+            .is_bolt12_worth_claiming(receive.contract.amount, premium)
             .await
         {
             warn!(
@@ -604,6 +697,31 @@ impl LightningClientModule {
 }
 
 impl LightningClientModule {
+    /// Whether claiming a BOLT12 receive of `amount` with extra input fee
+    /// `premium` leaves the wallet with a positive net amount.
+    async fn is_bolt12_worth_claiming(&self, amount: Amount, premium: Amount) -> bool {
+        let Some(input_fee) = self.cfg.fee_consensus.fee(amount).checked_add(premium) else {
+            return false;
+        };
+
+        match self
+            .client_ctx
+            .fee_quote(
+                OperationId::new_random(),
+                fedimint_client_module::transaction::FeeQuoteRequest {
+                    input_amount: Amounts::new_bitcoin(amount),
+                    output_amount: Amounts::ZERO,
+                    input_fee: Amounts::new_bitcoin(input_fee),
+                    output_fee: Amounts::ZERO,
+                },
+            )
+            .await
+        {
+            Ok(quote) => quote.total().get_bitcoin() < amount,
+            Err(_) => false,
+        }
+    }
+
     /// The keys that release a receive's preimage, if they do.
     ///
     /// For a stock item the wallet encrypted the preimage itself and derives
@@ -649,10 +767,16 @@ impl LightningClientModule {
         };
 
         runtime::spawn_blocking(move || {
-            (contract.verify_agg_decryption_keys(&tpe_agg_pk, &keys)
-                && contract.release(&keys).is_some())
-            .then(|| Bolt12Unlock::new(contract.source, keys))
-            .flatten()
+            if !contract.verify_agg_decryption_keys(&tpe_agg_pk, &keys) {
+                return None;
+            }
+            let released = contract.release_detailed(&keys, None)?;
+            match contract.source {
+                Source::Stock { .. } => Bolt12Unlock::new(contract.source, keys),
+                Source::Pool { .. } => {
+                    Some(Bolt12Unlock::new_pool(keys, Some(released.valid_subset)))
+                }
+            }
         })
         .await
     }

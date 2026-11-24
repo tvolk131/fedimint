@@ -3036,6 +3036,14 @@ impl ClientContextIface for Client {
         Client::operation_exists(self, operation_id).await
     }
 
+    async fn operation_exists_dbtx(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        operation_id: OperationId,
+    ) -> bool {
+        Client::operation_exists_dbtx(dbtx, operation_id).await
+    }
+
     async fn config(&self) -> ClientConfig {
         Client::config(self).await
     }

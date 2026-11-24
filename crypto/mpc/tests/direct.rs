@@ -1,8 +1,8 @@
 //! End-to-end runs of the preimage generator over the in-memory transport.
 
 use anyhow::Result;
-use mpc::circuit::Circuit;
-use mpc::direct::{self, Generated, Share, reconstruct};
+use mpc::circuit::{Circuit, Gate};
+use mpc::direct::{self, Generated, Share, reconstruct, reconstruct_with_subset};
 use mpc::engine::{Params, Transport};
 use mpc::memory::{MemoryTransport, mesh};
 use sha2::{Digest as _, Sha256};
@@ -316,4 +316,91 @@ async fn a_corrupted_message_aborts_the_recipient() {
             assert_eq!(result[0].payment_hash, honest_hash);
         }
     }
+}
+
+#[test]
+fn reconstruct_with_subset_validates_witness_and_identifies_rejected() {
+    use mpc::field::{F, evaluate, point};
+
+    let threshold = 4usize;
+    let total = 7usize;
+    let preimage: [u8; 32] = std::array::from_fn(|i| (i as u8).wrapping_mul(11).wrapping_add(3));
+    let payment_hash: [u8; 32] = Sha256::digest(preimage).into();
+
+    let polys: Vec<Vec<F>> = (0..32)
+        .map(|b| {
+            let mut coeffs = vec![F(preimage[b])];
+            for d in 1..threshold {
+                coeffs.push(F(((b * 13 + d * 29 + 7) % 251 + 1) as u8));
+            }
+            coeffs
+        })
+        .collect();
+
+    // Corrupt 3 shares (parties 0, 2, 5) — beyond Berlekamp-Welch's (7-4)/2 = 1
+    // threshold, leaving exactly 4 honest shares [1, 3, 4, 6].
+    let shares: Vec<Share> = (0..total)
+        .map(|party| {
+            let x = point(party + 1);
+            let mut val: [u8; 32] = std::array::from_fn(|b| evaluate(&polys[b], x).0);
+            if matches!(party, 0 | 2 | 5) {
+                val[0] ^= 0xff;
+            }
+            Share::new(party, val)
+        })
+        .collect();
+
+    // Valid witness recovers immediately and identifies all 3 corrupted parties.
+    let recovered = reconstruct_with_subset(&payment_hash, threshold, &shares, &[1, 3, 4, 6])
+        .expect("valid witness recovers");
+    assert_eq!(recovered.preimage, preimage);
+    assert_eq!(recovered.rejected, vec![0, 2, 5]);
+
+    // Invalid witness (includes corrupted party 0) is rejected immediately.
+    assert!(reconstruct_with_subset(&payment_hash, threshold, &shares, &[0, 1, 3, 4]).is_err());
+    // Wrong length or duplicate party is rejected.
+    assert!(reconstruct_with_subset(&payment_hash, threshold, &shares, &[1, 3, 4]).is_err());
+    assert!(reconstruct_with_subset(&payment_hash, threshold, &shares, &[1, 1, 3, 4]).is_err());
+}
+
+#[test]
+fn reconstruct_caps_subset_search_trials_on_poisoned_large_set() {
+    // 20 shares, threshold 10 => C(20, 10) = 184,756 >> MAX_SUBSET_TRIALS (8,192).
+    // With all shares independent pseudo-random bytes, reconstruct must fail
+    // fast at the trial cap instead of scanning all 184,756 combinations.
+    let payment_hash: [u8; 32] = Sha256::digest(b"unreachable-target-preimage").into();
+    let shares: Vec<Share> = (0..20usize)
+        .map(|party| {
+            let value: [u8; 32] = Sha256::digest(party.to_le_bytes()).into();
+            Share::new(party, value)
+        })
+        .collect();
+
+    let err =
+        reconstruct(&payment_hash, 10, &shares).expect_err("poisoned large set must hit trial cap");
+    assert!(
+        err.to_string().contains("trials"),
+        "expected trial-cap error, got: {err}"
+    );
+}
+
+#[test]
+fn circuit_id_length_prefixes_sections() {
+    let a = Circuit {
+        parties: 2,
+        inputs_per_party: 1,
+        lanes: 1,
+        gates: vec![Gate::Xor(0, 1)],
+        outputs: vec![2],
+        secret_outputs: vec![],
+    };
+    let b = Circuit {
+        parties: 2,
+        inputs_per_party: 1,
+        lanes: 1,
+        gates: vec![Gate::Xor(0, 1)],
+        outputs: vec![],
+        secret_outputs: vec![2],
+    };
+    assert_ne!(a.id(), b.id());
 }

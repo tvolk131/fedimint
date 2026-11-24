@@ -10,7 +10,7 @@ use crate::{
     CompleteSMState, CompleteStateMachine, GatewayClientStateMachinesV2, GatewayOperationMetaV2,
     GatewayOperationRoleV2, IncomingCircuitKey, IncomingRelayPlan, OperationId,
     incoming_circuit_operation_id, incoming_relay_plan, is_legacy_completion_for_circuit,
-    legacy_completion_in_states, operation_creation_failed_permanently,
+    legacy_completion_in_states,
 };
 
 fn receive_operation_id() -> OperationId {
@@ -87,14 +87,6 @@ fn legacy_active_and_inactive_completions_suppress_same_circuit_replay() {
         incoming_relay_plan(true, false, true),
         IncomingRelayPlan::Replay
     );
-}
-
-#[test]
-fn operation_creation_race_losers_only_fail_without_a_winner() {
-    // Both receive-operation and completion-operation creation use this policy.
-    assert!(!operation_creation_failed_permanently(true, true));
-    assert!(operation_creation_failed_permanently(true, false));
-    assert!(!operation_creation_failed_permanently(false, false));
 }
 
 #[test]

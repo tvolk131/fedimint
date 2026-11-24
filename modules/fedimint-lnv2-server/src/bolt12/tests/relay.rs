@@ -28,7 +28,7 @@ use mpc::replay::{Evidence, judge};
 use rand::rngs::OsRng;
 
 use crate::bolt12::transport::{
-    ApiTransport, ChannelLimits, Channels, decode_fetch_request, decode_packet,
+    ApiTransport, ChannelLimits, Channels, PacketPage, decode_fetch_request, decode_packet,
     decode_relay_request,
 };
 
@@ -102,11 +102,14 @@ impl IRawFederationApi for RelayMeshApi {
                 if self.fault.refuse_fetch == Some((peer_id, req.recipient)) {
                     return Err(api_err("malicious sender refused relay fetch"));
                 }
-                let packets = target.serve_packets(&req).map_err(api_err)?;
-                let encoded: Vec<String> = packets
-                    .into_iter()
-                    .map(|p| p.consensus_encode_to_hex())
-                    .collect();
+                let (total_chunks, packets) = target.serve_packets(&req).map_err(api_err)?;
+                let encoded = PacketPage {
+                    total_chunks,
+                    packets: packets
+                        .into_iter()
+                        .map(|p| p.consensus_encode_to_hex())
+                        .collect(),
+                };
                 serde_json::to_value(encoded).map_err(api_err)
             }
             BOLT12_MPC_RELAY_ENDPOINT => {
@@ -120,11 +123,15 @@ impl IRawFederationApi for RelayMeshApi {
                     fetch_hits: self.fetch_hits.clone(),
                 }
                 .into();
-                let packets = target.relay_fetch(&self_api, &req).await.map_err(api_err)?;
-                let encoded: Vec<String> = packets
-                    .into_iter()
-                    .map(|p| p.consensus_encode_to_hex())
-                    .collect();
+                let (total_chunks, packets) =
+                    target.relay_fetch(&self_api, &req).await.map_err(api_err)?;
+                let encoded = PacketPage {
+                    total_chunks,
+                    packets: packets
+                        .into_iter()
+                        .map(|p| p.consensus_encode_to_hex())
+                        .collect(),
+                };
                 serde_json::to_value(encoded).map_err(api_err)
             }
             other => Err(api_err(format!("unexpected method {other}"))),
@@ -441,13 +448,13 @@ async fn relay_fetch_rejects_premature_framing_and_clears_recovered_witness() ->
 
     // 1. Future round (round 1 while relay ch2 is on round 0) is rejected
     // without recording a witness.
-    let future_req = RelayRequest::new(0, PeerId::from(0), PeerId::from(1), 1, &signer1);
+    let future_req = RelayRequest::new(0, PeerId::from(0), PeerId::from(1), 1, 0, &signer1);
     assert!(ch2.relay_fetch(&failing_api, &future_req).await.is_err());
     assert_eq!(ch2.relay_evidence().relay_missing, vec![]);
 
     // 2. Round 0 BEFORE relay ch2 has received peer 0's round-0 message does
     // NOT record a witness (prevents rushing-adversary framing).
-    let req0 = RelayRequest::new(0, PeerId::from(0), PeerId::from(1), 0, &signer1);
+    let req0 = RelayRequest::new(0, PeerId::from(0), PeerId::from(1), 0, 0, &signer1);
     assert!(ch2.relay_fetch(&failing_api, &req0).await.is_err());
     assert_eq!(ch2.relay_evidence().relay_missing, vec![]);
 

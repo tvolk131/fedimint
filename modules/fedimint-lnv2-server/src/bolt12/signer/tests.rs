@@ -4,6 +4,7 @@ use anyhow::Result;
 use bls12_381::Scalar;
 use fedimint_core::bitcoin::Network;
 use fedimint_core::bitcoin::hashes::{Hash, sha256};
+use fedimint_core::config::FederationId;
 use fedimint_core::db::mem_impl::MemDatabase;
 use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::module::registry::ModuleRegistry;
@@ -11,7 +12,7 @@ use fedimint_core::secp256k1::schnorr::Signature;
 use fedimint_core::secp256k1::{Keypair, PublicKey, SECP256K1, SecretKey};
 use fedimint_core::{Amount, PeerId};
 use fedimint_lnv2_common::bolt12::invoice::{
-    Issuer, Terms, encode_payment_path, offer_hash, sign, unsigned_invoice,
+    Issuer, Terms, encode_payment_path, offer_hash, routing_metadata, sign, unsigned_invoice,
 };
 use fedimint_lnv2_common::bolt12::{
     INVOICE_LIFETIME, NonceRequest, ReceivePolicy, Registration, RegistrationId, Reservation,
@@ -52,7 +53,11 @@ impl EntropySource for Entropy {
 }
 
 fn configs() -> Result<BTreeMap<PeerId, LightningConfig>> {
-    let peers = (0..4).map(PeerId::from).collect::<Vec<_>>();
+    configs_for(4)
+}
+
+fn configs_for(n: u16) -> Result<BTreeMap<PeerId, LightningConfig>> {
+    let peers = (0..n).map(PeerId::from).collect::<Vec<_>>();
     let (public, private) = keys::fixture(&peers)?;
 
     // Signing never touches the encryption keys, so one dummy share serves all.
@@ -86,10 +91,12 @@ fn database() -> Database {
     Database::new(MemDatabase::new(), ModuleRegistry::default())
 }
 
-fn offer(issuer: PublicKey) -> Offer {
+fn offer(issuer: PublicKey, handle: [u8; 32]) -> Offer {
     OfferBuilder::new(issuer)
         .chain(Network::Regtest)
         .description("federated receive".to_string())
+        .metadata(routing_metadata(FederationId::dummy(), handle))
+        .expect("metadata fits")
         .build()
         .expect("offer is valid")
 }
@@ -158,7 +165,8 @@ impl Scenario {
             .as_ref()
             .expect("fixture enables BOLT12");
 
-        let offer = offer(bolt12.signing_key);
+        let handle = rand::random();
+        let offer = offer(bolt12.signing_key, handle);
         let request = invoice_request(&offer, AMOUNT_MSATS);
         let path = payment_path(&offer, &request);
 
@@ -166,7 +174,7 @@ impl Scenario {
         let gateway = Keypair::new(SECP256K1, &mut OsRng);
 
         let policy = ReceivePolicy {
-            handle: rand::random(),
+            handle,
             claim_pk: recipient.public_key(),
             offer_hash: offer_hash(&offer),
             max_gateway_fee: PaymentFee::RECEIVE_FEE_LIMIT,
@@ -397,7 +405,7 @@ async fn guardians_refuse_terms_that_differ_from_consensus() -> Result<()> {
         .as_ref()
         .expect("fixture enables BOLT12");
     let issuer = bolt12.signing_key;
-    let offer = offer(issuer);
+    let offer = offer(issuer, scenario.policy.handle);
     let other_request = invoice_request(&offer, AMOUNT_MSATS);
     let other_path = encode_payment_path(&payment_path(&offer, &other_request))?;
 
@@ -801,37 +809,43 @@ async fn one_gateway_cannot_take_all_signing_capacity() -> Result<()> {
 
     dbtx.commit_tx().await;
 
-    // At most two attempts are open per reservation.
-    signer
-        .prepare(
-            cfg,
-            &db,
-            (reservations[0], [0; 32]),
-            approval_for(gateway, [7; 32]),
-            NOW,
-        )
-        .await?;
-    signer
-        .prepare(
-            cfg,
-            &db,
-            (reservations[0], [1; 32]),
-            approval_for(gateway, [7; 32]),
-            NOW,
-        )
-        .await?;
+    // At most two attempts are held in memory per reservation; a third attempt
+    // evicts the oldest in-memory ticket for that reservation rather than
+    // locking out legitimate retries after offline peers, while durable DB
+    // state still forbids reusing the evicted attempt id.
+    for attempt in 0..3u8 {
+        signer
+            .prepare(
+                cfg,
+                &db,
+                (reservations[0], [attempt; 32]),
+                approval_for(gateway, [7; 32]),
+                NOW,
+            )
+            .await?;
+    }
 
+    assert_eq!(
+        signer
+            .tickets
+            .keys()
+            .filter(|(r, _)| *r == reservations[0])
+            .count(),
+        2
+    );
+    assert!(!signer.tickets.contains_key(&(reservations[0], [0; 32])));
     assert!(
         signer
             .prepare(
                 cfg,
                 &db,
-                (reservations[0], [2; 32]),
+                (reservations[0], [0; 32]),
                 approval_for(gateway, [7; 32]),
-                NOW
+                NOW,
             )
             .await
-            .is_err()
+            .is_err(),
+        "evicted attempt must not be re-prepared"
     );
 
     // At most sixteen are open per gateway.
@@ -891,6 +905,158 @@ async fn one_gateway_cannot_take_all_signing_capacity() -> Result<()> {
             NOW,
         )
         .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn unsigned_invoice_rejects_wrong_handle_and_expired_offer() -> Result<()> {
+    let scenario = Scenario::new()?;
+    let bolt12 = scenario.cfgs[&PeerId::from(0)]
+        .consensus
+        .bolt12
+        .as_ref()
+        .expect("fixture enables BOLT12");
+
+    // Wrong routing handle in offer metadata must be rejected even if the
+    // registration somehow committed to that offer hash.
+    let wrong_handle_offer = offer(bolt12.signing_key, [0xfe; 32]);
+    let wrong_req = invoice_request(&wrong_handle_offer, AMOUNT_MSATS);
+    let wrong_path = encode_payment_path(&payment_path(&wrong_handle_offer, &wrong_req))?;
+    let mut wrong_policy = scenario.policy.clone();
+    wrong_policy.offer_hash = offer_hash(&wrong_handle_offer);
+    let mut wrong_reservation = scenario.reservation.clone();
+    wrong_reservation.terms = terms_hash(&wrong_req.encode(), &wrong_path);
+
+    assert!(
+        unsigned_invoice(
+            Issuer {
+                signing_key: bolt12.signing_key,
+                network: Network::Regtest,
+            },
+            &wrong_policy,
+            &wrong_reservation,
+            Terms {
+                invoice_request: &wrong_req.encode(),
+                payment_path: &wrong_path,
+            },
+        )
+        .is_err()
+    );
+
+    // An offer whose absolute_expiry is already <= reservation.created_at must
+    // be rejected. Use a future wall-clock timestamp so LDK builds the payer
+    // request, then set reservation.created_at equal to absolute_expiry.
+    let future_expiry = fedimint_core::time::duration_since_epoch().as_secs() + 3_600;
+    let expired_offer = OfferBuilder::new(bolt12.signing_key)
+        .chain(Network::Regtest)
+        .description("expired".to_string())
+        .metadata(routing_metadata(
+            FederationId::dummy(),
+            scenario.policy.handle,
+        ))
+        .expect("metadata fits")
+        .absolute_expiry(std::time::Duration::from_secs(future_expiry))
+        .build()
+        .expect("offer builds");
+    let exp_req = invoice_request(&expired_offer, AMOUNT_MSATS);
+    let exp_path = encode_payment_path(&payment_path(&expired_offer, &exp_req))?;
+    let mut exp_policy = scenario.policy.clone();
+    exp_policy.offer_hash = offer_hash(&expired_offer);
+    let mut exp_reservation = scenario.reservation.clone();
+    exp_reservation.created_at = future_expiry;
+    exp_reservation.terms = terms_hash(&exp_req.encode(), &exp_path);
+
+    assert!(
+        unsigned_invoice(
+            Issuer {
+                signing_key: bolt12.signing_key,
+                network: Network::Regtest,
+            },
+            &exp_policy,
+            &exp_reservation,
+            Terms {
+                invoice_request: &exp_req.encode(),
+                payment_path: &exp_path,
+            },
+        )
+        .is_err()
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn seven_guardian_signing_succeeds_after_two_offline_attempts() -> Result<()> {
+    // N = 7 (f = 2, quorum = 5): two failed signing attempts (e.g. two
+    // distinct guardians dropping between round 1 and round 2) must not exhaust
+    // the per-reservation in-memory ticket cap before attempt 3 completes.
+    let cfgs = configs_for(7)?;
+    let gateway = Keypair::new(SECP256K1, &mut OsRng);
+    let reservation = ReservationId(sha256::Hash::hash(b"n7-res"));
+    let digest = [5; 32];
+
+    let mut signers: BTreeMap<PeerId, (Signer, Database)> = (0..7u16)
+        .map(|p| (PeerId::from(p), (Signer::default(), database())))
+        .collect();
+
+    // Two failed attempts prepare on all 5 honest guardians [0..5] without
+    // finishing round 2.
+    for attempt in [[1; 32], [2; 32]] {
+        for peer in (0..5u16).map(PeerId::from) {
+            let (signer, db) = signers.get_mut(&peer).expect("peer");
+            signer
+                .prepare(
+                    &cfgs[&peer],
+                    db,
+                    (reservation, attempt),
+                    approval_for(gateway.public_key(), digest),
+                    NOW,
+                )
+                .await?;
+        }
+    }
+
+    // Attempt 3 must still prepare (evicting oldest ticket) and produce a valid
+    // aggregated FROST signature.
+    let attempt = [3; 32];
+    let mut commitments = BTreeMap::new();
+    for peer in (0..5u16).map(PeerId::from) {
+        let (signer, db) = signers.get_mut(&peer).expect("peer");
+        let resp = signer
+            .prepare(
+                &cfgs[&peer],
+                db,
+                (reservation, attempt),
+                approval_for(gateway.public_key(), digest),
+                NOW,
+            )
+            .await?;
+        commitments.insert(
+            keys::identifier(peer)?,
+            frost::round1::SigningCommitments::deserialize(&resp.commitments)?,
+        );
+    }
+
+    let package = frost::SigningPackage::new(commitments, &digest);
+    let sign_req = SignRequest::new(reservation, attempt, package.serialize()?, &gateway);
+    let mut shares = BTreeMap::new();
+    for peer in (0..5u16).map(PeerId::from) {
+        let (signer, db) = signers.get_mut(&peer).expect("peer");
+        let share = signer.sign(&cfgs[&peer], db, &sign_req).await?;
+        shares.insert(
+            keys::identifier(peer)?,
+            frost::round2::SignatureShare::deserialize(&share)?,
+        );
+    }
+
+    let bolt12 = cfgs[&PeerId::from(0)]
+        .consensus
+        .bolt12
+        .as_ref()
+        .expect("enabled");
+    let public = frost::keys::PublicKeyPackage::deserialize(&bolt12.public_package)?;
+    frost::aggregate(&package, &shares, &public)?;
 
     Ok(())
 }

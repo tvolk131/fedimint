@@ -81,7 +81,14 @@ pub fn derive_agg_dk(
 }
 
 fn derive_ephemeral_sk(encryption_seed: &[u8; 32]) -> Scalar {
-    Scalar::random(&mut ChaChaRng::from_seed(*encryption_seed))
+    let mut rng = ChaChaRng::from_seed(*encryption_seed);
+
+    loop {
+        let sk = Scalar::random(&mut rng);
+        if !bool::from(sk.is_zero()) {
+            return sk;
+        }
+    }
 }
 
 fn xor_with_hash(mut bytes: [u8; 32], agg_dk: &AggregateDecryptionKey) -> [u8; 32] {
@@ -127,6 +134,15 @@ pub fn verify_ciphertext(ct: &CipherText, commitment: &sha256::Hash) -> bool {
     let message = hash_to_message(&ct.encrypted_preimage, &ct.pk.0, commitment);
 
     pairing(&G1Affine::generator(), &ct.signature.0) == pairing(&ct.pk.0, &message)
+}
+
+/// Like [`verify_ciphertext`], additionally rejecting the degenerate identity
+/// ciphertext (`ephemeral_sk == 0`) whose aggregate decryption key is the
+/// publicly known identity element.
+pub fn verify_non_identity_ciphertext(ct: &CipherText, commitment: &sha256::Hash) -> bool {
+    !bool::from(ct.pk.0.is_identity())
+        && !bool::from(ct.signature.0.is_identity())
+        && verify_ciphertext(ct, commitment)
 }
 
 pub fn decrypt_preimage(ct: &CipherText, agg_dk: &AggregateDecryptionKey) -> [u8; 32] {

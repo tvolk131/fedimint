@@ -107,3 +107,26 @@ fn test_roundtrip_single_guardian() {
     assert!(verify_agg_dk(&dealer_agg_pk(), &agg_dk, &ct, &commitment));
     assert_eq!(preimage, decrypt_preimage(&ct, &agg_dk));
 }
+
+#[test]
+fn test_verify_non_identity_ciphertext() {
+    use bls12_381::{G1Affine, G2Affine};
+
+    use crate::{
+        CipherText, EphemeralPublicKey, EphemeralSignature, verify_non_identity_ciphertext,
+    };
+
+    let encryption_seed = [9_u8; 32];
+    let preimage = [7_u8; 32];
+    let commitment = sha256::Hash::hash(b"non-identity");
+    let valid = encrypt_preimage(&dealer_agg_pk(), &encryption_seed, &preimage, &commitment);
+    assert!(verify_non_identity_ciphertext(&valid, &commitment));
+
+    let identity_ct = CipherText {
+        pk: EphemeralPublicKey(G1Affine::identity()),
+        encrypted_preimage: [0u8; 32],
+        signature: EphemeralSignature(G2Affine::identity()),
+    };
+    assert!(verify_ciphertext(&identity_ct, &commitment));
+    assert!(!verify_non_identity_ciphertext(&identity_ct, &commitment));
+}

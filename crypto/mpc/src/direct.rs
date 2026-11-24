@@ -117,12 +117,31 @@ pub async fn generate<T: Transport>(
         .collect())
 }
 
+/// Maximum combinations tested during subset-search fallback in
+/// [`reconstruct`]. Covers all `C(15, 8) = 6,435` combinations for `f = 7`
+/// (`N <= 24`) while preventing exponential consensus CPU exhaustion.
+pub const MAX_SUBSET_TRIALS: usize = 8_192;
+
 /// A preimage recovered from shares.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct Recovered {
     pub preimage: [u8; 32],
     /// Parties whose share is not on the recovered polynomial.
     pub rejected: Vec<usize>,
+}
+
+impl Drop for Recovered {
+    fn drop(&mut self) {
+        self.preimage.zeroize();
+    }
+}
+
+impl std::fmt::Debug for Recovered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Recovered")
+            .field("rejected", &self.rejected)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Inverses of every difference between two evaluation points. Points are
@@ -331,19 +350,7 @@ fn try_berlekamp_welch(
     })
 }
 
-/// Recover the preimage of `payment_hash` from shares of which at least
-/// `threshold` are correct.
-///
-/// Runs polynomial-time Berlekamp–Welch decoding first (handling up to
-/// `(shares.len() - threshold) / 2` corrupted shares in microseconds—covering
-/// all `f` Byzantine shares when `3f + 1` shares are given, and up to `f / 2`
-/// when `2f + 1` are given), then falls back to subset search if more errors
-/// are present.
-pub fn reconstruct(
-    payment_hash: &[u8; 32],
-    threshold: usize,
-    shares: &[Share],
-) -> Result<Recovered> {
+fn validate_shares(threshold: usize, shares: &[Share]) -> Result<()> {
     ensure!(threshold >= 1, "The threshold must be positive");
     ensure!(shares.len() >= threshold, "Not enough shares");
 
@@ -358,14 +365,96 @@ pub fn reconstruct(
         seen[share.party] = true;
     }
 
+    Ok(())
+}
+
+/// Recover the preimage of `payment_hash` in `O(threshold^2 + shares.len() * threshold)`
+/// time using a caller-supplied `threshold`-sized subset of party indices.
+///
+/// Fails immediately if the supplied subset does not interpolate to a preimage
+/// matching `payment_hash`, and otherwise identifies every share in `shares`
+/// that does not lie on the recovered degree-`< threshold` polynomial.
+pub fn reconstruct_with_subset(
+    payment_hash: &[u8; 32],
+    threshold: usize,
+    shares: &[Share],
+    subset_parties: &[usize],
+) -> Result<Recovered> {
+    validate_shares(threshold, shares)?;
+    ensure!(
+        subset_parties.len() == threshold,
+        "Subset length must equal threshold"
+    );
+
+    let mut chosen_mask = [false; MAX_PARTIES];
+    let mut subset: Vec<&Share> = Vec::with_capacity(threshold);
+
+    for &party in subset_parties {
+        ensure!(
+            party < MAX_PARTIES && !chosen_mask[party],
+            "Subset parties must be distinct"
+        );
+        chosen_mask[party] = true;
+
+        let Some(share) = shares.iter().find(|s| s.party == party) else {
+            bail!("Subset references a party not present in shares");
+        };
+        subset.push(share);
+    }
+
+    let inverses = inverse_table();
+    let mut candidate = interpolate(&subset, 0, &inverses);
+
+    if Sha256::digest(candidate).as_slice() != payment_hash {
+        candidate.zeroize();
+        bail!("Supplied subset does not match the payment hash");
+    }
+
+    let rejected = shares
+        .iter()
+        .filter(|share| {
+            !chosen_mask[share.party]
+                && interpolate(&subset, share.party + 1, &inverses) != share.value
+        })
+        .map(|share| share.party)
+        .collect();
+
+    Ok(Recovered {
+        preimage: candidate,
+        rejected,
+    })
+}
+
+/// Recover the preimage of `payment_hash` from shares of which at least
+/// `threshold` are correct.
+///
+/// Runs polynomial-time Berlekamp–Welch decoding first (handling up to
+/// `(shares.len() - threshold) / 2` corrupted shares in microseconds—covering
+/// all `f` Byzantine shares when `3f + 1` shares are given, and up to `f / 2`
+/// when `2f + 1` are given), then falls back to bounded subset search (at most
+/// [`MAX_SUBSET_TRIALS`] combinations) if more errors are present.
+pub fn reconstruct(
+    payment_hash: &[u8; 32],
+    threshold: usize,
+    shares: &[Share],
+) -> Result<Recovered> {
+    validate_shares(threshold, shares)?;
+
     if let Some(recovered) = try_berlekamp_welch(payment_hash, threshold, shares) {
         return Ok(recovered);
     }
 
     let inverses = inverse_table();
     let mut choice: Vec<usize> = (0..threshold).collect();
+    let mut trials: usize = 0;
 
     loop {
+        trials += 1;
+        ensure!(
+            trials <= MAX_SUBSET_TRIALS,
+            "Subset search exceeded {MAX_SUBSET_TRIALS} trials; supply a witness subset"
+        );
+
         let subset: Vec<&Share> = choice.iter().map(|&i| &shares[i]).collect();
         let mut candidate = interpolate(&subset, 0, &inverses);
 

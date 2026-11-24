@@ -15,7 +15,8 @@ use fedimint_core::{Amount, OutPoint, PeerId};
 use serde::{Deserialize, Serialize};
 use tpe::{
     AggregateDecryptionKey, AggregatePublicKey, CipherText, DecryptionKeyShare, PublicKeyShare,
-    decrypt_preimage, encrypt_preimage, verify_agg_dk, verify_ciphertext, verify_dk_share,
+    decrypt_preimage, encrypt_preimage, verify_agg_dk, verify_dk_share,
+    verify_non_identity_ciphertext,
 };
 
 use crate::config::FeeConsensus;
@@ -39,8 +40,17 @@ pub const MAX_PENDING_PER_GATEWAY: usize = 64;
 pub const REGISTRATIONS_PRUNED_PER_REGISTER: usize = 4;
 /// Unpaid, unexpired reservations backed by the pool, across all offers.
 pub const MAX_PENDING_POOL: usize = 32;
+/// Unpaid, unexpired reservations backed by the pool for a single offer.
+pub const MAX_PENDING_POOL_PER_OFFER: usize = 4;
 /// The most generated preimages the federation keeps ready.
 pub const MAX_POOL_TARGET: u64 = 256;
+/// The most preimages one generation run may produce, keeping individual MPC
+/// round messages and Page-0 fault evidence strictly within transport RPC caps.
+pub const MAX_POOL_BATCH: u64 = 32;
+/// Largest MPC fault tolerance (`f = (N - 1) / 3`) supported for pool runs.
+/// `f <= 7` (`N <= 24`, committee `2f + 1 <= 15`) bounds worst-case refund
+/// subset search to `C(15, 8) = 6,435 <= mpc::direct::MAX_SUBSET_TRIALS`.
+pub const MAX_POOL_DEGREE: usize = 7;
 /// Seconds of consensus time a generation run may take before it is
 /// abandoned.
 pub const POOL_RUN_TIMEOUT: u64 = 300;
@@ -155,7 +165,7 @@ impl StockItem {
 
     pub fn verify(&self, registration: RegistrationId, index: u64) -> bool {
         let binding = Source::stock_binding(registration, index, self.payment_hash);
-        verify_ciphertext(&self.ciphertext, &binding)
+        verify_non_identity_ciphertext(&self.ciphertext, &binding)
     }
 }
 
@@ -212,10 +222,12 @@ pub enum Sealed {
 }
 
 /// One committee member's share, encrypted to the federation. `position` is
-/// the member's index in the run's committee.
+/// the member's index in the run's committee and `peer` is its guardian ID so
+/// consensus can blame peers that sealed invalid shares.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
 pub struct SealedShare {
     pub position: u16,
+    pub peer: PeerId,
     pub ciphertext: CipherText,
 }
 
@@ -225,7 +237,12 @@ pub struct SealedShare {
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
 pub enum Bolt12Unlock {
     Stock(AggregateDecryptionKey),
-    Pool(Vec<AggregateDecryptionKey>),
+    Pool {
+        keys: Vec<AggregateDecryptionKey>,
+        /// Optional `threshold`-sized witness of committee `position`s that
+        /// reconstruct the preimage in `O(t^2)` time without subset search.
+        subset: Option<Vec<u16>>,
+    },
 }
 
 impl Bolt12Unlock {
@@ -235,19 +252,30 @@ impl Bolt12Unlock {
                 [key] => Some(Self::Stock(*key)),
                 _ => None,
             },
-            Source::Pool { .. } => Some(Self::Pool(keys)),
+            Source::Pool { .. } => Some(Self::Pool { keys, subset: None }),
         }
+    }
+
+    pub fn new_pool(keys: Vec<AggregateDecryptionKey>, subset: Option<Vec<u16>>) -> Self {
+        Self::Pool { keys, subset }
     }
 
     pub fn keys(&self) -> &[AggregateDecryptionKey] {
         match self {
             Self::Stock(key) => std::slice::from_ref(key),
-            Self::Pool(keys) => keys,
+            Self::Pool { keys, .. } => keys,
+        }
+    }
+
+    pub fn subset(&self) -> Option<&[u16]> {
+        match self {
+            Self::Stock(..) => None,
+            Self::Pool { subset, .. } => subset.as_deref(),
         }
     }
 
     pub fn is_pool(&self) -> bool {
-        matches!(self, Self::Pool(..))
+        matches!(self, Self::Pool { .. })
     }
 }
 
@@ -485,6 +513,26 @@ pub struct ReceiveContract {
     pub refund_pk: PublicKey,
 }
 
+/// Result of releasing a receive contract's preimage.
+pub struct ReleasedPreimage {
+    pub preimage: [u8; 32],
+    /// Committee members whose sealed share did not lie on the recovered
+    /// polynomial (empty for stock contracts).
+    pub rejected_peers: Vec<PeerId>,
+    /// A `threshold`-sized subset of valid committee positions that witnesses
+    /// the preimage in `O(t^2)` time (empty for stock contracts).
+    pub valid_subset: Vec<u16>,
+}
+
+impl std::fmt::Debug for ReleasedPreimage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReleasedPreimage")
+            .field("rejected_peers", &self.rejected_peers)
+            .field("valid_subset", &self.valid_subset)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ReceiveContract {
     /// Every ciphertext guardians release a decryption share for once the
     /// receive is funded, with the commitment it is bound to.
@@ -522,7 +570,8 @@ impl ReceiveContract {
                 .iter()
                 .zip(shares)
                 .all(|((ciphertext, binding), share)| {
-                    verify_dk_share(pk, share, ciphertext, binding)
+                    verify_non_identity_ciphertext(ciphertext, binding)
+                        && verify_dk_share(pk, share, ciphertext, binding)
                 })
     }
 
@@ -539,25 +588,43 @@ impl ReceiveContract {
             && ciphertexts
                 .iter()
                 .zip(keys)
-                .all(|((ciphertext, binding), key)| verify_agg_dk(agg_pk, key, ciphertext, binding))
+                .all(|((ciphertext, binding), key)| {
+                    verify_non_identity_ciphertext(ciphertext, binding)
+                        && verify_agg_dk(agg_pk, key, ciphertext, binding)
+                })
     }
 
-    /// The Lightning preimage, or `None` if the decrypted values do not yield
-    /// it: the recipient uploaded a wrong stock ciphertext, or too few
-    /// committee members sealed correct shares. `keys` must have passed
+    /// Release the Lightning preimage along with any committee peers whose
+    /// sealed shares were invalid and a valid `threshold`-sized witness subset.
+    ///
+    /// When `subset` is `Some`, only that subset is interpolated (`O(t^2)`),
+    /// returning `None` if the witness is invalid rather than falling back to
+    /// subset search. `keys` must have passed
     /// [`Self::verify_agg_decryption_keys`].
-    pub fn release(&self, keys: &[AggregateDecryptionKey]) -> Option<[u8; 32]> {
+    pub fn release_detailed(
+        &self,
+        keys: &[AggregateDecryptionKey],
+        subset: Option<&[u16]>,
+    ) -> Option<ReleasedPreimage> {
         match &self.sealed {
             Sealed::Preimage(ciphertext) => {
+                if subset.is_some() {
+                    return None;
+                }
                 let preimage = decrypt_preimage(ciphertext, keys.first()?);
 
-                (sha256::Hash::hash(&preimage).to_byte_array() == self.payment_hash)
-                    .then_some(preimage)
+                (sha256::Hash::hash(&preimage).to_byte_array() == self.payment_hash).then_some(
+                    ReleasedPreimage {
+                        preimage,
+                        rejected_peers: vec![],
+                        valid_subset: vec![],
+                    },
+                )
             }
             Sealed::Shares {
                 threshold, shares, ..
             } => {
-                let shares: Vec<_> = shares
+                let decrypted: Vec<_> = shares
                     .iter()
                     .zip(keys)
                     .map(|(share, key)| {
@@ -568,11 +635,53 @@ impl ReceiveContract {
                     })
                     .collect();
 
-                mpc::direct::reconstruct(&self.payment_hash, usize::from(*threshold), &shares)
-                    .ok()
-                    .map(|recovered| recovered.preimage)
+                let recovered = if let Some(witness) = subset {
+                    let witness_usize: Vec<usize> =
+                        witness.iter().map(|&p| usize::from(p)).collect();
+                    mpc::direct::reconstruct_with_subset(
+                        &self.payment_hash,
+                        usize::from(*threshold),
+                        &decrypted,
+                        &witness_usize,
+                    )
+                    .ok()?
+                } else {
+                    mpc::direct::reconstruct(
+                        &self.payment_hash,
+                        usize::from(*threshold),
+                        &decrypted,
+                    )
+                    .ok()?
+                };
+
+                let rejected_peers = shares
+                    .iter()
+                    .filter(|s| recovered.rejected.contains(&usize::from(s.position)))
+                    .map(|s| s.peer)
+                    .collect();
+                let valid_subset = shares
+                    .iter()
+                    .filter(|s| !recovered.rejected.contains(&usize::from(s.position)))
+                    .take(usize::from(*threshold))
+                    .map(|s| s.position)
+                    .collect();
+
+                Some(ReleasedPreimage {
+                    preimage: recovered.preimage,
+                    rejected_peers,
+                    valid_subset,
+                })
             }
         }
+    }
+
+    /// The Lightning preimage, or `None` if the decrypted values do not yield
+    /// it: the recipient uploaded a wrong stock ciphertext, or too few
+    /// committee members sealed correct shares. `keys` must have passed
+    /// [`Self::verify_agg_decryption_keys`].
+    pub fn release(&self, keys: &[AggregateDecryptionKey]) -> Option<[u8; 32]> {
+        self.release_detailed(keys, None)
+            .map(|released| released.preimage)
     }
 }
 

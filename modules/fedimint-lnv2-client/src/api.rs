@@ -226,19 +226,28 @@ where
         contract: ReceiveContract,
         tpe_pks: BTreeMap<PeerId, PublicKeyShare>,
     ) -> BTreeMap<PeerId, Vec<DecryptionKeyShare>> {
+        let contract = std::sync::Arc::new(contract);
+        let tpe_pks = std::sync::Arc::new(tpe_pks);
+
         self.request_with_strategy_retry(
             FilterMapThreshold::new(
                 move |peer, shares: Vec<DecryptionKeyShare>| {
-                    let valid = tpe_pks
-                        .get(&peer)
-                        .is_some_and(|pk| contract.verify_decryption_shares(pk, &shares));
+                    let contract = contract.clone();
+                    let tpe_pks = tpe_pks.clone();
 
-                    ready(if valid {
-                        Ok(shares)
-                    } else {
-                        Err(ServerError::InvalidResponse(
-                            "Invalid decryption shares".to_string(),
-                        ))
+                    // Pairing verification is CPU-intensive; keep it off the async workers.
+                    fedimint_core::runtime::spawn_blocking(move || {
+                        let valid = tpe_pks
+                            .get(&peer)
+                            .is_some_and(|pk| contract.verify_decryption_shares(pk, &shares));
+
+                        if valid {
+                            Ok(shares)
+                        } else {
+                            Err(ServerError::InvalidResponse(
+                                "Invalid decryption shares".to_string(),
+                            ))
+                        }
                     })
                 },
                 self.all_peers().to_num_peers(),

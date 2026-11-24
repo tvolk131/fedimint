@@ -226,6 +226,19 @@ pub fn unsigned_invoice(
         offer.issuer_signing_pubkey() == Some(issuer.signing_key),
         "offer is not issued under the federation key"
     );
+    ensure!(
+        offer
+            .metadata()
+            .is_some_and(|meta| parse_routing_metadata(meta)
+                .is_ok_and(|(_, handle)| handle == policy.handle)),
+        "offer routing metadata does not match the registered handle"
+    );
+    ensure!(
+        offer
+            .absolute_expiry()
+            .is_none_or(|expiry| expiry > Duration::from_secs(reservation.created_at)),
+        "offer has expired"
+    );
 
     // Parsing also verifies the payer's signature over the request.
     let request = InvoiceRequest::try_from(terms.invoice_request.to_vec())

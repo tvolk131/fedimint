@@ -982,13 +982,16 @@ impl Gateway {
 
                     let mut dbtx = self_copy.gateway_db.begin_transaction().await;
                     let num_pruned = dbtx.prune_registered_incoming_contracts(cutoff_secs).await;
+                    let num_owners_pruned =
+                        dbtx.prune_expired_payment_hash_owners(cutoff_secs).await;
                     match dbtx.commit_tx_result().await {
                         Ok(()) => {
-                            if num_pruned > 0 {
+                            if num_pruned > 0 || num_owners_pruned > 0 {
                                 info!(
                                     target: LOG_GATEWAY,
                                     num_pruned,
-                                    "Pruned expired incoming contract records"
+                                    num_owners_pruned,
+                                    "Pruned expired incoming contract and payment hash records"
                                 );
                             }
                         }
@@ -1156,7 +1159,13 @@ impl Gateway {
         } else {
             self.set_gateway_state(GatewayState::Syncing).await;
             info!(target: LOG_GATEWAY, "Waiting for chain sync");
-            if let Err(err) = ln_client.wait_for_chain_sync().await {
+            // The node may take long to catch up with the chain, so stop
+            // waiting when the gateway shuts down.
+            let synced = tokio::select! {
+                synced = ln_client.wait_for_chain_sync() => synced,
+                () = handle.make_shutdown_rx() => return ReceivePaymentStreamAction::NoRetry,
+            };
+            if let Err(err) = synced {
                 warn!(target: LOG_GATEWAY, err = %err.fmt_compact(), "Failed to wait for chain sync");
                 return ReceivePaymentStreamAction::RetryAfterDelay;
             }
@@ -1318,6 +1327,27 @@ impl Gateway {
             None
         };
 
+        let owner = self
+            .gateway_db
+            .begin_transaction_nc()
+            .await
+            .load_payment_hash_owner(payment_request.payment_hash)
+            .await;
+
+        if let Some(owner) = &owner
+            && owner.protocol == fedimint_gateway_server_db::PaymentHashProtocol::Bolt12
+            && self
+                .try_handle_lightning_payment_bolt12(
+                    &payment_request,
+                    lightning_context,
+                    Some(owner.federation_id),
+                )
+                .await
+                .is_ok()
+        {
+            return "bolt12";
+        }
+
         let lnv2_start = fedimint_core::time::now();
         let lnv2_result = self
             .try_handle_lightning_payment_lnv2(&payment_request, lightning_context)
@@ -1356,10 +1386,13 @@ impl Gateway {
             return "ignore";
         }
 
-        if self
-            .try_handle_lightning_payment_bolt12(&payment_request, lightning_context)
-            .await
-            .is_ok()
+        if owner
+            .as_ref()
+            .is_none_or(|o| o.protocol != fedimint_gateway_server_db::PaymentHashProtocol::Bolt11)
+            && self
+                .try_handle_lightning_payment_bolt12(&payment_request, lightning_context, None)
+                .await
+                .is_ok()
         {
             return "bolt12";
         }
@@ -1473,6 +1506,12 @@ impl Gateway {
         let blocks_to_claim_deadline =
             htlc_request.lnv2_blocks_to_claim_deadline(current_block_height);
 
+        // No other relay of this circuit may fund the contract between this
+        // relay and failing the HTLC back below. Only a held payment can fund
+        // a fresh contract, as a forward has no blocks left to its claim
+        // deadline, and `handle_lightning_payment` handles one delivery of a
+        // held payment at a time, so the next delivery is relayed only once
+        // this one has returned, including any fail-back.
         if let Err(err) = client
             .get_first_module::<GatewayClientModuleV2>()
             .expect("Must have client module")
@@ -1486,6 +1525,24 @@ impl Gateway {
             )
             .await
         {
+            if !err.htlc_may_be_failed_back() {
+                // The incoming contract is funded, so the recipient can claim
+                // it and the gateway is reimbursed only by settling this HTLC.
+                // It stays held: relaying it again starts the completion once
+                // the cause has cleared. LND delivers an accepted HOLD invoice
+                // again when the gateway reconnects, and the LDK backend
+                // delivers a payment its node still holds again when the
+                // gateway next starts the node.
+                crit!(
+                    target: LOG_GATEWAY,
+                    err = %err.fmt_compact(),
+                    payment_hash = %htlc_request.payment_hash,
+                    "Incoming contract is funded but its HTLC completion could not be started, leaving the HTLC held"
+                );
+
+                return Ok(());
+            }
+
             warn!(
                 target: LOG_GATEWAY,
                 err = %err.fmt_compact(),
@@ -1499,7 +1556,9 @@ impl Gateway {
                 htlc_id: htlc_request.htlc_id,
             };
 
-            if let Err(err) = lightning_context.lnrpc.complete_htlc(outcome).await {
+            // Retried while the Lightning node fails transiently, as the HTLC
+            // otherwise stays held until its expiry.
+            if let Err(err) = self.await_complete_htlc(outcome).await {
                 warn!(target: LOG_GATEWAY, err = %err.fmt_compact(), "Error sending HTLC response to lightning node");
             }
         }
@@ -3809,6 +3868,23 @@ impl Gateway {
             .saturating_add(u64::from(payload.expiry_secs));
 
         if dbtx
+            .claim_payment_hash_owner(
+                payment_hash,
+                &fedimint_gateway_server_db::PaymentHashOwner {
+                    federation_id: payload.federation_id,
+                    protocol: fedimint_gateway_server_db::PaymentHashProtocol::Bolt11,
+                    expires_at_secs: invoice_expires_at_secs,
+                },
+            )
+            .await
+            .is_some()
+        {
+            return Err(PublicGatewayError::LNv2(LNv2Error::IncomingPayment(
+                "PaymentHash is already registered".to_string(),
+            )));
+        }
+
+        if dbtx
             .save_registered_incoming_contract(
                 payload.federation_id,
                 payload.amount,
@@ -3845,6 +3921,12 @@ impl Gateway {
                 let mut dbtx = self.gateway_db.begin_transaction().await;
                 dbtx.delete_registered_incoming_contract(PaymentImage::Hash(payment_hash))
                     .await;
+                dbtx.release_payment_hash_owner(
+                    payment_hash,
+                    payload.federation_id,
+                    fedimint_gateway_server_db::PaymentHashProtocol::Bolt11,
+                )
+                .await;
                 if let Err(db_err) = dbtx.commit_tx_result().await {
                     warn!(
                         target: LOG_GATEWAY,

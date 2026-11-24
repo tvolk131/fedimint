@@ -529,10 +529,18 @@ impl_db_record!(
 #[derive(Debug, Encodable, Decodable)]
 pub struct Bolt12NonceKey(pub ReservationId, pub [u8; 32]);
 
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12NonceReservationPrefix(pub ReservationId);
+
 impl_db_record!(
     key = Bolt12NonceKey,
     value = bool,
     db_prefix = DbKeyPrefix::Bolt12Nonce,
+);
+
+impl_db_lookup!(
+    key = Bolt12NonceKey,
+    query_prefix = Bolt12NonceReservationPrefix
 );
 
 /// Signing attempts this guardian has started for a reservation.
@@ -630,7 +638,7 @@ impl_db_lookup!(
 );
 
 /// This guardian's part in a generation run. Local, not consensus state.
-#[derive(Debug, Clone, Encodable, Decodable)]
+#[derive(Clone, Encodable, Decodable)]
 pub struct LocalRun {
     /// All of this guardian's randomness in the run. Kept until the run ends
     /// so an aborted run can be replayed.
@@ -639,6 +647,22 @@ pub struct LocalRun {
     pub submission: Option<Vec<PoolShare>>,
     /// Commitment to this guardian's evidence, once its part has ended.
     pub evidence: Option<fedimint_core::bitcoin::hashes::sha256::Hash>,
+    /// Number of transcript round rows stored for this run once evidence is saved.
+    pub transcript_rounds: u64,
+}
+
+impl std::fmt::Debug for LocalRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalRun")
+            .field("seed", &"[REDACTED]")
+            .field(
+                "submission_len",
+                &self.submission.as_ref().map(std::vec::Vec::len),
+            )
+            .field("evidence", &self.evidence)
+            .field("transcript_rounds", &self.transcript_rounds)
+            .finish()
+    }
 }
 
 /// Written before this guardian sends anything in a run, so a restarted
@@ -813,12 +837,14 @@ pub struct BadPacket {
     pub chunk: u32,
     pub chunks: u32,
     pub ephemeral_pk: PublicKey,
+    pub recv_ephemeral_pk: PublicKey,
     pub ciphertext: Vec<u8>,
     pub envelope_sig: fedimint_core::secp256k1::schnorr::Signature,
 }
 
 /// Cryptographically verifiable transport misbehavior by a sender, saved as
 /// local evidence so judges can convict the sender against its revealed seed.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Eq, PartialEq, Encodable, Decodable)]
 pub enum TransportFault {
     /// A single envelope-signed packet that failed ephemeral-key matching,
@@ -831,6 +857,14 @@ pub enum TransportFault {
     /// A complete set of envelope-signed chunks (`0..chunks`) whose decrypted
     /// concatenation failed inner signature verification.
     BadMultiChunk(Vec<BadPacket>),
+    /// Two conflicting validly signed inner messages from the same sender for
+    /// the same `(run, recipient, round)`.
+    MessageEquivocation {
+        round: u64,
+        sender: PeerId,
+        first: SignedMessage,
+        second: SignedMessage,
+    },
 }
 
 impl TransportFault {
@@ -839,6 +873,7 @@ impl TransportFault {
         match self {
             Self::BadPacket(packet) | Self::ChunkCountConflict(packet, _) => Some(packet.sender),
             Self::BadMultiChunk(packets) => packets.first().map(|packet| packet.sender),
+            Self::MessageEquivocation { sender, .. } => Some(*sender),
         }
     }
 
@@ -850,11 +885,14 @@ impl TransportFault {
             Self::BadMultiChunk(packets) => packets.iter().fold(0usize, |acc, packet| {
                 acc.saturating_add(packet.ciphertext.len())
             }),
+            Self::MessageEquivocation { first, second, .. } => {
+                first.message.len().saturating_add(second.message.len())
+            }
         }
     }
 
     #[must_use]
-    pub fn max_ciphertext_len(&self) -> usize {
+    pub fn max_chunk_ciphertext_len(&self) -> usize {
         match self {
             Self::BadPacket(packet) => packet.ciphertext.len(),
             Self::ChunkCountConflict(a, b) => a.ciphertext.len().max(b.ciphertext.len()),
@@ -863,12 +901,24 @@ impl TransportFault {
                 .map(|packet| packet.ciphertext.len())
                 .max()
                 .unwrap_or(0),
+            Self::MessageEquivocation { .. } => 0,
+        }
+    }
+
+    #[must_use]
+    pub fn max_equivocation_msg_len(&self) -> usize {
+        match self {
+            Self::MessageEquivocation { first, second, .. } => {
+                first.message.len().max(second.message.len())
+            }
+            _ => 0,
         }
     }
 }
 
 /// Local relay evidence collected during a run: failed relay fetches witnessed
-/// for other peers, plus verifiable transport faults from senders.
+/// for other peers, round-0 ephemeral-key proofs, and verifiable transport
+/// faults from senders.
 #[derive(Debug, Clone, Default, Eq, PartialEq, Encodable, Decodable)]
 pub struct RelayEvidence {
     /// `(sender, recipient, round)` triples where this guardian tried to relay
@@ -878,6 +928,10 @@ pub struct RelayEvidence {
     /// Verifiable transport faults observed from senders addressed to this
     /// guardian (at most one per sender).
     pub faults: Vec<TransportFault>,
+    /// First accepted round-0 chunk-0 envelope-signed packet from each peer,
+    /// committing that peer to the `recv_ephemeral_pk` it advertised for
+    /// rounds `>= 1`.
+    pub r0_packets: Vec<BadPacket>,
 }
 
 /// Local relay evidence for a generation run.

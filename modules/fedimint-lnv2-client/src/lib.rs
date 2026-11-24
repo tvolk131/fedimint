@@ -258,6 +258,7 @@ impl Default for LightningClientInit {
 impl ModuleInit for LightningClientInit {
     type Common = LightningCommonInit;
 
+    #[allow(clippy::unused_async_trait_impl)]
     async fn dump_database(
         &self,
         _dbtx: &mut DatabaseTransaction<'_>,
@@ -449,15 +450,19 @@ impl LightningClientModule {
             async move {
                 api.wait_for_initialized_connections().await;
 
-                // Best effort: a wallet that never lost its database has
-                // nothing to recover, and the receive loop below watches a gap
-                // of unused offer keys either way.
-                if let Err(err) = module.recover_bolt12_offers().await {
+                // Retry offer recovery with backoff before scanning the receive
+                // stream so a transient network failure on restore never
+                // advances `Bolt12ReceiveStreamIndexKey` past claims belonging
+                // to offers beyond the gap window.
+                let mut backoff = std::time::Duration::from_secs(1);
+                while let Err(err) = module.recover_bolt12_offers().await {
                     warn!(
                         target: LOG_CLIENT_MODULE_LNV2,
                         err = %err.fmt_compact(),
-                        "Could not look for previously registered BOLT12 offers"
+                        "Could not look for previously registered BOLT12 offers; retrying"
                     );
+                    fedimint_core::task::sleep(backoff).await;
+                    backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
                 }
 
                 loop {

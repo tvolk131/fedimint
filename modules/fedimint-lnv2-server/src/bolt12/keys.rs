@@ -5,7 +5,7 @@
 //! recipient before they enter the broadcast-style exchange the setup ceremony
 //! offers, and bound to the transcript so they cannot be replayed elsewhere.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, ensure};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -14,7 +14,9 @@ use fedimint_core::PeerId;
 use fedimint_core::bitcoin::hashes::{Hash, sha256};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::secp256k1::{PublicKey, SECP256K1, SecretKey, ecdh};
-use fedimint_lnv2_common::bolt12::{Bolt12Config, MAX_POOL_TARGET, quorum};
+use fedimint_lnv2_common::bolt12::{
+    Bolt12Config, MAX_POOL_BATCH, MAX_POOL_DEGREE, MAX_POOL_TARGET, PoolRun, quorum,
+};
 use fedimint_lnv2_common::config::{Bolt12PrivateConfig, LightningConfig};
 use fedimint_server_core::config::PeerHandleOps;
 use frost_secp256k1_tr as frost;
@@ -46,9 +48,16 @@ fn parameters(guardians: usize) -> Result<(u16, u16)> {
 }
 
 fn config(
+    guardians: usize,
     public: &frost::keys::PublicKeyPackage,
     transport_keys: BTreeMap<PeerId, PublicKey>,
 ) -> Result<Bolt12Config> {
+    let pool_target = if PoolRun::degree(guardians) <= MAX_POOL_DEGREE {
+        Bolt12Config::DEFAULT_POOL_TARGET
+    } else {
+        0
+    };
+
     Ok(Bolt12Config {
         signing_key: PublicKey::from_slice(&public.verifying_key().serialize()?)?,
         public_package: public.serialize()?,
@@ -57,9 +66,22 @@ fn config(
         stock_item_fee: Bolt12Config::DEFAULT_STOCK_ITEM_FEE,
         receive_fee: Bolt12Config::DEFAULT_RECEIVE_FEE,
         pool_fee: Bolt12Config::DEFAULT_POOL_FEE,
-        pool_target: Bolt12Config::DEFAULT_POOL_TARGET,
+        pool_target,
         pool_batch: Bolt12Config::DEFAULT_POOL_BATCH,
     })
+}
+
+fn ensure_distinct_xonly_keys(transport_keys: &BTreeMap<PeerId, PublicKey>) -> Result<()> {
+    let mut xonly = BTreeSet::new();
+
+    for key in transport_keys.values() {
+        ensure!(
+            xonly.insert(key.x_only_public_key().0),
+            "BOLT12 transport keys must have pairwise distinct x-only public keys"
+        );
+    }
+
+    Ok(())
 }
 
 /// Trusted-dealer keys for test fixtures. Production setup uses [`generate`].
@@ -98,7 +120,7 @@ pub fn fixture(peers: &[PeerId]) -> Result<(Bolt12Config, BTreeMap<PeerId, Bolt1
         );
     }
 
-    Ok((config(&public, transport_keys)?, private))
+    Ok((config(peers.len(), &public, transport_keys)?, private))
 }
 
 /// A symmetric key for one direction of one guardian pair in one context.
@@ -173,6 +195,7 @@ pub async fn generate(
     let me = *ours.next().context("our transport key is missing")?.0;
 
     ensure!(ours.next().is_none(), "duplicate transport key");
+    ensure_distinct_xonly_keys(&transport_keys)?;
 
     let keys_view: sha256::Hash = ("fedimint/bolt12/dkg-keys/v1", &transport_keys).consensus_hash();
 
@@ -272,7 +295,7 @@ pub async fn generate(
     let (key_package, public) =
         frost::keys::dkg::part3(&round_two_secret, &round_one_packages, &round_two_packages)?;
 
-    let config = config(&public, transport_keys)?;
+    let config = config(guardians, &public, transport_keys)?;
 
     agree(peers, &config.public_package, "the signing key").await?;
 
@@ -308,11 +331,22 @@ pub fn validate(identity: PeerId, config: &LightningConfig) -> Result<()> {
             == Some(&private.transport_secret.public_key(SECP256K1)),
         "BOLT12 transport secret does not match our public key"
     );
+    ensure_distinct_xonly_keys(&public.transport_keys)?;
     ensure!(
-        public.pool_target <= MAX_POOL_TARGET
-            && (1..=mpc::circuit::MAX_BATCH as u64).contains(&public.pool_batch),
+        public.pool_target <= MAX_POOL_TARGET && (1..=MAX_POOL_BATCH).contains(&public.pool_batch),
         "BOLT12 pool target or batch is out of range"
     );
+
+    if public.pool_target > 0 {
+        let degree = PoolRun::degree(guardians);
+        ensure!(
+            degree <= MAX_POOL_DEGREE,
+            "BOLT12 pool generation requires federation degree <= {MAX_POOL_DEGREE}"
+        );
+        let params = mpc::engine::Params::new(PoolRun::committee_size(guardians), degree)?;
+        let batch = usize::try_from(public.pool_batch)?;
+        mpc::direct::circuit(params, batch)?;
+    }
 
     let key = frost::keys::KeyPackage::deserialize(&private.key_package)?;
     let package = frost::keys::PublicKeyPackage::deserialize(&public.public_package)?;

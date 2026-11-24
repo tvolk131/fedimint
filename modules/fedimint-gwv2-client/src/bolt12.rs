@@ -23,13 +23,15 @@ use fedimint_core::core::OperationId;
 use fedimint_core::db::IDatabaseTransactionOpsCoreTyped;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::{Amounts, CommonModuleInit};
-use fedimint_core::{Amount, impl_db_record};
+use fedimint_core::time::duration_since_epoch;
+use fedimint_core::{Amount, impl_db_lookup, impl_db_record};
 use fedimint_lnv2_common::bolt12::invoice::encode_payment_path;
 use fedimint_lnv2_common::bolt12::{
     Bolt12Output, ReceivePolicy, RegistrationId, Reservation, ReservationId, Reserve, Source,
     reservation_is_economical, terms_hash,
 };
 use fedimint_lnv2_common::{LightningCommonInit, LightningOutput, LightningOutputV0};
+use futures::StreamExt as _;
 use lightning::blinded_path::payment::BlindedPaymentPath;
 use lightning::offers::invoice::Bolt12Invoice;
 use lightning::util::ser::Writeable;
@@ -41,7 +43,7 @@ use crate::complete_sm::IncomingCircuitKey;
 use crate::{
     GatewayClientModuleV2, GatewayClientStateMachinesV2, GatewayOperationMetaV2,
     GatewayOperationRoleV2, IncomingRelayPlan, RelayIncomingHtlcError,
-    incoming_circuit_operation_id, incoming_relay_plan, operation_creation_failed_permanently,
+    incoming_circuit_operation_id,
 };
 
 /// How often to pick another stock item after losing a race for one.
@@ -66,8 +68,11 @@ enum DbKeyPrefix {
 
 /// The invoice issued for an invoice request, keyed by the request's hash, so
 /// a payer that repeats a request gets the same invoice back.
-#[derive(Debug, Encodable, Decodable)]
+#[derive(Debug, Clone, Encodable, Decodable)]
 struct Bolt12IssuedKey(sha256::Hash);
+
+#[derive(Debug, Encodable, Decodable)]
+struct Bolt12IssuedPrefix;
 
 impl_db_record!(
     key = Bolt12IssuedKey,
@@ -75,15 +80,27 @@ impl_db_record!(
     db_prefix = DbKeyPrefix::Bolt12Issued,
 );
 
+impl_db_lookup!(key = Bolt12IssuedKey, query_prefix = Bolt12IssuedPrefix);
+
 /// The reservation behind a payment hash this gateway issued an invoice for.
-#[derive(Debug, Encodable, Decodable)]
+#[derive(Debug, Clone, Encodable, Decodable)]
 struct Bolt12PaymentKey([u8; 32]);
+
+#[derive(Debug, Encodable, Decodable)]
+struct Bolt12PaymentPrefix;
 
 impl_db_record!(
     key = Bolt12PaymentKey,
     value = Reservation,
     db_prefix = DbKeyPrefix::Bolt12Payment,
 );
+
+impl_db_lookup!(key = Bolt12PaymentKey, query_prefix = Bolt12PaymentPrefix);
+
+/// Retention margin past invoice expiry before pruning local BOLT12 cache rows.
+const LOCAL_RECORD_RETENTION_SECS: u64 = 3600;
+/// Bounded number of expired local BOLT12 records pruned per invoice issuance.
+const PRUNE_PER_ISSUE: usize = 16;
 
 /// A payer's request, as the gateway's Lightning node received it.
 #[derive(Debug, Clone)]
@@ -209,13 +226,62 @@ impl GatewayClientModuleV2 {
         .await?;
 
         // Stored before the invoice leaves the gateway, so a payment for it
-        // always finds its reservation.
+        // always finds its reservation. Opportunistically prune a bounded
+        // number of expired cached invoices and expired unfunded reservations.
+        let now_secs = duration_since_epoch().as_secs();
         let mut dbtx = db.begin_transaction().await;
 
         dbtx.insert_entry(&Bolt12PaymentKey(reservation.payment_hash), &reservation)
             .await;
         dbtx.insert_entry(&Bolt12IssuedKey(request_hash), &invoice.encode())
             .await;
+
+        let expired_issued: Vec<Bolt12IssuedKey> = dbtx
+            .find_by_prefix(&Bolt12IssuedPrefix)
+            .await
+            .filter_map(|(key, bytes)| async move {
+                let expired = Bolt12Invoice::try_from(bytes).ok().is_none_or(|inv| {
+                    inv.created_at()
+                        .as_secs()
+                        .saturating_add(inv.relative_expiry().as_secs())
+                        .saturating_add(LOCAL_RECORD_RETENTION_SECS)
+                        < now_secs
+                });
+                expired.then_some(key)
+            })
+            .take(PRUNE_PER_ISSUE)
+            .collect()
+            .await;
+
+        for key in expired_issued {
+            if key.0 != request_hash {
+                dbtx.remove_entry(&key).await;
+            }
+        }
+
+        let expired_payments: Vec<(Bolt12PaymentKey, ReservationId)> = dbtx
+            .find_by_prefix(&Bolt12PaymentPrefix)
+            .await
+            .filter_map(|(key, res)| async move {
+                let expired =
+                    res.expires_at().saturating_add(LOCAL_RECORD_RETENTION_SECS) < now_secs;
+                expired.then(|| (key, Reservation::id(res.registration, res.source)))
+            })
+            .take(PRUNE_PER_ISSUE)
+            .collect()
+            .await;
+
+        for (key, res_id) in expired_payments {
+            if key.0 != reservation.payment_hash
+                && !self
+                    .client_ctx
+                    .operation_exists_dbtx(&mut dbtx.to_ref_nc(), receive_operation_id(res_id))
+                    .await
+            {
+                dbtx.remove_entry(&key).await;
+            }
+        }
+
         dbtx.commit_tx_result().await?;
 
         Ok(invoice)
@@ -285,12 +351,14 @@ impl GatewayClientModuleV2 {
             // before the reservation that pins it.
             let path = encode_payment_path(&payment_path(payment_hash).await?)?;
 
+            let expected_terms = terms_hash(&request.invoice_request, &path);
+
             let reserve = Reserve::new(
                 registration,
                 source,
                 request.amount,
                 request.gateway_fee,
-                terms_hash(&request.invoice_request, &path),
+                expected_terms,
                 &self.keypair,
             );
             let id = reserve.reservation_id();
@@ -311,8 +379,14 @@ impl GatewayClientModuleV2 {
                 .context("accepted reservation is missing")?;
 
             ensure!(
-                reservation.gateway == self.keypair.public_key(),
-                "stock item was reserved by another gateway"
+                reservation.registration == registration
+                    && reservation.source == source
+                    && reservation.payment_hash == payment_hash
+                    && reservation.gateway == self.keypair.public_key()
+                    && reservation.amount == request.amount
+                    && reservation.gateway_fee == request.gateway_fee
+                    && reservation.terms == expected_terms,
+                "accepted reservation does not match requested terms or payment hash"
             );
 
             return Ok((reservation, path));
@@ -378,6 +452,66 @@ impl GatewayClientModuleV2 {
     /// the invoice, if a fresh receive is not funded because the claim
     /// deadline is too close or the federation does not answer, or if the
     /// funding transaction or completion operation could not be started.
+    async fn fresh_bolt12_receive_funding(
+        &self,
+        id: ReservationId,
+        reservation: &Reservation,
+        payment_hash: sha256::Hash,
+        receive_operation_id: OperationId,
+        amount_msat: u64,
+        blocks_to_claim_deadline: u32,
+    ) -> Result<TransactionBuilder, RelayIncomingHtlcError> {
+        // Funding pays the recipient the invoice amount less our fee, so
+        // the payment we hold must be exactly the invoice amount.
+        if amount_msat != reservation.amount.msats {
+            return Err(RelayIncomingHtlcError::Bolt12AmountMismatch {
+                expected_msat: reservation.amount.msats,
+                received_msat: amount_msat,
+            });
+        }
+
+        if blocks_to_claim_deadline < BOLT12_CLAIM_DEADLINE_MARGIN {
+            return Err(RelayIncomingHtlcError::ClaimDeadlineTooClose {
+                blocks_to_claim_deadline,
+            });
+        }
+
+        self.ensure_federation_responsive(payment_hash).await?;
+
+        let contract = reservation.contract();
+        let refund_keypair = self.keypair;
+
+        let client_output = ClientOutput::<LightningOutput> {
+            output: LightningOutput::V0(LightningOutputV0::Bolt12(Bolt12Output::Receive(id))),
+            amounts: Amounts::new_bitcoin(contract.amount),
+        };
+        let client_output_sm = ClientOutputSM::<GatewayClientStateMachinesV2> {
+            state_machines: Arc::new(move |range: OutPointRange| {
+                assert_eq!(range.count(), 1);
+
+                vec![GatewayClientStateMachinesV2::Bolt12Receive(
+                    Bolt12ReceiveStateMachine {
+                        operation_id: receive_operation_id,
+                        contract: contract.clone(),
+                        outpoint: range
+                            .into_iter()
+                            .next()
+                            .expect("the range holds one outpoint"),
+                        refund_keypair,
+                        state: Bolt12ReceiveSMState::Funding,
+                    },
+                )]
+            }),
+        };
+
+        let outputs = self.client_ctx.make_client_outputs(ClientOutputBundle::new(
+            vec![client_output],
+            vec![client_output_sm],
+        ));
+
+        Ok(TransactionBuilder::new().with_outputs(outputs))
+    }
+
     pub async fn relay_bolt12_htlc(
         &self,
         reservation: Reservation,
@@ -390,91 +524,49 @@ impl GatewayClientModuleV2 {
         let receive_operation_id = receive_operation_id(id);
         let completion_operation_id = incoming_circuit_operation_id(receive_operation_id, circuit);
 
-        let plan = incoming_relay_plan(
-            self.client_ctx.operation_exists(receive_operation_id).await,
-            self.client_ctx
-                .operation_exists(completion_operation_id)
-                .await,
-            false,
-        );
-
-        if plan == IncomingRelayPlan::Replay {
-            return Ok(());
-        }
-
-        if plan == IncomingRelayPlan::CreateReceiveAndCompletion {
-            // Funding pays the recipient the invoice amount less our fee, so
-            // the payment we hold must be exactly the invoice amount.
-            if amount_msat != reservation.amount.msats {
-                return Err(RelayIncomingHtlcError::Bolt12AmountMismatch {
-                    expected_msat: reservation.amount.msats,
-                    received_msat: amount_msat,
-                });
-            }
-
-            if blocks_to_claim_deadline < BOLT12_CLAIM_DEADLINE_MARGIN {
-                return Err(RelayIncomingHtlcError::ClaimDeadlineTooClose {
-                    blocks_to_claim_deadline,
-                });
-            }
-
-            self.ensure_federation_responsive(payment_hash).await?;
-
-            let contract = reservation.contract();
-            let refund_keypair = self.keypair;
-
-            let client_output = ClientOutput::<LightningOutput> {
-                output: LightningOutput::V0(LightningOutputV0::Bolt12(Bolt12Output::Receive(id))),
-                amounts: Amounts::new_bitcoin(contract.amount),
-            };
-            let client_output_sm = ClientOutputSM::<GatewayClientStateMachinesV2> {
-                state_machines: Arc::new(move |range: OutPointRange| {
-                    assert_eq!(range.count(), 1);
-
-                    vec![GatewayClientStateMachinesV2::Bolt12Receive(
-                        Bolt12ReceiveStateMachine {
-                            operation_id: receive_operation_id,
-                            contract: contract.clone(),
-                            outpoint: range
-                                .into_iter()
-                                .next()
-                                .expect("the range holds one outpoint"),
-                            refund_keypair,
-                            state: Bolt12ReceiveSMState::Funding,
-                        },
-                    )]
-                }),
-            };
-
-            let outputs = self.client_ctx.make_client_outputs(ClientOutputBundle::new(
-                vec![client_output],
-                vec![client_output_sm],
-            ));
-
-            let creation_result = self
-                .client_ctx
-                .finalize_and_submit_transaction(
+        let funding = match self
+            .read_incoming_relay_plan(receive_operation_id, completion_operation_id, circuit)
+            .await
+        {
+            IncomingRelayPlan::Replay => return Ok(()),
+            IncomingRelayPlan::AddCompletion => None,
+            IncomingRelayPlan::CreateReceiveAndCompletion => match self
+                .fresh_bolt12_receive_funding(
+                    id,
+                    &reservation,
+                    payment_hash,
                     receive_operation_id,
-                    LightningCommonInit::KIND.as_str(),
-                    |_| GatewayOperationMetaV2::role(GatewayOperationRoleV2::Receive),
-                    TransactionBuilder::new().with_outputs(outputs),
+                    amount_msat,
+                    blocks_to_claim_deadline,
                 )
-                .await;
+                .await
+            {
+                Ok(funding) => Some(funding),
+                // A concurrent relay may have funded the claim while checks ran;
+                // re-read the persisted operations before returning an error that
+                // would allow failing the HTLC back.
+                Err(error) => match self
+                    .read_incoming_relay_plan(
+                        receive_operation_id,
+                        completion_operation_id,
+                        circuit,
+                    )
+                    .await
+                {
+                    IncomingRelayPlan::Replay => return Ok(()),
+                    IncomingRelayPlan::AddCompletion => None,
+                    IncomingRelayPlan::CreateReceiveAndCompletion => return Err(error),
+                },
+            },
+        };
 
-            if let Err(error) = creation_result {
-                let operation_exists = self.client_ctx.operation_exists(receive_operation_id).await;
-
-                if operation_creation_failed_permanently(true, operation_exists) {
-                    return Err(error.into());
-                }
-            }
-        }
-
-        self.start_circuit_completion(
+        self.commit_receive_and_completion(
             receive_operation_id,
             completion_operation_id,
             payment_hash,
             circuit,
+            funding,
+            None,
         )
         .await
     }

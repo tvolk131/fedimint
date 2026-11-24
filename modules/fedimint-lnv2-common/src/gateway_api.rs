@@ -1,8 +1,9 @@
 use std::num::ParseIntError;
 use std::str::FromStr;
 
-use bitcoin::secp256k1::PublicKey;
+use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin::secp256k1::schnorr::Signature;
+use bitcoin::secp256k1::{Keypair, Message, PublicKey, SECP256K1};
 use fedimint_connectors::error::ServerError;
 use fedimint_core::config::FederationId;
 use fedimint_core::encoding::{Decodable, Encodable};
@@ -160,21 +161,52 @@ pub struct Bolt12Ingress {
     pub gateway_key: PublicKey,
     /// What the gateway keeps from each payment.
     pub receive_fee: PaymentFee,
+    /// Schnorr signature by `gateway_key` binding `(federation_id, message_path,
+    /// receive_fee)` so an unapproved endpoint cannot spoof an approved key.
+    pub signature: Signature,
 }
 
 impl Bolt12Ingress {
+    fn digest(federation_id: FederationId, message_path: &str, receive_fee: PaymentFee) -> Message {
+        let hash: sha256::Hash = (
+            "fedimint/bolt12/ingress/v1",
+            federation_id,
+            message_path.as_bytes().to_vec(),
+            receive_fee,
+        )
+            .consensus_hash();
+
+        Message::from_digest(hash.to_byte_array())
+    }
+
     pub fn new(
+        federation_id: FederationId,
         message_path: &BlindedMessagePath,
-        gateway_key: PublicKey,
+        gateway_key: &Keypair,
         receive_fee: PaymentFee,
     ) -> Self {
         use bitcoin::hex::DisplayHex as _;
 
+        let message_path = message_path.encode().to_lower_hex_string();
+        let signature =
+            gateway_key.sign_schnorr(Self::digest(federation_id, &message_path, receive_fee));
+
         Self {
-            message_path: message_path.encode().to_lower_hex_string(),
-            gateway_key,
+            message_path,
+            gateway_key: gateway_key.public_key(),
             receive_fee,
+            signature,
         }
+    }
+
+    pub fn verify(&self, federation_id: FederationId) -> bool {
+        SECP256K1
+            .verify_schnorr(
+                &self.signature,
+                &Self::digest(federation_id, &self.message_path, self.receive_fee),
+                &self.gateway_key.x_only_public_key().0,
+            )
+            .is_ok()
     }
 
     pub fn message_path(&self) -> anyhow::Result<BlindedMessagePath> {

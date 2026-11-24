@@ -18,10 +18,11 @@ use fedimint_core::{Amount, OutPoint, PeerId};
 use fedimint_lnv2_common::LightningInputError;
 use fedimint_lnv2_common::bolt12::{
     AddStock, Bolt12Output, Bolt12Unlock, INVOICE_LIFETIME, MAX_PENDING_PER_GATEWAY,
-    MAX_PENDING_PER_OFFER, MAX_PENDING_POOL, MAX_REGISTRATION_LIFETIME, MAX_REGISTRATIONS,
-    MAX_STOCK, MAX_STOCK_BATCH, Pending, PoolItem, REGISTRATIONS_PRUNED_PER_REGISTER, Register,
-    Registration, RegistrationId, Reservation, ReservationId, Reserve, Sealed, Source,
-    StreamedReceive, output_amount_and_fee, quorum, reservation_is_economical,
+    MAX_PENDING_PER_OFFER, MAX_PENDING_POOL, MAX_PENDING_POOL_PER_OFFER, MAX_REGISTRATION_LIFETIME,
+    MAX_REGISTRATIONS, MAX_STOCK, MAX_STOCK_BATCH, Pending, PoolItem,
+    REGISTRATIONS_PRUNED_PER_REGISTER, Register, Registration, RegistrationId, Reservation,
+    ReservationId, Reserve, Sealed, Source, StreamedReceive, output_amount_and_fee, quorum,
+    reservation_is_economical,
 };
 use fedimint_lnv2_common::config::LightningConfig;
 use futures::StreamExt;
@@ -29,8 +30,9 @@ use futures::StreamExt;
 use crate::db::{
     Bolt12ContractIndexKey, Bolt12ContractKey, Bolt12DecryptionSharesKey, Bolt12ExpiryKey,
     Bolt12ExpiryPrefix, Bolt12GatewayApprovalCountKey, Bolt12GatewayPendingKey,
-    Bolt12GatewayVoteGatewayPrefix, Bolt12GatewayVoteKey, Bolt12HandleKey, Bolt12OfferPendingKey,
-    Bolt12PaymentHashKey, Bolt12PoolItemKey, Bolt12PoolPendingKey, Bolt12RecipientKey,
+    Bolt12GatewayVoteGatewayPrefix, Bolt12GatewayVoteKey, Bolt12HandleKey, Bolt12NonceCountKey,
+    Bolt12NonceReservationPrefix, Bolt12OfferPendingKey, Bolt12PaymentHashKey, Bolt12PoolItemKey,
+    Bolt12PoolPendingKey, Bolt12PoolStickyCommitteeKey, Bolt12RecipientKey,
     Bolt12RegistrationCountKey, Bolt12RegistrationKey, Bolt12ReservationKey, Bolt12StockKey,
     Bolt12StockRegistrationPrefix, Bolt12StreamIndexKey, Bolt12StreamKey,
 };
@@ -151,6 +153,20 @@ async fn process_register(
     Ok(())
 }
 
+/// Remove a reservation together with its local signing-nonce markers.
+/// Once the reservation row is deleted it can never be recreated or signed
+/// again, so pruning its local nonce state is safe and prevents unbounded DB
+/// growth.
+async fn remove_reservation(
+    dbtx: &mut DatabaseTransaction<'_>,
+    id: ReservationId,
+) -> Option<Reservation> {
+    dbtx.remove_entry(&Bolt12NonceCountKey(id)).await;
+    dbtx.remove_by_prefix(&Bolt12NonceReservationPrefix(id))
+        .await;
+    dbtx.remove_entry(&Bolt12ReservationKey(id)).await
+}
+
 /// Delete a bounded number of registrations whose last possible invoice has
 /// expired, so their reservations can no longer be funded.
 async fn prune_expired_registrations(dbtx: &mut DatabaseTransaction<'_>, now: u64) {
@@ -199,8 +215,7 @@ async fn prune_expired_registrations(dbtx: &mut DatabaseTransaction<'_>, now: u6
             .await
             .unwrap_or_default()
         {
-            dbtx.remove_entry(&Bolt12ReservationKey(pending.reservation))
-                .await;
+            remove_reservation(dbtx, pending.reservation).await;
         }
 
         let count = dbtx
@@ -315,8 +330,7 @@ async fn live_pending(
         } else {
             // Only unfunded reservations are listed, so this never touches a
             // funded receive.
-            dbtx.remove_entry(&Bolt12ReservationKey(entry.reservation))
-                .await;
+            remove_reservation(dbtx, entry.reservation).await;
         }
     }
 
@@ -360,6 +374,17 @@ async fn process_reserve(
         reservation: id,
     };
 
+    let offer_pending = dbtx
+        .get_value(&Bolt12OfferPendingKey(reserve.registration))
+        .await
+        .unwrap_or_default();
+    let mut offer_pending = live_pending(dbtx, offer_pending, now).await;
+
+    ensure!(
+        offer_pending.len() < MAX_PENDING_PER_OFFER,
+        "too many unpaid invoices for this offer"
+    );
+
     let (payment_hash, sealed) = match reserve.source {
         Source::Stock { index } => {
             let item = dbtx
@@ -372,22 +397,12 @@ async fn process_reserve(
             (item.payment_hash, Sealed::Preimage(item.ciphertext))
         }
         Source::Pool { index } => {
-            let item = take_pool_item(dbtx, &registration, index, &entry, now).await?;
+            let item =
+                take_pool_item(dbtx, &registration, &offer_pending, index, &entry, now).await?;
 
             (item.payment_hash, item.sealed)
         }
     };
-
-    let offer_pending = dbtx
-        .get_value(&Bolt12OfferPendingKey(reserve.registration))
-        .await
-        .unwrap_or_default();
-    let mut offer_pending = live_pending(dbtx, offer_pending, now).await;
-
-    ensure!(
-        offer_pending.len() < MAX_PENDING_PER_OFFER,
-        "too many unpaid invoices for this offer"
-    );
 
     offer_pending.push(entry.clone());
 
@@ -442,6 +457,7 @@ async fn process_reserve(
 async fn take_pool_item(
     dbtx: &mut DatabaseTransaction<'_>,
     registration: &Registration,
+    offer_pending: &[Pending],
     index: u64,
     entry: &Pending,
     now: u64,
@@ -470,6 +486,20 @@ async fn take_pool_item(
         "too many unpaid invoices use generated preimages"
     );
 
+    let offer_pool_pending = pool_pending
+        .iter()
+        .filter(|pending| {
+            offer_pending
+                .iter()
+                .any(|offer_entry| offer_entry.reservation == pending.reservation)
+        })
+        .count();
+
+    ensure!(
+        offer_pool_pending < MAX_PENDING_POOL_PER_OFFER,
+        "too many unpaid pool invoices for this offer"
+    );
+
     pool_pending.push(entry.clone());
 
     dbtx.insert_entry(&Bolt12PoolPendingKey, &pool_pending)
@@ -494,8 +524,7 @@ async fn process_receive(
     outpoint: OutPoint,
     now: u64,
 ) -> Result<Amount> {
-    let reservation = dbtx
-        .remove_entry(&Bolt12ReservationKey(id))
+    let reservation = remove_reservation(dbtx, id)
         .await
         .context("reservation is unknown or already funded")?;
 
@@ -599,7 +628,17 @@ pub async fn process_input(
         .as_ref()
         .map_or(Amount::ZERO, |bolt12| bolt12.unlock_premium(unlock));
 
-    if contract.release(unlock.keys()).is_some() {
+    let released = contract.release_detailed(unlock.keys(), unlock.subset());
+
+    if unlock.subset().is_some() && released.is_none() {
+        return Err(LightningInputError::InvalidDecryptionKey);
+    }
+
+    if let Some(released) = released {
+        if !released.rejected_peers.is_empty() {
+            pool::blame_poisoned_shares(dbtx, &released.rejected_peers).await;
+        }
+
         return Ok(InputEffect {
             pub_key: contract.claim_pk,
             amount: contract.amount,
@@ -609,11 +648,13 @@ pub async fn process_input(
 
     // The gateway gets its funding back. A stock item without its preimage
     // is the recipient's fault, so the offer also stops issuing invoices; a
-    // generated preimage can only fail through misbehaving guardians.
-    if !contract.source.is_pool()
-        && let Some(mut registration) = dbtx
-            .get_value(&Bolt12RegistrationKey(contract.registration))
-            .await
+    // generated preimage can only fail through misbehaving guardians, so stop
+    // reusing any sticky committee.
+    if contract.source.is_pool() {
+        dbtx.remove_entry(&Bolt12PoolStickyCommitteeKey).await;
+    } else if let Some(mut registration) = dbtx
+        .get_value(&Bolt12RegistrationKey(contract.registration))
+        .await
     {
         registration.voided = true;
 

@@ -209,6 +209,13 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
         .context("the gateway serves federated BOLT12 offers")?;
 
     assert_eq!(ingress.gateway_key, gateway_key);
+    assert!(ingress.verify(fed.id()), "signed ingress must verify");
+    let mut tampered = ingress.clone();
+    tampered.receive_fee.base = Amount::from_sats(999);
+    assert!(
+        !tampered.verify(fed.id()),
+        "tampered ingress must fail verification"
+    );
 
     let lightning = wallet.get_first_module::<LightningClientModule>()?;
     let params = Bolt12OfferParams {
@@ -336,7 +343,7 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
 
     assert!(
         gateway
-            .try_handle_lightning_payment_bolt12(&unknown, &lightning_context)
+            .try_handle_lightning_payment_bolt12(&unknown, &lightning_context, None)
             .await
             .is_err()
     );

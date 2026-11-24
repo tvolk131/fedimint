@@ -647,7 +647,7 @@ async fn await_payment(
 /// payment until it fails it back near its deadline, while the gateway never
 /// hears of it again.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs FM_TEST_BITCOIND; fails until held payments are redelivered"]
+#[ignore = "needs FM_TEST_BITCOIND"]
 async fn held_payment_is_redelivered_after_a_gateway_restart() -> Result<()> {
     let _fixtures = fixtures();
     let LiveNetwork {
@@ -733,6 +733,8 @@ async fn held_payment_is_redelivered_after_a_gateway_restart() -> Result<()> {
         "the restarted gateway was never told about a payment its node still held"
     );
 
+    drop(htlcs);
+    drop(lnrpc);
     task_group
         .shutdown_join_all(Duration::from_secs(10))
         .await?;

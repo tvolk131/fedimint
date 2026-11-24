@@ -110,10 +110,11 @@ impl Circuit {
     pub fn id(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
 
-        hash.update(b"fedimint/mpc/circuit/v2");
+        hash.update(b"fedimint/mpc/circuit/v3");
         hash.update((self.parties as u64).to_le_bytes());
         hash.update((self.inputs_per_party as u64).to_le_bytes());
         hash.update((self.lanes as u64).to_le_bytes());
+        hash.update((self.gates.len() as u64).to_le_bytes());
 
         for gate in &self.gates {
             let (tag, a, b) = match *gate {
@@ -126,6 +127,8 @@ impl Circuit {
             hash.update((a as u64).to_le_bytes());
             hash.update((b as u64).to_le_bytes());
         }
+
+        hash.update((self.outputs.len() as u64).to_le_bytes());
 
         for &output in &self.outputs {
             hash.update((output as u64).to_le_bytes());

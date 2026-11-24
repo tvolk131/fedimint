@@ -25,7 +25,7 @@ use fedimint_lnv2_common::bolt12::{
 };
 use fedimint_lnv2_common::config::LightningConfig;
 use futures::StreamExt as _;
-use tpe::verify_ciphertext;
+use tpe::verify_non_identity_ciphertext;
 
 use crate::Lightning;
 use crate::db::{
@@ -397,7 +397,7 @@ pub async fn process_shares(
 
     for share in &shares {
         ensure!(
-            verify_ciphertext(
+            verify_non_identity_ciphertext(
                 &share.ciphertext,
                 &pool_share_binding(run, position, share.payment_hash)
             ),
@@ -581,8 +581,9 @@ async fn finish(
 
         let shares = agreeing
             .iter()
-            .map(|(_, position, shares)| SealedShare {
+            .map(|(peer, position, shares)| SealedShare {
                 position: *position,
+                peer: *peer,
                 ciphertext: shares[item].ciphertext,
             })
             .collect();
@@ -779,14 +780,15 @@ pub async fn process_verdict(
     let member = |p: &PeerId| abandoned.run.position(*p).is_some();
 
     ensure!(
-        verdict.culprits.iter().all(member)
+        (verdict.culprits.is_empty() || verdict.disputes.is_empty())
+            && verdict.culprits.iter().all(member)
             && verdict.culprits.windows(2).all(|w| w[0] < w[1])
             && verdict
                 .disputes
                 .iter()
                 .all(|(a, b)| a < b && member(a) && member(b))
             && verdict.disputes.windows(2).all(|w| w[0] < w[1]),
-        "the verdict names non-members or is not in canonical order"
+        "the verdict names non-members, mixes culprits with disputes, or is not in canonical order"
     );
     ensure!(
         dbtx.insert_entry(&Bolt12PoolVerdictKey(run, peer), &verdict)
@@ -810,6 +812,29 @@ pub async fn process_verdict(
     }
 
     Ok(())
+}
+
+/// Blame committee members whose sealed shares did not lie on the recovered
+/// polynomial when a pool receive was spent, and drop sticky reuse if any of
+/// them is on the current sticky committee.
+pub async fn blame_poisoned_shares(dbtx: &mut DatabaseTransaction<'_>, peers: &[PeerId]) {
+    let next_run = dbtx.get_value(&Bolt12PoolRunCountKey).await.unwrap_or(0);
+
+    for &peer in peers {
+        let previous = dbtx.get_value(&Bolt12BlameKey(peer)).await;
+
+        dbtx.insert_entry(
+            &Bolt12BlameKey(peer),
+            &Blame::repeat(previous.as_ref(), next_run),
+        )
+        .await;
+    }
+
+    if let Some(sticky) = dbtx.get_value(&Bolt12PoolStickyCommitteeKey).await
+        && sticky.committee.iter().any(|peer| peers.contains(peer))
+    {
+        dbtx.remove_entry(&Bolt12PoolStickyCommitteeKey).await;
+    }
 }
 
 /// Blame every guardian and pair at least `threshold` verdicts name.

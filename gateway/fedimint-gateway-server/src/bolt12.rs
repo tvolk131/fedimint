@@ -3,23 +3,26 @@
 //!
 //! See `docs/federated_bolt12.md` for the protocol.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, ensure};
 use bitcoin::hashes::{Hash as _, sha256};
-use fedimint_core::Amount;
 use fedimint_core::config::FederationId;
 use fedimint_core::task::{TaskGroup, timeout};
+use fedimint_core::time::duration_since_epoch;
 use fedimint_core::util::FmtCompact as _;
+use fedimint_core::{Amount, crit};
+use fedimint_gateway_server_db::{GatewayDbtxNcExt as _, PaymentHashOwner, PaymentHashProtocol};
 use fedimint_gwv2_client::bolt12::Bolt12InvoiceRequest;
-use fedimint_gwv2_client::{GatewayClientModuleV2, IncomingCircuitKey};
+use fedimint_gwv2_client::{GatewayClientModuleV2, IncomingCircuitKey, RelayIncomingHtlcError};
 use fedimint_lightning::bolt12::{Bolt12Request, Bolt12RequestFilter};
 use fedimint_lightning::{
     ILnRpcClient, InterceptPaymentRequest, InterceptPaymentResponse, LightningContext,
     PaymentAction,
 };
+use fedimint_lnv2_common::bolt12::INVOICE_LIFETIME;
 use fedimint_lnv2_common::bolt12::invoice::{is_routing_metadata, parse_routing_metadata};
 use fedimint_lnv2_common::gateway_api::Bolt12Ingress;
 use fedimint_logging::LOG_GATEWAY;
@@ -38,6 +41,10 @@ const MAX_CONCURRENT_REQUESTS: usize = 16;
 /// How long the gateway works on one invoice request. Payers give up on an
 /// unanswered request after about this long.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Extra margin kept on `PaymentHashOwner` rows past `INVOICE_LIFETIME` before
+/// background pruning may remove them.
+const BOLT12_OWNER_RETENTION_SECS: u64 = 3600;
 
 /// Invoice requests being answered, by the hash of their bytes. Payers resend
 /// a request they have no answer to yet; a resend that overlapped the first
@@ -67,27 +74,6 @@ impl Drop for InProgressGuard {
     }
 }
 
-/// Payment hashes whose invoices are being issued, by federation.
-///
-/// A held payment is matched to a federation by its hash, so one hash must
-/// never be issued for two federations: a federation could otherwise copy a
-/// hash another one published and have the payment fund its own claim. Once
-/// issued, the hash is recorded with its federation's reservation, which
-/// [`Gateway::claim_bolt12_hash`] checks too.
-static ISSUING: LazyLock<Mutex<HashMap<sha256::Hash, FederationId>>> =
-    LazyLock::new(Mutex::default);
-
-/// Releases a payment hash from [`ISSUING`] when issuance ends.
-struct IssuingGuard(Arc<Mutex<Option<sha256::Hash>>>);
-
-impl Drop for IssuingGuard {
-    fn drop(&mut self) {
-        if let Some(hash) = self.0.lock().expect("not poisoned").take() {
-            ISSUING.lock().expect("not poisoned").remove(&hash);
-        }
-    }
-}
-
 fn is_federated(request: &InvoiceRequest) -> bool {
     request
         .metadata()
@@ -105,14 +91,12 @@ impl Gateway {
             return Ok(None);
         };
 
-        let enabled = self
-            .select_client(*federation_id)
-            .await?
-            .value()
-            .get_first_module::<GatewayClientModuleV2>()
-            .is_ok_and(|module| module.cfg.bolt12.is_some());
+        let client = self.select_client(*federation_id).await?;
+        let Ok(module) = client.value().get_first_module::<GatewayClientModuleV2>() else {
+            return Ok(None);
+        };
 
-        if !enabled || !routing_info.receive_enabled {
+        if module.cfg.bolt12.is_none() || !routing_info.receive_enabled {
             return Ok(None);
         }
 
@@ -120,8 +104,9 @@ impl Gateway {
 
         match context.lnrpc.bolt12_message_path().await {
             Ok(path) => Ok(Some(Bolt12Ingress::new(
+                *federation_id,
                 &path,
-                routing_info.module_public_key,
+                &module.keypair,
                 routing_info.receive_fee,
             ))),
             Err(err) => {
@@ -231,35 +216,45 @@ impl Gateway {
         let client = self.select_client(federation_id).await?;
         let module = client.value().get_first_module::<GatewayClientModuleV2>()?;
 
-        let issuing = IssuingGuard(Arc::default());
+        // Track every payment hash we claimed in `gateway_db` during this
+        // attempt so failed or retried hashes are released cleanly, while the
+        // issued invoice's hash stays durably owned.
+        let claimed_hashes: Arc<Mutex<Vec<sha256::Hash>>> = Arc::default();
 
         let payment_path = |payment_hash: [u8; 32]| {
             let lnrpc = lnrpc.clone();
             let invoice_request = invoice_request.clone();
-            let claimed = issuing.0.clone();
+            let claimed_hashes = claimed_hashes.clone();
 
             async move {
                 let payment_hash = sha256::Hash::from_byte_array(payment_hash);
 
                 self.claim_bolt12_hash(federation_id, payment_hash).await?;
-
-                // A retry with the next stock item claims its own hash.
-                if let Some(previous) = claimed.lock().expect("not poisoned").replace(payment_hash)
-                    && previous != payment_hash
-                {
-                    ISSUING.lock().expect("not poisoned").remove(&previous);
-                }
+                claimed_hashes
+                    .lock()
+                    .expect("not poisoned")
+                    .push(payment_hash);
 
                 // The handle labels the payment in the node's records; the
                 // node has no offer of its own to name.
-                lnrpc
+                match lnrpc
                     .register_bolt12_payment(payment_hash, amount, &invoice_request, handle)
                     .await
-                    .map_err(anyhow::Error::from)
+                {
+                    Ok(path) => Ok(path),
+                    Err(err) => {
+                        self.release_bolt12_hash(federation_id, payment_hash).await;
+                        claimed_hashes
+                            .lock()
+                            .expect("not poisoned")
+                            .retain(|h| *h != payment_hash);
+                        Err(anyhow::Error::from(err))
+                    }
+                }
             }
         };
 
-        let invoice = module
+        let invoice = match module
             .issue_bolt12_invoice(
                 Bolt12InvoiceRequest {
                     handle,
@@ -269,47 +264,106 @@ impl Gateway {
                 },
                 payment_path,
             )
-            .await?;
+            .await
+        {
+            Ok(invoice) => {
+                let issued_hash = sha256::Hash::from_byte_array(invoice.payment_hash().0);
+                let unused: Vec<sha256::Hash> = claimed_hashes
+                    .lock()
+                    .expect("not poisoned")
+                    .drain(..)
+                    .filter(|hash| *hash != issued_hash)
+                    .collect();
+                for hash in unused {
+                    self.release_bolt12_hash(federation_id, hash).await;
+                }
+                invoice
+            }
+            Err(err) => {
+                let all_claimed: Vec<sha256::Hash> = claimed_hashes
+                    .lock()
+                    .expect("not poisoned")
+                    .drain(..)
+                    .collect();
+                for hash in all_claimed {
+                    // Only release if no reservation was persisted for this hash.
+                    if module.bolt12_reservation_for_hash(hash).await.is_none() {
+                        self.release_bolt12_hash(federation_id, hash).await;
+                    }
+                }
+                return Err(err);
+            }
+        };
 
         request.respond(invoice)?;
 
         Ok(())
     }
 
-    /// Reserve `payment_hash` for issuing an invoice for `federation_id`, or
-    /// fail if another federation is issuing or has issued one for it.
+    /// Atomically reserve `payment_hash` for BOLT12 on `federation_id` in
+    /// `gateway_db`, rejecting any collision across BOLT11, BOLT12, or other
+    /// federations.
     async fn claim_bolt12_hash(
         &self,
         federation_id: FederationId,
         payment_hash: sha256::Hash,
     ) -> anyhow::Result<()> {
+        // Also screen legacy BOLT12 reservations persisted before the unified
+        // `PaymentHashOwner` table existed.
         for client in self.federation_manager.read().await.clients() {
             let Ok(module) = client.value().get_first_module::<GatewayClientModuleV2>() else {
                 continue;
             };
 
             ensure!(
-                module.federation_id == federation_id
-                    || module
-                        .bolt12_reservation_for_hash(payment_hash)
-                        .await
-                        .is_none(),
-                "Another federation already issued an invoice for this payment hash"
+                module
+                    .bolt12_reservation_for_hash(payment_hash)
+                    .await
+                    .is_none(),
+                "An invoice was already issued for this payment hash"
             );
         }
 
-        let mut issuing = ISSUING.lock().expect("not poisoned");
+        let expires_at_secs = duration_since_epoch()
+            .as_secs()
+            .saturating_add(INVOICE_LIFETIME)
+            .saturating_add(BOLT12_OWNER_RETENTION_SECS);
 
-        ensure!(
-            issuing
-                .get(&payment_hash)
-                .is_none_or(|issuer| *issuer == federation_id),
-            "Another federation is issuing an invoice for this payment hash"
-        );
+        let mut dbtx = self.gateway_db.begin_transaction().await;
+        if dbtx
+            .claim_payment_hash_owner(
+                payment_hash,
+                &PaymentHashOwner {
+                    federation_id,
+                    protocol: PaymentHashProtocol::Bolt12,
+                    expires_at_secs,
+                },
+            )
+            .await
+            .is_some()
+        {
+            anyhow::bail!("Payment hash is already owned by another invoice or federation");
+        }
 
-        issuing.insert(payment_hash, federation_id);
+        dbtx.commit_tx_result().await.map_err(|_| {
+            anyhow::anyhow!("Payment hash is already owned by another invoice or federation")
+        })?;
 
         Ok(())
+    }
+
+    async fn release_bolt12_hash(&self, federation_id: FederationId, payment_hash: sha256::Hash) {
+        let mut dbtx = self.gateway_db.begin_transaction().await;
+        dbtx.release_payment_hash_owner(payment_hash, federation_id, PaymentHashProtocol::Bolt12)
+            .await;
+        if let Err(err) = dbtx.commit_tx_result().await {
+            warn!(
+                target: LOG_GATEWAY,
+                err = %err.fmt_compact(),
+                %payment_hash,
+                "Failed to release BOLT12 payment hash ownership"
+            );
+        }
     }
 
     /// Fund the claim behind a held payment for a federated BOLT12 invoice
@@ -318,6 +372,7 @@ impl Gateway {
         &self,
         htlc_request: &InterceptPaymentRequest,
         lightning_context: &LightningContext,
+        expected_federation: Option<FederationId>,
     ) -> Result<()> {
         let clients = self.federation_manager.read().await.clients();
 
@@ -326,6 +381,10 @@ impl Gateway {
                 continue;
             };
 
+            if expected_federation.is_some_and(|expected| module.federation_id != expected) {
+                continue;
+            }
+
             let Some(reservation) = module
                 .bolt12_reservation_for_hash(htlc_request.payment_hash)
                 .await
@@ -333,33 +392,53 @@ impl Gateway {
                 continue;
             };
 
-            let result = if self.receive_enabled(module.federation_id).await {
-                let current_block_height = lightning_context
-                    .lnrpc
-                    .info()
-                    .await
-                    .ok()
-                    .map(|info| info.block_height);
+            let result: std::result::Result<(), Option<RelayIncomingHtlcError>> =
+                if self.receive_enabled(module.federation_id).await {
+                    let current_block_height = lightning_context
+                        .lnrpc
+                        .info()
+                        .await
+                        .ok()
+                        .map(|info| info.block_height);
 
-                module
-                    .relay_bolt12_htlc(
-                        reservation,
-                        htlc_request.payment_hash,
-                        IncomingCircuitKey {
-                            incoming_chan_id: htlc_request.incoming_chan_id,
-                            htlc_id: htlc_request.htlc_id,
-                        },
-                        htlc_request.incoming_amount_msat,
-                        htlc_request.lnv2_blocks_to_claim_deadline(current_block_height),
-                    )
-                    .await
-                    .map_err(anyhow::Error::from)
-            } else {
-                Err(anyhow::anyhow!("Receives are disabled for this federation"))
-            };
+                    module
+                        .relay_bolt12_htlc(
+                            reservation,
+                            htlc_request.payment_hash,
+                            IncomingCircuitKey {
+                                incoming_chan_id: htlc_request.incoming_chan_id,
+                                htlc_id: htlc_request.htlc_id,
+                            },
+                            htlc_request.incoming_amount_msat,
+                            htlc_request.lnv2_blocks_to_claim_deadline(current_block_height),
+                        )
+                        .await
+                        .map_err(Some)
+                } else {
+                    Err(None)
+                };
 
             if let Err(err) = result {
-                warn!(target: LOG_GATEWAY, err = %(&*err).fmt_compact(), "Failing a federated BOLT12 payment");
+                if let Some(relay_err) = &err
+                    && !relay_err.htlc_may_be_failed_back()
+                {
+                    crit!(
+                        target: LOG_GATEWAY,
+                        err = %relay_err.fmt_compact(),
+                        payment_hash = %htlc_request.payment_hash,
+                        "Keeping held BOLT12 HTLC because its receive contract may already be funded",
+                    );
+                    return Ok(());
+                }
+
+                match &err {
+                    Some(relay_err) => {
+                        warn!(target: LOG_GATEWAY, err = %relay_err.fmt_compact(), "Failing a federated BOLT12 payment");
+                    }
+                    None => {
+                        warn!(target: LOG_GATEWAY, "Failing a federated BOLT12 payment: receives are disabled for this federation");
+                    }
+                }
 
                 let outcome = InterceptPaymentResponse {
                     action: PaymentAction::Cancel,
@@ -368,7 +447,7 @@ impl Gateway {
                     htlc_id: htlc_request.htlc_id,
                 };
 
-                if let Err(err) = lightning_context.lnrpc.complete_htlc(outcome).await {
+                if let Err(err) = self.await_complete_htlc(outcome).await {
                     warn!(target: LOG_GATEWAY, err = %err.fmt_compact(), "Error sending HTLC response to lightning node");
                 }
             }

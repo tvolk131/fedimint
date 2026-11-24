@@ -363,7 +363,10 @@ async fn test_server_db_migrations() -> anyhow::Result<()> {
                 | DbKeyPrefix::Bolt12Dispute
                 | DbKeyPrefix::Bolt12PoolTranscript
                 | DbKeyPrefix::Bolt12PoolLocalVerdict
-                | DbKeyPrefix::Bolt12GatewayApprovalCount => {
+                | DbKeyPrefix::Bolt12GatewayApprovalCount
+                | DbKeyPrefix::Bolt12PoolStickyCommittee
+                | DbKeyPrefix::Bolt12PoolAbort
+                | DbKeyPrefix::Bolt12PoolRelayEvidence => {
                     // Neither read nor written by `migrate_to_v1`, and
                     // the v0 snapshot holds no rows under them, so there
                     // is nothing to validate. Seeding them would widen
