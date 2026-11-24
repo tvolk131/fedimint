@@ -321,7 +321,7 @@ pub async fn generate(
 
     let config = config(guardians, &public, transport_keys)?;
 
-    agree(peers, &config.public_package, "the signing key").await?;
+    agree_config(peers, &config).await?;
 
     Ok((
         config,
@@ -330,6 +330,25 @@ pub async fn generate(
             transport_secret,
         },
     ))
+}
+
+async fn agree_config(
+    peers: &(dyn PeerHandleOps + Send + Sync),
+    config: &Bolt12Config,
+) -> Result<()> {
+    let view: sha256::Hash = (
+        "fedimint/bolt12/dkg-config/v1",
+        &config.public_package,
+        config.pool_target,
+        config.pool_batch,
+    )
+        .consensus_hash();
+    agree(
+        peers,
+        view.as_byte_array(),
+        "the signing key and pool configuration",
+    )
+    .await
 }
 
 /// Check that a guardian's BOLT12 configuration is internally consistent.

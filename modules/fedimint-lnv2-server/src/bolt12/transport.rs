@@ -862,7 +862,7 @@ impl Channels {
 
     /// Whether this guardian has already received and verified a valid message
     /// from `sender` in `round`.
-    fn has_received(&self, sender: PeerId, round: u64) -> bool {
+    pub(crate) fn has_received(&self, sender: PeerId, round: u64) -> bool {
         let Some(position) = self.committee.iter().position(|member| *member == sender) else {
             return false;
         };
@@ -1062,8 +1062,15 @@ impl Channels {
 
         let mut last_err = anyhow::anyhow!("Relay fetch failed");
         let mut validated = Err(anyhow::anyhow!("Relay fetch failed"));
+        let mut observed_before_attempt = false;
 
         for attempt in 0..RELAY_FETCH_ATTEMPTS {
+            // Snapshot whether we had already received `sender`'s round message
+            // BEFORE initiating this upstream fetch attempt so a pre-publication
+            // failure can never be misattributed as withholding if `sender`
+            // publishes and delivers while the failed attempt is unwinding.
+            observed_before_attempt = self.has_received(request.sender, request.round);
+
             let fetched = fedimint_core::runtime::timeout(
                 ATTEMPT_TIMEOUT,
                 api.request_single_peer::<PacketPage>(
@@ -1116,9 +1123,7 @@ impl Channels {
                 Ok((proof.chunks, vec![*proof]))
             }
             Err(err) => {
-                if self.in_active_round_window(request.round)
-                    && self.has_received(request.sender, request.round)
-                {
+                if observed_before_attempt && self.in_active_round_window(request.round) {
                     let mut missing = self.relay_missing.lock().expect("not poisoned");
                     if missing.len() < MAX_RELAY_WITNESSES {
                         missing.insert((request.sender, request.recipient, request.round));

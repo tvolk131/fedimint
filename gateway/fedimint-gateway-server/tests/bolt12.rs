@@ -431,21 +431,13 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
     );
 
     // An authoritative `Bolt11` payment-hash owner must terminate with
-    // `"cancel"` when LNv2 rejects it (e.g. `receive_enabled == false`) and
-    // never fall through to LNv1 or `"forward"` even with a non-federation scid.
-    fedimint_gateway_server::IAdminGateway::handle_set_payment_policy_msg(
-        &gateway,
-        fedimint_gateway_common::SetPaymentPolicyPayload {
-            federation_id: Some(fed.id()),
-            receive_enabled: Some(false),
-        },
-    )
-    .await
-    .map_err(|err| anyhow::anyhow!("set payment policy failed: {err:?}"))?;
-    let front_run_htlc = InterceptPaymentRequest {
+    // `"cancel"` on non-`ReceiveDisabled` LNv2 errors (such as an amount
+    // mismatch on an intercepted forward carrying a non-federation scid, which
+    // previously fell through to LNv1 / `"forward"`).
+    let front_run_forward_mismatch = InterceptPaymentRequest {
         payment_hash: front_run_hash,
-        amount_msat: front_run_amount.msats,
-        incoming_amount_msat: front_run_amount.msats,
+        amount_msat: front_run_amount.msats - 1,
+        incoming_amount_msat: front_run_amount.msats - 1,
         expiry: 1_000,
         incoming_chan_id: 99,
         short_channel_id: Some(999_999),
@@ -453,15 +445,17 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
     };
     assert_eq!(
         gateway
-            .handle_lightning_payment(front_run_htlc.clone(), &lightning_context)
+            .handle_lightning_payment(front_run_forward_mismatch.clone(), &lightning_context)
             .await,
         "cancel",
         "Bolt11-owned payment hash must cancel rather than fall through to LNv1/forward"
     );
 
     // Leaving/unloading the owning federation while durable `PaymentHashOwner`
-    // rows remain in `gateway_db` must leave both BOLT12 and BOLT11 HTLCs held
-    // (`"ignore"`) instead of cancelling a payment that may already be funded.
+    // rows remain in `gateway_db` must leave held payments (`incoming_circuit`
+    // absent) held (`"ignore"`) instead of cancelling a possibly funded
+    // payment, while cancelling intercepted forwards (which cannot fund fresh
+    // contracts).
     drop(module);
     drop(gateway_client);
     let completed_before_unload = lightning_node.completed_htlcs().len();
@@ -482,19 +476,35 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
             )
             .await,
         "ignore",
-        "unloaded owning federation must hold BOLT12 HTLC rather than cancel"
+        "unloaded owning federation must hold BOLT12 held payment rather than cancel"
     );
+    let front_run_held = InterceptPaymentRequest {
+        payment_hash: front_run_hash,
+        amount_msat: front_run_amount.msats,
+        incoming_amount_msat: front_run_amount.msats,
+        expiry: 1_000,
+        incoming_chan_id: NO_INCOMING_CIRCUIT.0,
+        short_channel_id: None,
+        htlc_id: NO_INCOMING_CIRCUIT.1,
+    };
     assert_eq!(
         gateway
-            .handle_lightning_payment(front_run_htlc, &lightning_context)
+            .handle_lightning_payment(front_run_held, &lightning_context)
             .await,
         "ignore",
-        "unloaded owning federation must hold Bolt11 HTLC rather than cancel"
+        "unloaded owning federation must hold Bolt11 held payment rather than cancel"
     );
     assert_eq!(
         lightning_node.completed_htlcs().len(),
         completed_before_unload,
-        "leaving HTLCs held must not emit any Cancel/Forward responses"
+        "leaving held payments untouched must not emit any Cancel/Forward responses"
+    );
+    assert_eq!(
+        gateway
+            .handle_lightning_payment(front_run_forward_mismatch, &lightning_context)
+            .await,
+        "cancel",
+        "unloaded owning federation must cancel intercepted forwards rather than parking HTLCs"
     );
 
     Ok(())

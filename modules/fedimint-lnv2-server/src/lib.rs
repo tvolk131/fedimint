@@ -345,7 +345,8 @@ impl ServerModuleInit for LightningInit {
         // Fixtures use a trusted dealer for the invoice key as they do for
         // every other key here.
         let bolt12 = is_env_var_set(bolt12::keys::FM_ENABLE_FEDERATED_BOLT12_ENV).then(|| {
-            bolt12::keys::fixture(peers).expect("Guardian count supports federated BOLT12")
+            bolt12::keys::fixture(peers)
+                .expect("Valid federated BOLT12 configuration for guardian count")
         });
 
         let tpe_pks = peers

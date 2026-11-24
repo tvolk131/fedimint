@@ -713,3 +713,136 @@ async fn tarpitting_relay_does_not_block_honest_relay_recovery() -> Result<()> {
 
     Ok(())
 }
+
+struct DeliverOnFinalAttemptApi {
+    peers: BTreeSet<PeerId>,
+    ch0: Arc<Channels>,
+    ch2: Arc<Channels>,
+    attempts: Arc<AtomicU64>,
+}
+
+impl std::fmt::Debug for DeliverOnFinalAttemptApi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeliverOnFinalAttemptApi")
+            .finish_non_exhaustive()
+    }
+}
+
+#[apply(async_trait_maybe_send!)]
+impl IRawFederationApi for DeliverOnFinalAttemptApi {
+    fn all_peers(&self) -> &BTreeSet<PeerId> {
+        &self.peers
+    }
+
+    fn self_peer(&self) -> Option<PeerId> {
+        None
+    }
+
+    fn with_module(&self, _id: ModuleInstanceId) -> DynModuleApi {
+        unreachable!("already a module api")
+    }
+
+    async fn request_raw(
+        &self,
+        _peer_id: PeerId,
+        method: &str,
+        _params: &ApiRequestErased,
+    ) -> ServerResult<serde_json::Value> {
+        if method == BOLT12_MPC_FETCH_ENDPOINT
+            && self.attempts.fetch_add(1, Ordering::Relaxed) == 2
+            && let Ok(sent) = self
+                .ch0
+                .enter_with_outgoing(0, &[vec![], b"to-1".to_vec(), b"to-2".to_vec()])
+        {
+            for (peer, pkt) in &sent {
+                if *peer == PeerId::from(2) {
+                    let _ = self.ch2.receive(pkt);
+                }
+            }
+        }
+        Err(api_err("sender had not published yet"))
+    }
+
+    fn connection_status_stream(&self) -> BoxStream<'static, BTreeMap<PeerId, PeerStatus>> {
+        Box::pin(futures::stream::empty())
+    }
+
+    async fn wait_for_initialized_connections(&self) {}
+
+    async fn get_peer_connection(&self, peer_id: PeerId) -> ServerResult<DynGuaridianConnection> {
+        Err(ServerError::InvalidPeerId { peer_id })
+    }
+}
+
+impl IModuleFederationApi for DeliverOnFinalAttemptApi {}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_publication_relay_fetch_failure_never_records_witness() -> Result<()> {
+    // Regression: if `sender` publishes and delivers round 0 to relay `ch2`
+    // *during* the final failing pre-publication upstream fetch, `ch2` MUST NOT
+    // record a `relay_missing` witness because `observed_before_attempt` was
+    // false when that attempt was initiated.
+    let committee: Vec<PeerId> = (0..3u16).map(PeerId::from).collect();
+    let secrets: Vec<SecretKey> = (0..3).map(|_| SecretKey::new(&mut OsRng)).collect();
+    let keys: BTreeMap<PeerId, PublicKey> = (0..3u16)
+        .map(|p| {
+            (
+                PeerId::from(p),
+                secrets[usize::from(p)].public_key(SECP256K1),
+            )
+        })
+        .collect();
+    let limits = ChannelLimits {
+        message: 4096,
+        chunks: 8,
+        fault_bytes: 65_536,
+    };
+    let ch0 = Channels::new(
+        0,
+        PeerId::from(0),
+        committee.clone(),
+        limits,
+        &[0; 32],
+        &secrets[0],
+        &keys,
+    )?;
+    let ch2 = Channels::new(
+        0,
+        PeerId::from(2),
+        committee.clone(),
+        limits,
+        &[2; 32],
+        &secrets[2],
+        &keys,
+    )?;
+    let signer1 = fedimint_core::secp256k1::Keypair::from_secret_key(SECP256K1, &secrets[1]);
+    let req0 = crate::bolt12::transport::RelayRequest::new(
+        0,
+        PeerId::from(0),
+        PeerId::from(1),
+        0,
+        0,
+        &signer1,
+    );
+
+    let api: DynModuleApi = DeliverOnFinalAttemptApi {
+        peers: committee.iter().copied().collect(),
+        ch0,
+        ch2: ch2.clone(),
+        attempts: Arc::new(AtomicU64::new(0)),
+    }
+    .into();
+
+    assert!(ch2.relay_fetch(&api, &req0).await.is_err());
+    assert!(
+        ch2.has_received(PeerId::from(0), 0),
+        "sender delivered during the final pre-publication attempt"
+    );
+    assert_eq!(
+        ch2.relay_evidence().relay_missing,
+        vec![],
+        "pre-publication fetch failure must never record a withholding witness"
+    );
+
+    Ok(())
+}

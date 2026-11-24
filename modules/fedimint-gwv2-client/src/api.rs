@@ -34,7 +34,7 @@ pub trait GatewayFederationApi {
         registration: RegistrationId,
     ) -> FederationResult<Option<(u64, StockItem)>>;
 
-    /// Up to 8 unused stock items of `registration` starting at `min_index`.
+    /// Up to 32 unused stock items of `registration` starting at `min_index`.
     async fn bolt12_stock_items(
         &self,
         registration: RegistrationId,
@@ -47,7 +47,7 @@ pub trait GatewayFederationApi {
         reservation: ReservationId,
     ) -> FederationResult<Option<Reservation>>;
 
-    /// Up to 8 unused generated preimages starting at `min_index`.
+    /// Up to 32 unused generated preimages starting at `min_index`.
     async fn bolt12_pool_items(&self, min_index: u64) -> FederationResult<Vec<(u64, [u8; 32])>>;
 }
 

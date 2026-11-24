@@ -46,9 +46,21 @@ use crate::{
     incoming_circuit_operation_id,
 };
 
-/// How many candidate stock or pool items to try after losing a race or
-/// hitting a locally collided payment hash.
+/// How many federation reservation submissions to attempt after losing a
+/// cross-gateway reservation race on a candidate item.
 const RESERVE_ATTEMPTS: usize = 8;
+
+/// Error returned by the gateway's `payment_path` callback when preparing a
+/// BOLT12 invoice path for a candidate payment hash.
+#[derive(Debug)]
+pub enum Bolt12PaymentPathError {
+    /// The payment hash is already owned locally (e.g. BOLT11 front-running or
+    /// an interrupted earlier issuance) and may be skipped cheaply.
+    HashCollision(anyhow::Error),
+    /// A non-collision Lightning node or backend failure that should fail fast
+    /// rather than consuming the local collision skip budget.
+    Node(anyhow::Error),
+}
 
 /// Blocks a held BOLT12 payment must leave before its claim deadline for the
 /// gateway to fund the recipient's claim.
@@ -198,7 +210,7 @@ impl GatewayClientModuleV2 {
     ) -> Result<Bolt12Invoice>
     where
         F: Fn([u8; 32]) -> Fut,
-        Fut: Future<Output = Result<BlindedPaymentPath>>,
+        Fut: Future<Output = std::result::Result<BlindedPaymentPath, Bolt12PaymentPathError>>,
     {
         ensure!(self.cfg.bolt12.is_some(), "federated BOLT12 is disabled");
 
@@ -319,7 +331,7 @@ impl GatewayClientModuleV2 {
         Ok(invoice)
     }
 
-    /// Up to 8 candidate sources for `registration`, starting past `min_stock`
+    /// Up to 32 candidate sources for `registration`, starting past `min_stock`
     /// (or past `min_pool` once unused stock is exhausted and the recipient
     /// allows pool preimages).
     async fn candidate_bolt12_sources(
@@ -377,7 +389,7 @@ impl GatewayClientModuleV2 {
     ) -> Result<(Reservation, Vec<u8>)>
     where
         F: Fn([u8; 32]) -> Fut,
-        Fut: Future<Output = Result<BlindedPaymentPath>>,
+        Fut: Future<Output = std::result::Result<BlindedPaymentPath, Bolt12PaymentPathError>>,
     {
         let bolt12 = self
             .cfg
@@ -427,16 +439,17 @@ impl GatewayClientModuleV2 {
                 );
 
                 // The path commits to the payment hash, so it must be built
-                // before the reservation that pins it. If the hash is already
-                // claimed locally (BOLT11 collision or interrupted prior issue),
-                // skip to the next unused item instead of wedging the offer.
+                // before the reservation that pins it. Local hash collisions
+                // skip cheaply across paginated batches, while Lightning node
+                // errors fail fast without amplifying RPC load.
                 let path = match payment_path(payment_hash).await {
                     Ok(path) => encode_payment_path(&path)?,
-                    Err(error) => {
+                    Err(Bolt12PaymentPathError::HashCollision(error)) => {
                         local_collision_skips += 1;
                         last_error = Some(error);
                         continue;
                     }
+                    Err(Bolt12PaymentPathError::Node(error)) => return Err(error),
                 };
 
                 federation_attempts += 1;

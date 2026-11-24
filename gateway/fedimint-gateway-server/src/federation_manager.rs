@@ -78,12 +78,27 @@ impl FederationManager {
     }
 
     async fn remove_client(&mut self, federation_id: FederationId) -> AdminResult<()> {
+        let current = self
+            .clients
+            .get(&federation_id)
+            .ok_or(FederationNotConnected {
+                federation_id_prefix: federation_id.to_prefix(),
+            })?;
+
+        // Check uniqueness BEFORE removing from `clients` / `index_to_federation`.
+        // Because we hold `&mut self`, if `strong_count == 1` no other handle
+        // exists anywhere to clone, so `remove` + `into_inner` cannot fail and
+        // leave the federation half-removed.
+        if Arc::strong_count(current.value()) != 1 {
+            return Err(AdminGatewayError::ClientRemovalError(format!(
+                "Federation client {federation_id} is not unique, failed to shutdown client"
+            )));
+        }
+
         let client = self
             .clients
             .remove(&federation_id)
-            .ok_or(FederationNotConnected {
-                federation_id_prefix: federation_id.to_prefix(),
-            })?
+            .expect("checked present above")
             .into_value();
 
         self.index_to_federation
@@ -94,7 +109,7 @@ impl FederationManager {
                 client.shutdown().await;
                 Ok(())
             }
-            _ => Err(AdminGatewayError::ClientRemovalError(format!(
+            None => Err(AdminGatewayError::ClientRemovalError(format!(
                 "Federation client {federation_id} is not unique, failed to shutdown client"
             ))),
         }

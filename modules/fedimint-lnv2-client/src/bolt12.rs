@@ -6,12 +6,13 @@
 //! receives and extend its stock without any local state.
 
 mod sm;
+#[cfg(test)]
+mod tests;
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
-use fedimint_api_client::api::FederationResult;
 use fedimint_client_module::OperationAlreadyExistsError;
 use fedimint_client_module::transaction::{ClientOutput, ClientOutputBundle, TransactionBuilder};
 use fedimint_core::bitcoin::hashes::sha256;
@@ -219,7 +220,7 @@ impl LightningClientModule {
             .build()
             .map_err(|e| anyhow::anyhow!("Invalid offer: {e:?}"))?;
 
-        let allocated = self.allocate_bolt12_offer_index().await;
+        let allocated = self.allocate_bolt12_offer_index().await?;
         let (index, secrets, offer) = if allocated == index {
             (index, secrets, offer)
         } else {
@@ -261,10 +262,20 @@ impl LightningClientModule {
             offer: Some(offer.to_string()),
         };
 
-        let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
-
-        dbtx.insert_entry(&Bolt12OfferKey(index), &record).await;
-        dbtx.commit_tx().await;
+        self.client_ctx
+            .module_db()
+            .autocommit(
+                |dbtx, _| {
+                    let record = record.clone();
+                    Box::pin(async move {
+                        dbtx.insert_entry(&Bolt12OfferKey(index), &record).await;
+                        Ok::<_, anyhow::Error>(())
+                    })
+                },
+                Some(16),
+            )
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to persist BOLT12 offer: {err}"))?;
 
         self.add_bolt12_stock(index, params.stock).await?;
 
@@ -377,20 +388,25 @@ impl LightningClientModule {
             .map(|(_, state)| state))
     }
 
-    async fn allocate_bolt12_offer_index(&self) -> u64 {
-        loop {
-            let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
+    async fn allocate_bolt12_offer_index(&self) -> Result<u64> {
+        self.client_ctx
+            .module_db()
+            .autocommit(
+                |dbtx, _| {
+                    Box::pin(async move {
+                        let index = dbtx.get_value(&Bolt12NextOfferIndexKey).await.unwrap_or(0);
 
-            let index = dbtx.get_value(&Bolt12NextOfferIndexKey).await.unwrap_or(0);
-
-            // Reserved before use: an index whose registration fails is skipped,
-            // never reused with different terms.
-            dbtx.insert_entry(&Bolt12NextOfferIndexKey, &(index + 1))
-                .await;
-            if dbtx.commit_tx_result().await.is_ok() {
-                return index;
-            }
-        }
+                        // Reserved before use: an index whose registration fails is skipped,
+                        // never reused with different terms.
+                        dbtx.insert_entry(&Bolt12NextOfferIndexKey, &(index + 1))
+                            .await;
+                        Ok::<_, anyhow::Error>(index)
+                    })
+                },
+                Some(16),
+            )
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to allocate BOLT12 offer index: {err}"))
     }
 
     /// Submit a registration or stock upload and wait for the federation to
@@ -434,7 +450,7 @@ impl LightningClientModule {
     /// federation remembers every claim key ever registered, so offers that
     /// have since expired still mark their index as used and do not open a
     /// gap that would hide later ones.
-    pub(crate) async fn recover_bolt12_offers(&self) -> FederationResult<()> {
+    pub(crate) async fn recover_bolt12_offers(&self) -> Result<()> {
         let mut next = self
             .client_ctx
             .module_db()
@@ -456,30 +472,20 @@ impl LightningClientModule {
                 .bolt12_registration_by_recipient(claim_pk)
                 .await?
             {
-                let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
-
-                dbtx.insert_entry(
-                    &Bolt12OfferKey(index),
-                    &Bolt12OfferRecord {
-                        registration,
-                        claim_pk,
-                        offer: None,
-                    },
+                record_rescanned_bolt12_offer(
+                    self.client_ctx.module_db(),
+                    index,
+                    Some((registration, claim_pk)),
+                    false,
                 )
-                .await;
-                dbtx.insert_entry(&Bolt12NextOfferIndexKey, &(index + 1))
-                    .await;
-                dbtx.commit_tx().await;
+                .await?;
 
-                next = index + 1;
+                next = next.max(index + 1);
             } else if self.module_api.bolt12_recipient_used(claim_pk).await? {
-                let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
+                record_rescanned_bolt12_offer(self.client_ctx.module_db(), index, None, false)
+                    .await?;
 
-                dbtx.insert_entry(&Bolt12NextOfferIndexKey, &(index + 1))
-                    .await;
-                dbtx.commit_tx().await;
-
-                next = index + 1;
+                next = next.max(index + 1);
             }
 
             index += 1;
@@ -493,7 +499,7 @@ impl LightningClientModule {
     /// receive stream cursor (and bumps the rewind generation) if any
     /// previously unknown offer is found so the receive loop re-scans and
     /// claims its receives.
-    pub async fn rescan_bolt12_offers_up_to(&self, max_index: u64) -> FederationResult<u64> {
+    pub async fn rescan_bolt12_offers_up_to(&self, max_index: u64) -> Result<u64> {
         let mut discovered = 0u64;
 
         for index in 0..max_index {
@@ -510,14 +516,16 @@ impl LightningClientModule {
                     self.client_ctx.module_db(),
                     index,
                     Some((registration, claim_pk)),
+                    false,
                 )
-                .await;
+                .await?;
 
                 if newly_discovered {
                     discovered += 1;
                 }
             } else if self.module_api.bolt12_recipient_used(claim_pk).await? {
-                record_rescanned_bolt12_offer(self.client_ctx.module_db(), index, None).await;
+                record_rescanned_bolt12_offer(self.client_ctx.module_db(), index, None, true)
+                    .await?;
             }
         }
 
@@ -782,68 +790,82 @@ pub fn bolt12_payment_hash(receive: &StreamedReceive) -> sha256::Hash {
     sha256::Hash::from_byte_array(receive.contract.payment_hash)
 }
 
-/// Record a rescanned offer (or pruned used offer index) atomically with a
-/// monotonic `Bolt12NextOfferIndexKey` update, cursor rewind to `0`, and
-/// monotonic `Bolt12ReceiveStreamRewindGenKey` increment, retrying on write
-/// conflicts. Returns `true` if a new `Bolt12OfferKey` row was inserted.
+/// Record a recovered/rescanned offer (or pruned used offer index) atomically
+/// with a monotonic `Bolt12NextOfferIndexKey` update, cursor rewind to `0`, and
+/// monotonic `Bolt12ReceiveStreamRewindGenKey` increment, using bounded
+/// conflict retries via `Database::autocommit`. Returns `true` if a new
+/// `Bolt12OfferKey` row was inserted.
 async fn record_rescanned_bolt12_offer(
     db: &fedimint_core::db::Database,
     index: u64,
     active_offer: Option<(RegistrationId, PublicKey)>,
-) -> bool {
-    loop {
-        let mut dbtx = db.begin_transaction().await;
-        let inserted = if let Some((registration, claim_pk)) = active_offer {
-            let existed = dbtx.get_value(&Bolt12OfferKey(index)).await.is_some();
-            if !existed {
-                dbtx.insert_entry(
-                    &Bolt12OfferKey(index),
-                    &Bolt12OfferRecord {
-                        registration,
-                        claim_pk,
-                        offer: None,
-                    },
-                )
-                .await;
-            }
-            !existed
-        } else {
-            false
-        };
+    rewind_if_pruned: bool,
+) -> Result<bool> {
+    db.autocommit(
+        |dbtx, _| {
+            Box::pin(async move {
+                let inserted = if let Some((registration, claim_pk)) = active_offer {
+                    let existed = dbtx.get_value(&Bolt12OfferKey(index)).await.is_some();
+                    if !existed {
+                        dbtx.insert_entry(
+                            &Bolt12OfferKey(index),
+                            &Bolt12OfferRecord {
+                                registration,
+                                claim_pk,
+                                offer: None,
+                            },
+                        )
+                        .await;
+                    }
+                    !existed
+                } else {
+                    false
+                };
 
-        let current_next = dbtx.get_value(&Bolt12NextOfferIndexKey).await.unwrap_or(0);
-        let new_next = current_next.max(index.saturating_add(1));
-        let advanced = new_next > current_next;
-        if advanced {
-            dbtx.insert_entry(&Bolt12NextOfferIndexKey, &new_next).await;
-        }
+                let current_next = dbtx.get_value(&Bolt12NextOfferIndexKey).await.unwrap_or(0);
+                let new_next = current_next.max(index.saturating_add(1));
+                let advanced = new_next > current_next;
+                if advanced {
+                    dbtx.insert_entry(&Bolt12NextOfferIndexKey, &new_next).await;
+                }
 
-        if inserted || advanced {
-            // Atomically rewind the receive stream cursor and bump the
-            // monotonic rewind generation so concurrent `receive_bolt12`
-            // batches (even starting at cursor 0) cannot skip newly
-            // discovered or pruned offers.
-            let rewind_gen = dbtx
-                .get_value(&Bolt12ReceiveStreamRewindGenKey)
-                .await
-                .unwrap_or(0);
-            dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &0u64).await;
-            dbtx.insert_entry(
-                &Bolt12ReceiveStreamRewindGenKey,
-                &rewind_gen.saturating_add(1),
-            )
-            .await;
-        }
+                let should_rewind =
+                    inserted || advanced || (active_offer.is_none() && rewind_if_pruned);
+                if should_rewind {
+                    // Atomically rewind the receive stream cursor and bump the
+                    // monotonic rewind generation so concurrent `receive_bolt12`
+                    // batches (even starting at cursor 0) cannot skip newly
+                    // discovered or pruned offers.
+                    let rewind_gen = dbtx
+                        .get_value(&Bolt12ReceiveStreamRewindGenKey)
+                        .await
+                        .unwrap_or(0);
+                    dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &0u64).await;
+                    dbtx.insert_entry(
+                        &Bolt12ReceiveStreamRewindGenKey,
+                        &rewind_gen.saturating_add(1),
+                    )
+                    .await;
+                }
 
-        if dbtx.commit_tx_result().await.is_ok() {
-            return inserted;
-        }
-    }
+                Ok::<_, anyhow::Error>(inserted)
+            })
+        },
+        Some(16),
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("failed to persist recovered BOLT12 offer: {err}"))
 }
 
 /// Advance `Bolt12ReceiveStreamIndexKey` to `next_index` only if neither the
 /// cursor, the monotonic rewind generation, nor `Bolt12NextOfferIndexKey`
 /// changed since the batch's `claim_keys` snapshot.
+///
+/// Also writes the observed `Bolt12ReceiveStreamRewindGenKey` and
+/// `Bolt12NextOfferIndexKey` into the transaction's write set so
+/// value-comparing optimistic DB backends (`MemDatabase`, `redb`) always raise
+/// a `WriteConflict` if a concurrent recovery/rescan commits a rewind (even
+/// `0 -> 0`) while this transaction is open.
 async fn advance_bolt12_stream_cursor(
     dbtx: &mut fedimint_core::db::DatabaseTransaction<'_>,
     stream_index: u64,
@@ -867,132 +889,9 @@ async fn advance_bolt12_stream_cursor(
     {
         dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &next_index)
             .await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use fedimint_core::bitcoin::hashes::{Hash as _, sha256};
-    use fedimint_core::db::mem_impl::MemDatabase;
-    use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped as _};
-    use fedimint_core::module::registry::ModuleRegistry;
-    use fedimint_core::secp256k1::{Keypair, SECP256K1};
-    use fedimint_lnv2_common::bolt12::RegistrationId;
-
-    use super::{advance_bolt12_stream_cursor, record_rescanned_bolt12_offer};
-    use crate::db::{
-        Bolt12NextOfferIndexKey, Bolt12OfferKey, Bolt12ReceiveStreamIndexKey,
-        Bolt12ReceiveStreamRewindGenKey,
-    };
-
-    #[tokio::test]
-    async fn cursor_zero_aba_does_not_skip_rescanned_offer() {
-        let db = Database::new(MemDatabase::new(), ModuleRegistry::default());
-        let claim_pk = Keypair::new(SECP256K1, &mut rand::thread_rng()).public_key();
-
-        // Batch starts at cursor 0 with initial snapshot (next = 0, gen = 0).
-        let stream_index = 0u64;
-        let seen_next = 0u64;
-        let seen_rewind_gen = 0u64;
-
-        // Concurrently, rescan discovers offer at index 25 (past gap limit)
-        // and rewinds cursor to 0 -> 0 while bumping rewind generation to 1.
-        let inserted = record_rescanned_bolt12_offer(
-            &db,
-            25,
-            Some((
-                RegistrationId(sha256::Hash::from_byte_array([7; 32])),
-                claim_pk,
-            )),
-        )
-        .await;
-        assert!(inserted);
-
-        // The stale batch tries to advance cursor from 0 -> 5: the generation
-        // and next-index guard must reject the ABA advancement.
-        let mut dbtx = db.begin_transaction().await;
-        advance_bolt12_stream_cursor(
-            &mut dbtx.to_ref_nc(),
-            stream_index,
-            seen_next,
-            seen_rewind_gen,
-            5,
-        )
-        .await;
-        dbtx.commit_tx().await;
-
-        let mut ro = db.begin_transaction_nc().await;
-        assert_eq!(
-            ro.get_value(&Bolt12ReceiveStreamIndexKey)
-                .await
-                .unwrap_or(0),
-            0,
-            "cursor-0 ABA race must not advance past newly rescanned offer"
-        );
-        assert_eq!(
-            ro.get_value(&Bolt12ReceiveStreamRewindGenKey).await,
-            Some(1)
-        );
-        assert_eq!(ro.get_value(&Bolt12NextOfferIndexKey).await, Some(26));
-        assert!(ro.get_value(&Bolt12OfferKey(25)).await.is_some());
-        drop(ro);
-
-        // A fresh batch capturing the updated snapshot (next = 26, gen = 1)
-        // advances cleanly to 5.
-        let mut dbtx = db.begin_transaction().await;
-        advance_bolt12_stream_cursor(&mut dbtx.to_ref_nc(), 0, 26, 1, 5).await;
-        dbtx.commit_tx().await;
-
-        let cursor = db
-            .begin_transaction_nc()
-            .await
-            .get_value(&Bolt12ReceiveStreamIndexKey)
-            .await
-            .unwrap_or(0);
-        assert_eq!(cursor, 5);
-    }
-
-    #[tokio::test]
-    async fn rescan_never_rolls_back_concurrently_allocated_offer_index() {
-        let db = Database::new(MemDatabase::new(), ModuleRegistry::default());
-        let claim_pk = Keypair::new(SECP256K1, &mut rand::thread_rng()).public_key();
-
-        // Simulate a concurrent `allocate_bolt12_offer_index` bumping next to 30.
-        let mut dbtx = db.begin_transaction().await;
-        dbtx.insert_entry(&Bolt12NextOfferIndexKey, &30u64).await;
-        dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &12u64)
+        dbtx.insert_entry(&Bolt12ReceiveStreamRewindGenKey, &current_rewind_gen)
             .await;
-        dbtx.commit_tx().await;
-
-        // Rescan discovers an earlier active offer at index 5 and a pruned
-        // offer at index 3. Neither may lower `Bolt12NextOfferIndexKey`.
-        assert!(
-            record_rescanned_bolt12_offer(
-                &db,
-                5,
-                Some((
-                    RegistrationId(sha256::Hash::from_byte_array([5; 32])),
-                    claim_pk
-                ))
-            )
-            .await
-        );
-        assert!(!record_rescanned_bolt12_offer(&db, 3, None).await);
-
-        let mut ro = db.begin_transaction_nc().await;
-        assert_eq!(
-            ro.get_value(&Bolt12NextOfferIndexKey).await,
-            Some(30),
-            "rescan must preserve higher concurrently allocated offer index"
-        );
-        assert_eq!(
-            ro.get_value(&Bolt12ReceiveStreamIndexKey).await,
-            Some(0),
-            "discovering a missing earlier offer must still rewind the cursor"
-        );
-        assert_eq!(
-            ro.get_value(&Bolt12ReceiveStreamRewindGenKey).await,
-            Some(1)
-        );
+        dbtx.insert_entry(&Bolt12NextOfferIndexKey, &current_next)
+            .await;
     }
 }

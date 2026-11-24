@@ -15,7 +15,7 @@ use fedimint_core::time::duration_since_epoch;
 use fedimint_core::util::FmtCompact as _;
 use fedimint_core::{Amount, crit};
 use fedimint_gateway_server_db::{GatewayDbtxNcExt as _, PaymentHashOwner, PaymentHashProtocol};
-use fedimint_gwv2_client::bolt12::Bolt12InvoiceRequest;
+use fedimint_gwv2_client::bolt12::{Bolt12InvoiceRequest, Bolt12PaymentPathError};
 use fedimint_gwv2_client::{GatewayClientModuleV2, IncomingCircuitKey};
 use fedimint_lightning::bolt12::{Bolt12Request, Bolt12RequestFilter};
 use fedimint_lightning::{
@@ -229,7 +229,9 @@ impl Gateway {
             async move {
                 let payment_hash = sha256::Hash::from_byte_array(payment_hash);
 
-                self.claim_bolt12_hash(federation_id, payment_hash).await?;
+                self.claim_bolt12_hash(federation_id, payment_hash)
+                    .await
+                    .map_err(Bolt12PaymentPathError::HashCollision)?;
                 claimed_hashes
                     .lock()
                     .expect("not poisoned")
@@ -248,7 +250,7 @@ impl Gateway {
                             .lock()
                             .expect("not poisoned")
                             .retain(|h| *h != payment_hash);
-                        Err(anyhow::Error::from(err))
+                        Err(Bolt12PaymentPathError::Node(anyhow::Error::from(err)))
                     }
                 }
             }
@@ -367,6 +369,82 @@ impl Gateway {
         }
     }
 
+    /// Fund the claim behind a held payment for a federated BOLT12 invoice on
+    /// an already-resolved federation client handle (avoiding any second
+    /// `federation_manager` lookup / TOCTOU with concurrent federation leave).
+    pub(crate) async fn try_handle_lightning_payment_bolt12_for_client(
+        &self,
+        htlc_request: &InterceptPaymentRequest,
+        lightning_context: &LightningContext,
+        client: &fedimint_client::ClientHandleArc,
+    ) -> Result<()> {
+        let Ok(module) = client.get_first_module::<GatewayClientModuleV2>() else {
+            return Err(PublicGatewayError::Unexpected(anyhow::anyhow!(
+                "Federation client has no LNv2 gateway module"
+            )));
+        };
+
+        let Some(reservation) = module
+            .bolt12_reservation_for_hash(htlc_request.payment_hash)
+            .await
+        else {
+            return Err(PublicGatewayError::Unexpected(anyhow::anyhow!(
+                "Not a federated BOLT12 payment"
+            )));
+        };
+
+        // Consult `relay_bolt12_htlc` BEFORE applying `receive_enabled` so
+        // an already-funded receive redelivered after a restart is always
+        // resumed and settled instead of being cancelled.
+        let receive_enabled = self.receive_enabled(module.federation_id).await;
+        let current_block_height = lightning_context
+            .lnrpc
+            .info()
+            .await
+            .ok()
+            .map(|info| info.block_height);
+
+        if let Err(relay_err) = module
+            .relay_bolt12_htlc(
+                reservation,
+                htlc_request.payment_hash,
+                IncomingCircuitKey {
+                    incoming_chan_id: htlc_request.incoming_chan_id,
+                    htlc_id: htlc_request.htlc_id,
+                },
+                htlc_request.incoming_amount_msat,
+                htlc_request.lnv2_blocks_to_claim_deadline(current_block_height),
+                receive_enabled,
+            )
+            .await
+        {
+            if !relay_err.htlc_may_be_failed_back() {
+                crit!(
+                    target: LOG_GATEWAY,
+                    err = %relay_err.fmt_compact(),
+                    payment_hash = %htlc_request.payment_hash,
+                    "Keeping held BOLT12 HTLC because its receive contract may already be funded",
+                );
+                return Ok(());
+            }
+
+            warn!(target: LOG_GATEWAY, err = %relay_err.fmt_compact(), "Failing a federated BOLT12 payment");
+
+            let outcome = InterceptPaymentResponse {
+                action: PaymentAction::Cancel,
+                payment_hash: htlc_request.payment_hash,
+                incoming_chan_id: htlc_request.incoming_chan_id,
+                htlc_id: htlc_request.htlc_id,
+            };
+
+            if let Err(err) = self.await_complete_htlc(outcome).await {
+                warn!(target: LOG_GATEWAY, err = %err.fmt_compact(), "Error sending HTLC response to lightning node");
+            }
+        }
+
+        Ok(())
+    }
+
     /// Fund the claim behind a held payment for a federated BOLT12 invoice
     /// this gateway issued. Fails if the payment is for no such invoice.
     pub async fn try_handle_lightning_payment_bolt12(
@@ -378,71 +456,26 @@ impl Gateway {
         let clients = self.federation_manager.read().await.clients();
 
         for client in clients {
-            let Ok(module) = client.value().get_first_module::<GatewayClientModuleV2>() else {
-                continue;
-            };
-
-            if expected_federation.is_some_and(|expected| module.federation_id != expected) {
+            if expected_federation.is_some_and(|expected| {
+                client
+                    .value()
+                    .get_first_module::<GatewayClientModuleV2>()
+                    .is_ok_and(|m| m.federation_id != expected)
+            }) {
                 continue;
             }
 
-            let Some(reservation) = module
-                .bolt12_reservation_for_hash(htlc_request.payment_hash)
-                .await
-            else {
-                continue;
-            };
-
-            // Consult `relay_bolt12_htlc` BEFORE applying `receive_enabled` so
-            // an already-funded receive redelivered after a restart is always
-            // resumed and settled instead of being cancelled.
-            let receive_enabled = self.receive_enabled(module.federation_id).await;
-            let current_block_height = lightning_context
-                .lnrpc
-                .info()
-                .await
-                .ok()
-                .map(|info| info.block_height);
-
-            if let Err(relay_err) = module
-                .relay_bolt12_htlc(
-                    reservation,
-                    htlc_request.payment_hash,
-                    IncomingCircuitKey {
-                        incoming_chan_id: htlc_request.incoming_chan_id,
-                        htlc_id: htlc_request.htlc_id,
-                    },
-                    htlc_request.incoming_amount_msat,
-                    htlc_request.lnv2_blocks_to_claim_deadline(current_block_height),
-                    receive_enabled,
+            if self
+                .try_handle_lightning_payment_bolt12_for_client(
+                    htlc_request,
+                    lightning_context,
+                    client.value(),
                 )
                 .await
+                .is_ok()
             {
-                if !relay_err.htlc_may_be_failed_back() {
-                    crit!(
-                        target: LOG_GATEWAY,
-                        err = %relay_err.fmt_compact(),
-                        payment_hash = %htlc_request.payment_hash,
-                        "Keeping held BOLT12 HTLC because its receive contract may already be funded",
-                    );
-                    return Ok(());
-                }
-
-                warn!(target: LOG_GATEWAY, err = %relay_err.fmt_compact(), "Failing a federated BOLT12 payment");
-
-                let outcome = InterceptPaymentResponse {
-                    action: PaymentAction::Cancel,
-                    payment_hash: htlc_request.payment_hash,
-                    incoming_chan_id: htlc_request.incoming_chan_id,
-                    htlc_id: htlc_request.htlc_id,
-                };
-
-                if let Err(err) = self.await_complete_htlc(outcome).await {
-                    warn!(target: LOG_GATEWAY, err = %err.fmt_compact(), "Error sending HTLC response to lightning node");
-                }
+                return Ok(());
             }
-
-            return Ok(());
         }
 
         Err(PublicGatewayError::Unexpected(anyhow::anyhow!(

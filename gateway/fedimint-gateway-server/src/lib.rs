@@ -1337,33 +1337,57 @@ impl Gateway {
         // When a durable owner exists in `gateway_db`, it is authoritative: a
         // BOLT12-owned hash is never routed to BOLT11/LNv1 or another
         // federation, and a BOLT11-owned hash is never routed to BOLT12/LNv1
-        // or forwarded. If the owning federation is currently not loaded (e.g.
-        // failed to start), leave the HTLC held rather than cancelling a
-        // payment whose contract may already be funded.
-        if let Some(owner) = &owner
-            && owner.protocol == fedimint_gateway_server_db::PaymentHashProtocol::Bolt12
-        {
-            if self
+        // or forwarded. Resolve the owning client handle ONCE so concurrent
+        // federation removal cannot race between a pre-check and dispatch.
+        // If the owning federation is currently not loaded (e.g. failed to
+        // start), leave held payments (`incoming_circuit().is_none()`) held
+        // rather than cancelling a possibly funded contract, while cancelling
+        // intercepted forwards (which can never fund a fresh contract).
+        let owner_client = if let Some(owner) = &owner {
+            if let Some(client) = self
                 .federation_manager
                 .read()
                 .await
                 .client(&owner.federation_id)
-                .is_none()
+                .cloned()
             {
+                Some((owner.federation_id, client.into_value()))
+            } else {
+                if payment_request.incoming_circuit().is_none() {
+                    warn!(
+                        target: LOG_GATEWAY,
+                        payment_hash = %payment_request.payment_hash,
+                        federation_id = %owner.federation_id,
+                        protocol = ?owner.protocol,
+                        "Owning federation for held payment is not loaded; leaving HTLC held",
+                    );
+                    return "ignore";
+                }
                 warn!(
                     target: LOG_GATEWAY,
                     payment_hash = %payment_request.payment_hash,
                     federation_id = %owner.federation_id,
-                    "Owning federation for BOLT12 payment is not loaded; leaving HTLC held",
+                    protocol = ?owner.protocol,
+                    "Owning federation for forwarded HTLC is not loaded: cancelling HTLC",
                 );
-                return "ignore";
+                Self::cancel_unmatched_lightning_payment(payment_request, lightning_context).await;
+                return "cancel";
             }
+        } else {
+            None
+        };
 
+        if let Some(owner) = &owner
+            && owner.protocol == fedimint_gateway_server_db::PaymentHashProtocol::Bolt12
+        {
+            let (_, client) = owner_client
+                .as_ref()
+                .expect("owner_client resolved above for Some(owner)");
             if self
-                .try_handle_lightning_payment_bolt12(
+                .try_handle_lightning_payment_bolt12_for_client(
                     &payment_request,
                     lightning_context,
-                    Some(owner.federation_id),
+                    client,
                 )
                 .await
                 .is_ok()
@@ -1381,27 +1405,9 @@ impl Gateway {
             return "cancel";
         }
 
-        if let Some(owner) = &owner
-            && owner.protocol == fedimint_gateway_server_db::PaymentHashProtocol::Bolt11
-            && self
-                .federation_manager
-                .read()
-                .await
-                .client(&owner.federation_id)
-                .is_none()
-        {
-            warn!(
-                target: LOG_GATEWAY,
-                payment_hash = %payment_request.payment_hash,
-                federation_id = %owner.federation_id,
-                "Owning federation for BOLT11 payment is not loaded; leaving HTLC held",
-            );
-            return "ignore";
-        }
-
         let lnv2_start = fedimint_core::time::now();
         let lnv2_result = self
-            .try_handle_lightning_payment_lnv2(&payment_request, lightning_context)
+            .try_handle_lightning_payment_lnv2(&payment_request, lightning_context, owner_client)
             .await;
         let lnv2_outcome = if lnv2_result.is_ok() {
             "success"
@@ -1546,6 +1552,7 @@ impl Gateway {
         &self,
         htlc_request: &InterceptPaymentRequest,
         lightning_context: &LightningContext,
+        preloaded_client: Option<(FederationId, ClientHandleArc)>,
     ) -> Result<()> {
         // If `payment_hash` has been registered as a LNv2 payment, we try to complete
         // the payment by getting the preimage from the federation
@@ -1560,6 +1567,7 @@ impl Gateway {
             .get_registered_incoming_contract_and_client_for_htlc_v2(
                 PaymentImage::Hash(htlc_request.payment_hash),
                 htlc_request.incoming_amount_msat,
+                preloaded_client,
             )
             .await?;
 
@@ -4174,6 +4182,7 @@ impl Gateway {
         &self,
         payment_image: PaymentImage,
         amount_msats: u64,
+        preloaded_client: Option<(FederationId, ClientHandleArc)>,
     ) -> Result<(IncomingContract, ClientHandleArc, FederationId, bool)> {
         let registered_incoming_contract = self
             .gateway_db
@@ -4197,7 +4206,10 @@ impl Gateway {
         let federation_id = registered_incoming_contract.federation_id;
         let receive_enabled = self.receive_enabled(federation_id).await;
 
-        let client = self.select_client(federation_id).await?.into_value();
+        let client = match preloaded_client {
+            Some((preloaded_fid, client)) if preloaded_fid == federation_id => client,
+            _ => self.select_client(federation_id).await?.into_value(),
+        };
 
         Ok((
             registered_incoming_contract.contract,
