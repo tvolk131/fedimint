@@ -505,3 +505,211 @@ async fn relay_fetch_rejects_premature_framing_and_clears_recovered_witness() ->
 
     Ok(())
 }
+
+struct TarpitMeshApi {
+    peers: BTreeSet<PeerId>,
+    channels: BTreeMap<PeerId, Arc<Channels>>,
+    honest_relay_calls: Arc<AtomicU64>,
+}
+
+impl std::fmt::Debug for TarpitMeshApi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TarpitMeshApi").finish_non_exhaustive()
+    }
+}
+
+#[apply(async_trait_maybe_send!)]
+impl IRawFederationApi for TarpitMeshApi {
+    fn all_peers(&self) -> &BTreeSet<PeerId> {
+        &self.peers
+    }
+
+    fn self_peer(&self) -> Option<PeerId> {
+        None
+    }
+
+    fn with_module(&self, _id: ModuleInstanceId) -> DynModuleApi {
+        unreachable!("already a module api")
+    }
+
+    async fn request_raw(
+        &self,
+        peer_id: PeerId,
+        method: &str,
+        params: &ApiRequestErased,
+    ) -> ServerResult<serde_json::Value> {
+        let target = self
+            .channels
+            .get(&peer_id)
+            .ok_or(ServerError::InvalidPeerId { peer_id })?;
+        let hex: String = serde_json::from_value(params.params.clone()).map_err(api_err)?;
+
+        match method {
+            BOLT12_MPC_ENDPOINT => {
+                let packet = decode_packet(&hex).map_err(api_err)?;
+                if packet.sender == PeerId::from(0) && peer_id == PeerId::from(1) {
+                    return Err(api_err("direct 0 -> 1 blocked"));
+                }
+                target.receive(&packet).map_err(api_err)?;
+                Ok(serde_json::Value::Null)
+            }
+            BOLT12_MPC_FETCH_ENDPOINT => {
+                let req = decode_fetch_request(&hex).map_err(api_err)?;
+                let (total_chunks, packets) = target.serve_packets(&req).map_err(api_err)?;
+                let encoded = PacketPage {
+                    total_chunks,
+                    packets: packets
+                        .into_iter()
+                        .map(|p| p.consensus_encode_to_hex())
+                        .collect(),
+                };
+                serde_json::to_value(encoded).map_err(api_err)
+            }
+            BOLT12_MPC_RELAY_ENDPOINT => {
+                if peer_id == PeerId::from(2) {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    let garbage = PacketPage {
+                        total_chunks: 10,
+                        packets: vec![String::new()],
+                    };
+                    return serde_json::to_value(garbage).map_err(api_err);
+                }
+                if peer_id == PeerId::from(3)
+                    && self.honest_relay_calls.fetch_add(1, Ordering::Relaxed) == 0
+                {
+                    return Err(api_err("honest relay not yet in round"));
+                }
+                let req = decode_relay_request(&hex).map_err(api_err)?;
+                let self_api: DynModuleApi = Self {
+                    peers: self.peers.clone(),
+                    channels: self.channels.clone(),
+                    honest_relay_calls: self.honest_relay_calls.clone(),
+                }
+                .into();
+                let (total_chunks, packets) =
+                    target.relay_fetch(&self_api, &req).await.map_err(api_err)?;
+                let encoded = PacketPage {
+                    total_chunks,
+                    packets: packets
+                        .into_iter()
+                        .map(|p| p.consensus_encode_to_hex())
+                        .collect(),
+                };
+                serde_json::to_value(encoded).map_err(api_err)
+            }
+            other => Err(api_err(format!("unexpected method {other}"))),
+        }
+    }
+
+    fn connection_status_stream(&self) -> BoxStream<'static, BTreeMap<PeerId, PeerStatus>> {
+        Box::pin(futures::stream::empty())
+    }
+
+    async fn wait_for_initialized_connections(&self) {}
+
+    async fn get_peer_connection(&self, peer_id: PeerId) -> ServerResult<DynGuaridianConnection> {
+        Err(ServerError::InvalidPeerId { peer_id })
+    }
+}
+
+impl IModuleFederationApi for TarpitMeshApi {}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tarpitting_relay_does_not_block_honest_relay_recovery() -> Result<()> {
+    // 4-peer committee [0, 1, 2, 3]: direct 0 -> 1 is blocked, leaving relays
+    // 2 and 3. Malicious relay 2 sleeps 2s and returns a malformed undersized
+    // PacketPage on every call; honest relay 3 rejects the first call (as if
+    // still one round behind) and succeeds on the second. Independent per-relay
+    // loops must let Peer 1 recover via relay 3 in well under 1s instead of
+    // blocking behind relay 2's tarpit.
+    use mpc::engine::Transport as _;
+
+    let committee: Vec<PeerId> = (0..4u16).map(PeerId::from).collect();
+    let secrets: Vec<SecretKey> = (0..4).map(|_| SecretKey::new(&mut OsRng)).collect();
+    let keys: BTreeMap<PeerId, PublicKey> = (0..4u16)
+        .map(|p| {
+            (
+                PeerId::from(p),
+                secrets[usize::from(p)].public_key(SECP256K1),
+            )
+        })
+        .collect();
+    let limits = ChannelLimits {
+        message: 4096,
+        chunks: 16,
+        fault_bytes: 65_536,
+    };
+    let channels: BTreeMap<PeerId, Arc<Channels>> = committee
+        .iter()
+        .enumerate()
+        .map(|(i, &peer)| {
+            Ok((
+                peer,
+                Channels::new(
+                    0,
+                    peer,
+                    committee.clone(),
+                    limits,
+                    &[u8::try_from(i)?; 32],
+                    &secrets[i],
+                    &keys,
+                )?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let honest_relay_calls = Arc::new(AtomicU64::new(0));
+    let api: DynModuleApi = TarpitMeshApi {
+        peers: committee.iter().copied().collect(),
+        channels: channels.clone(),
+        honest_relay_calls: honest_relay_calls.clone(),
+    }
+    .into();
+
+    let start = tokio::time::Instant::now();
+    let tasks: Vec<_> = committee
+        .iter()
+        .enumerate()
+        .map(|(i, &peer)| {
+            let ch = channels[&peer].clone();
+            let api = api.clone();
+            tokio::spawn(async move {
+                let mut transport =
+                    ApiTransport::with_relay_trigger(ch, api, Duration::from_millis(20));
+                let outgoing: Vec<Vec<u8>> = (0..4)
+                    .map(|j| {
+                        if j == i {
+                            vec![]
+                        } else {
+                            format!("m-{i}-{j}").into_bytes()
+                        }
+                    })
+                    .collect();
+                let incoming = transport.exchange(0, outgoing).await?;
+                Ok::<_, anyhow::Error>(incoming)
+            })
+        })
+        .collect();
+
+    let results = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut out = Vec::with_capacity(4);
+        for task in tasks {
+            out.push(task.await??);
+        }
+        Ok::<_, anyhow::Error>(out)
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("tarpitting relay blocked honest relay recovery past 1s"))??;
+
+    assert_eq!(results[1][0], b"m-0-1");
+    assert!(
+        honest_relay_calls.load(Ordering::Relaxed) >= 2,
+        "honest relay 3 must have been retried independently of relay 2"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "recovery took {:?}",
+        start.elapsed()
+    );
+
+    Ok(())
+}

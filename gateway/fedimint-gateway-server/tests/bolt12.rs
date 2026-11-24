@@ -108,7 +108,7 @@ async fn approve(
 
     retry(
         "gateway approval",
-        backoff_util::aggressive_backoff(),
+        backoff_util::aggressive_backoff_long(),
         || async {
             ensure!(
                 api.bolt12_gateway_approved(gateway_key).await?,
@@ -428,6 +428,73 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
         sha256::Hash::from_byte_array(invoice2.payment_hash().0),
         front_run_hash,
         "gateway must skip front-run stock payment hash and use next item"
+    );
+
+    // An authoritative `Bolt11` payment-hash owner must terminate with
+    // `"cancel"` when LNv2 rejects it (e.g. `receive_enabled == false`) and
+    // never fall through to LNv1 or `"forward"` even with a non-federation scid.
+    fedimint_gateway_server::IAdminGateway::handle_set_payment_policy_msg(
+        &gateway,
+        fedimint_gateway_common::SetPaymentPolicyPayload {
+            federation_id: Some(fed.id()),
+            receive_enabled: Some(false),
+        },
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("set payment policy failed: {err:?}"))?;
+    let front_run_htlc = InterceptPaymentRequest {
+        payment_hash: front_run_hash,
+        amount_msat: front_run_amount.msats,
+        incoming_amount_msat: front_run_amount.msats,
+        expiry: 1_000,
+        incoming_chan_id: 99,
+        short_channel_id: Some(999_999),
+        htlc_id: 1,
+    };
+    assert_eq!(
+        gateway
+            .handle_lightning_payment(front_run_htlc.clone(), &lightning_context)
+            .await,
+        "cancel",
+        "Bolt11-owned payment hash must cancel rather than fall through to LNv1/forward"
+    );
+
+    // Leaving/unloading the owning federation while durable `PaymentHashOwner`
+    // rows remain in `gateway_db` must leave both BOLT12 and BOLT11 HTLCs held
+    // (`"ignore"`) instead of cancelling a payment that may already be funded.
+    drop(module);
+    drop(gateway_client);
+    let completed_before_unload = lightning_node.completed_htlcs().len();
+    fedimint_gateway_ui::IAdminGateway::handle_leave_federation(
+        &gateway,
+        fedimint_gateway_common::LeaveFedPayload {
+            federation_id: fed.id(),
+        },
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("leave federation failed: {err:?}"))?;
+
+    assert_eq!(
+        gateway
+            .handle_lightning_payment(
+                held_payment(&invoice, INVOICE_AMOUNT.msats),
+                &lightning_context
+            )
+            .await,
+        "ignore",
+        "unloaded owning federation must hold BOLT12 HTLC rather than cancel"
+    );
+    assert_eq!(
+        gateway
+            .handle_lightning_payment(front_run_htlc, &lightning_context)
+            .await,
+        "ignore",
+        "unloaded owning federation must hold Bolt11 HTLC rather than cancel"
+    );
+    assert_eq!(
+        lightning_node.completed_htlcs().len(),
+        completed_before_unload,
+        "leaving HTLCs held must not emit any Cancel/Forward responses"
     );
 
     Ok(())
