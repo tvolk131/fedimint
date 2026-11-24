@@ -458,7 +458,8 @@ async fn test_client_db_migrations() -> anyhow::Result<()> {
                     }
                     db::DbKeyPrefix::Bolt12ReceiveStreamIndex
                     | db::DbKeyPrefix::Bolt12Offer
-                    | db::DbKeyPrefix::Bolt12NextOfferIndex => {
+                    | db::DbKeyPrefix::Bolt12NextOfferIndex
+                    | db::DbKeyPrefix::Bolt12ReceiveStreamRewindGen => {
                         // Added after the snapshot was taken and absent
                         // from it, so there is no row to read back.
                     }

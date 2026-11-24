@@ -310,7 +310,8 @@ impl Gateway {
     ) -> anyhow::Result<()> {
         // Also screen legacy BOLT12 reservations persisted before the unified
         // `PaymentHashOwner` table existed.
-        for client in self.federation_manager.read().await.clients() {
+        let clients = self.federation_manager.read().await.clients();
+        for client in clients {
             let Ok(module) = client.value().get_first_module::<GatewayClientModuleV2>() else {
                 continue;
             };

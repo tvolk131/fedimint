@@ -13,6 +13,7 @@ pub enum DbKeyPrefix {
     Bolt12ReceiveStreamIndex = 0x43,
     Bolt12Offer = 0x44,
     Bolt12NextOfferIndex = 0x45,
+    Bolt12ReceiveStreamRewindGen = 0x46,
     /// Prefixes between 0xb0..=0xcf shall all be considered allocated for
     /// historical and future external use
     ExternalReservedStart = 0xb0,
@@ -84,4 +85,16 @@ impl_db_record!(
     key = Bolt12NextOfferIndexKey,
     value = u64,
     db_prefix = DbKeyPrefix::Bolt12NextOfferIndex
+);
+
+/// Monotonic counter incremented every time recovery or rescan rewinds
+/// [`Bolt12ReceiveStreamIndexKey`] to `0`, preventing ABA cursor races when
+/// `receive_bolt12` is already scanning from `0`.
+#[derive(Debug, Encodable, Decodable)]
+pub struct Bolt12ReceiveStreamRewindGenKey;
+
+impl_db_record!(
+    key = Bolt12ReceiveStreamRewindGenKey,
+    value = u64,
+    db_prefix = DbKeyPrefix::Bolt12ReceiveStreamRewindGen
 );

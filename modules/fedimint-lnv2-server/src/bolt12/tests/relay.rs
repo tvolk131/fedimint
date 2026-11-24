@@ -488,10 +488,15 @@ async fn relay_fetch_rejects_premature_framing_and_clears_recovered_witness() ->
     assert_eq!(ch2.relay_evidence().relay_missing, vec![]);
 
     // 5. An out-of-range `start_chunk` (within `limits.chunks` but >= actual
-    // `total_chunks = 1`) must be rejected by the relay WITHOUT recording
-    // `relay_missing` against honest sender 0 (preventing f = 1 framing).
+    // `total_chunks = 1`) must return the sender's signed chunk-0 proof
+    // WITHOUT recording `relay_missing` against honest sender 0 (preventing
+    // f = 1 framing while still surfacing any chunk-count equivocation).
     let oob_req = RelayRequest::new(0, PeerId::from(0), PeerId::from(1), 0, 1, &signer1);
-    assert!(ch2.relay_fetch(&healthy_api, &oob_req).await.is_err());
+    let (proof_total, proof_packets) = ch2.relay_fetch(&healthy_api, &oob_req).await?;
+    assert_eq!(proof_total, 1);
+    assert_eq!(proof_packets.len(), 1);
+    assert_eq!(proof_packets[0].chunk, 0);
+    assert_eq!(proof_packets[0].chunks, 1);
     assert_eq!(
         ch2.relay_evidence().relay_missing,
         vec![],

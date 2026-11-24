@@ -388,22 +388,27 @@ impl GatewayClientModuleV2 {
         let mut last_error = None;
         let mut min_stock = 0u64;
         let mut min_pool = 0u64;
-        let mut attempts = 0usize;
+        let mut federation_attempts = 0usize;
+        let mut local_collision_skips = 0usize;
+        const MAX_LOCAL_COLLISION_SKIPS: usize = 256;
 
         // Another gateway may reserve the same item first, or a payment hash
         // may already be registered locally (e.g. front-run via BOLT11 or an
-        // interrupted previous issuance); skip collided hashes and retry with
-        // the next unused candidate.
-        while attempts < RESERVE_ATTEMPTS {
+        // interrupted previous issuance); skip collided hashes cheaply across
+        // paginated batches without burning federation reservation attempts.
+        while federation_attempts < RESERVE_ATTEMPTS
+            && local_collision_skips < MAX_LOCAL_COLLISION_SKIPS
+        {
             let candidates = self
                 .candidate_bolt12_sources(registration, policy, min_stock, min_pool)
                 .await?;
 
             for (source, payment_hash) in candidates {
-                if attempts >= RESERVE_ATTEMPTS {
+                if federation_attempts >= RESERVE_ATTEMPTS
+                    || local_collision_skips >= MAX_LOCAL_COLLISION_SKIPS
+                {
                     break;
                 }
-                attempts += 1;
 
                 match source {
                     Source::Stock { index } => min_stock = index.saturating_add(1),
@@ -428,10 +433,13 @@ impl GatewayClientModuleV2 {
                 let path = match payment_path(payment_hash).await {
                     Ok(path) => encode_payment_path(&path)?,
                     Err(error) => {
+                        local_collision_skips += 1;
                         last_error = Some(error);
                         continue;
                     }
                 };
+
+                federation_attempts += 1;
 
                 let expected_terms = terms_hash(&request.invoice_request, &path);
 

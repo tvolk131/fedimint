@@ -982,6 +982,11 @@ impl Channels {
         Ok((total_chunks, packets[start..end].to_vec()))
     }
 
+    fn in_active_round_window(&self, round: u64) -> bool {
+        let state = self.state.lock().expect("not poisoned");
+        round <= state.round && round >= state.round.saturating_sub(1)
+    }
+
     fn validate_relay_request(&self, request: &RelayRequest) -> Result<PublicKey> {
         ensure!(request.run == self.run, "Wrong run");
         ensure!(
@@ -1009,13 +1014,10 @@ impl Channels {
             "Relay request signature is invalid"
         );
 
-        {
-            let state = self.state.lock().expect("not poisoned");
-            ensure!(
-                request.round <= state.round && request.round >= state.round.saturating_sub(1),
-                "Relay request is outside the active round window"
-            );
-        }
+        ensure!(
+            self.in_active_round_window(request.round),
+            "Relay request is outside the active round window"
+        );
 
         Ok(sender_pk)
     }
@@ -1038,6 +1040,14 @@ impl Channels {
             .acquire()
             .await
             .map_err(|_| anyhow::anyhow!("Relay semaphore closed"))?;
+
+        // Re-check the active round window after waiting on `relay_sems` so a
+        // queued request whose round has since aged out of the sender's outbox
+        // cannot produce a spurious `relay_missing` witness.
+        ensure!(
+            self.in_active_round_window(request.round),
+            "Relay request aged outside the active round window"
+        );
 
         let fetch_req = FetchRequest::new(
             request.run,
@@ -1097,14 +1107,18 @@ impl Channels {
                 ));
                 Ok((total_chunks, packets))
             }
-            Ok(RelayedPage::OutOfRangeProof) => {
+            Ok(RelayedPage::OutOfRangeProof(proof)) => {
                 // Sender proved via a signed chunk-0 envelope that the actual
-                // message has <= `request.start_chunk` chunks. Reject the
-                // requester's bogus offset WITHOUT recording `relay_missing`.
-                bail!("Relay start_chunk exceeds sender's message chunk count");
+                // message has <= `request.start_chunk` chunks. Forward the
+                // signed chunk-0 proof to the requester (so a recipient can
+                // record `ChunkCountConflict` if the sender equivocated across
+                // pages) WITHOUT recording `relay_missing`.
+                Ok((proof.chunks, vec![*proof]))
             }
             Err(err) => {
-                if self.has_received(request.sender, request.round) {
+                if self.in_active_round_window(request.round)
+                    && self.has_received(request.sender, request.round)
+                {
                     let mut missing = self.relay_missing.lock().expect("not poisoned");
                     if missing.len() < MAX_RELAY_WITNESSES {
                         missing.insert((request.sender, request.recipient, request.round));
@@ -1604,7 +1618,7 @@ enum RelayedPage {
     InRange(u32, Vec<MpcPacket>),
     /// Sender returned a validly envelope-signed chunk 0 whose `chunks` field
     /// proves `start_chunk >= total_chunks`.
-    OutOfRangeProof,
+    OutOfRangeProof(Box<MpcPacket>),
 }
 
 fn validate_relayed_page(
@@ -1636,7 +1650,7 @@ fn validate_relayed_page(
                 && verify_packet_envelope(run, sender, recipient, &proof),
             "Relay out-of-range proof failed verification"
         );
-        return Ok(RelayedPage::OutOfRangeProof);
+        return Ok(RelayedPage::OutOfRangeProof(Box::new(proof)));
     }
 
     let expected_len = page
@@ -1694,7 +1708,9 @@ async fn deliver(api: &DynModuleApi, peer: PeerId, packet: &MpcPacket) {
     }
 }
 
-/// Pull all pages of `sender`'s packets for `round` from one relay peer.
+/// Pull all pages of `sender`'s packets for `round` from one relay peer,
+/// strictly validating each page before advancing so a malicious relay cannot
+/// tarpit the loop with garbage or undersized pages.
 async fn pull_from_relay(
     channels: &Channels,
     api: &DynModuleApi,
@@ -1702,6 +1718,9 @@ async fn pull_from_relay(
     sender: PeerId,
     round: u64,
 ) {
+    let Some(sender_pk) = channels.public_keys.get(&sender) else {
+        return;
+    };
     let mut start_chunk = 0u32;
 
     loop {
@@ -1723,26 +1742,47 @@ async fn pull_from_relay(
             return;
         };
 
-        if page.packets.is_empty() || page.total_chunks > channels.limits.chunks {
-            return;
-        }
+        let validated = validate_relayed_page(
+            channels.run,
+            (sender, sender_pk),
+            channels.me,
+            round,
+            start_chunk,
+            channels.limits.chunks,
+            &page,
+        );
 
-        for hex in &page.packets {
-            if let Ok(packet) = decode_packet(hex) {
-                let _ = channels.receive(&packet);
+        match validated {
+            Ok(RelayedPage::InRange(total_chunks, packets)) => {
+                let advanced = u32::try_from(packets.len()).unwrap_or(u32::MAX);
+                for packet in &packets {
+                    let _ = channels.receive(packet);
+                }
+                start_chunk = start_chunk.saturating_add(advanced);
+                if start_chunk >= total_chunks || channels.has_received(sender, round) {
+                    return;
+                }
             }
-        }
-
-        let advanced = u32::try_from(page.packets.len()).unwrap_or(u32::MAX);
-        start_chunk = start_chunk.saturating_add(advanced);
-        if start_chunk >= page.total_chunks || channels.has_received(sender, round) {
-            return;
+            Ok(RelayedPage::OutOfRangeProof(proof)) => {
+                // Feed the signed chunk-0 proof into `channels.receive` so
+                // chunk-count equivocation across pages records a fault, then
+                // stop pulling from this relay.
+                let _ = channels.receive(&proof);
+                return;
+            }
+            Err(_) => {
+                // Abort immediately on malformed, unsigned, or undersized
+                // pages so a malicious relay cannot tarpit retries.
+                return;
+            }
         }
     }
 }
 
 /// Ask every other committee peer to relay `sender`'s packets for `round`
-/// once direct delivery has stalled past `relay_trigger`.
+/// once direct delivery has stalled past `relay_trigger`. Each relay runs its
+/// own independent retry loop so one slow or malicious relay cannot block
+/// retrying honest relays.
 async fn relay_pull_loop(
     channels: &Channels,
     api: &DynModuleApi,
@@ -1761,15 +1801,14 @@ async fn relay_pull_loop(
         std::future::pending::<()>().await;
     }
 
-    loop {
-        sleep(relay_trigger).await;
+    let loops = relays.into_iter().map(|relay| async move {
+        loop {
+            sleep(relay_trigger).await;
+            pull_from_relay(channels, api, relay, sender, round).await;
+        }
+    });
 
-        let fetches = relays
-            .iter()
-            .map(|&relay| pull_from_relay(channels, api, relay, sender, round));
-
-        join_all(fetches).await;
-    }
+    join_all(loops).await;
 }
 
 /// Wait for `sender`'s message in `round`, falling back to committee relays if

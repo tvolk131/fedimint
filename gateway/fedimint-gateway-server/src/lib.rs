@@ -1335,11 +1335,30 @@ impl Gateway {
             .await;
 
         // When a durable owner exists in `gateway_db`, it is authoritative: a
-        // BOLT12-owned hash is never routed to BOLT11 or another federation,
-        // and a BOLT11-owned hash is never routed to BOLT12.
+        // BOLT12-owned hash is never routed to BOLT11/LNv1 or another
+        // federation, and a BOLT11-owned hash is never routed to BOLT12/LNv1
+        // or forwarded. If the owning federation is currently not loaded (e.g.
+        // failed to start), leave the HTLC held rather than cancelling a
+        // payment whose contract may already be funded.
         if let Some(owner) = &owner
             && owner.protocol == fedimint_gateway_server_db::PaymentHashProtocol::Bolt12
         {
+            if self
+                .federation_manager
+                .read()
+                .await
+                .client(&owner.federation_id)
+                .is_none()
+            {
+                warn!(
+                    target: LOG_GATEWAY,
+                    payment_hash = %payment_request.payment_hash,
+                    federation_id = %owner.federation_id,
+                    "Owning federation for BOLT12 payment is not loaded; leaving HTLC held",
+                );
+                return "ignore";
+            }
+
             if self
                 .try_handle_lightning_payment_bolt12(
                     &payment_request,
@@ -1360,6 +1379,24 @@ impl Gateway {
             );
             Self::cancel_unmatched_lightning_payment(payment_request, lightning_context).await;
             return "cancel";
+        }
+
+        if let Some(owner) = &owner
+            && owner.protocol == fedimint_gateway_server_db::PaymentHashProtocol::Bolt11
+            && self
+                .federation_manager
+                .read()
+                .await
+                .client(&owner.federation_id)
+                .is_none()
+        {
+            warn!(
+                target: LOG_GATEWAY,
+                payment_hash = %payment_request.payment_hash,
+                federation_id = %owner.federation_id,
+                "Owning federation for BOLT11 payment is not loaded; leaving HTLC held",
+            );
+            return "ignore";
         }
 
         let lnv2_start = fedimint_core::time::now();
@@ -1400,13 +1437,30 @@ impl Gateway {
             return "ignore";
         }
 
+        // If a durable BOLT11 owner exists, terminate authoritatively without
+        // falling through to BOLT12, LNv1, or route-through forwarding.
+        if let Some(owner) = &owner {
+            let err_str = lnv2_result
+                .as_ref()
+                .err()
+                .map_or_default(|e| e.fmt_compact().to_string());
+            warn!(
+                target: LOG_GATEWAY,
+                payment_hash = %payment_request.payment_hash,
+                federation_id = %owner.federation_id,
+                err = %err_str,
+                "BOLT11 payment hash owner failed LNv2 handling: cancelling HTLC",
+            );
+            Self::cancel_unmatched_lightning_payment(payment_request, lightning_context).await;
+            return "cancel";
+        }
+
         // Pre-upgrade legacy BOLT12 fallback: only attempted when no durable
         // `PaymentHashOwner` record exists at all.
-        if owner.is_none()
-            && self
-                .try_handle_lightning_payment_bolt12(&payment_request, lightning_context, None)
-                .await
-                .is_ok()
+        if self
+            .try_handle_lightning_payment_bolt12(&payment_request, lightning_context, None)
+            .await
+            .is_ok()
         {
             return "bolt12";
         }
@@ -3883,7 +3937,8 @@ impl Gateway {
 
         // Also reject any payment hash already claimed by a legacy BOLT12
         // reservation persisted before `PaymentHashOwner` existed.
-        for client in self.federation_manager.read().await.clients() {
+        let clients = self.federation_manager.read().await.clients();
+        for client in clients {
             if let Ok(module) = client.value().get_first_module::<GatewayClientModuleV2>()
                 && module
                     .bolt12_reservation_for_hash(payment_hash)

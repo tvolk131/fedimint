@@ -142,7 +142,7 @@ impl Lightning {
                     let items = dbtx
                         .find_by_range(Bolt12StockKey(id, min_index)..Bolt12StockKey(id, u64::MAX))
                         .await
-                        .take(8)
+                        .take(32)
                         .map(|(key, item)| (key.1, item))
                         .collect()
                         .await;
@@ -243,7 +243,7 @@ impl Lightning {
                     let items = dbtx
                         .find_by_range(Bolt12PoolItemKey(min_index)..Bolt12PoolItemKey(u64::MAX))
                         .await
-                        .take(8)
+                        .take(32)
                         .map(|(key, item)| (key.0, item.payment_hash))
                         .collect()
                         .await;

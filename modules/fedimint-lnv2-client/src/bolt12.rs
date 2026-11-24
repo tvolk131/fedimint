@@ -41,7 +41,7 @@ pub use self::sm::{Bolt12ReceiveSMState, Bolt12ReceiveStateMachine};
 use crate::api::LightningFederationApi;
 use crate::db::{
     Bolt12NextOfferIndexKey, Bolt12OfferKey, Bolt12OfferPrefix, Bolt12OfferRecord,
-    Bolt12ReceiveStreamIndexKey,
+    Bolt12ReceiveStreamIndexKey, Bolt12ReceiveStreamRewindGenKey,
 };
 use crate::{LightningClientModule, LightningClientStateMachines, LightningOperationMeta};
 
@@ -378,17 +378,19 @@ impl LightningClientModule {
     }
 
     async fn allocate_bolt12_offer_index(&self) -> u64 {
-        let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
+        loop {
+            let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
 
-        let index = dbtx.get_value(&Bolt12NextOfferIndexKey).await.unwrap_or(0);
+            let index = dbtx.get_value(&Bolt12NextOfferIndexKey).await.unwrap_or(0);
 
-        // Reserved before use: an index whose registration fails is skipped,
-        // never reused with different terms.
-        dbtx.insert_entry(&Bolt12NextOfferIndexKey, &(index + 1))
-            .await;
-        dbtx.commit_tx().await;
-
-        index
+            // Reserved before use: an index whose registration fails is skipped,
+            // never reused with different terms.
+            dbtx.insert_entry(&Bolt12NextOfferIndexKey, &(index + 1))
+                .await;
+            if dbtx.commit_tx_result().await.is_ok() {
+                return index;
+            }
+        }
     }
 
     /// Submit a registration or stock upload and wait for the federation to
@@ -488,18 +490,11 @@ impl LightningClientModule {
 
     /// Extended recovery scan up to `max_index` (exclusive) for wallets that
     /// may have skipped more than `OFFER_GAP_LIMIT` offer indices. Resets the
-    /// receive stream cursor if any previously unknown offer is found so the
-    /// receive loop re-scans and claims its receives.
+    /// receive stream cursor (and bumps the rewind generation) if any
+    /// previously unknown offer is found so the receive loop re-scans and
+    /// claims its receives.
     pub async fn rescan_bolt12_offers_up_to(&self, max_index: u64) -> FederationResult<u64> {
         let mut discovered = 0u64;
-        let mut highest_next = self
-            .client_ctx
-            .module_db()
-            .begin_transaction_nc()
-            .await
-            .get_value(&Bolt12NextOfferIndexKey)
-            .await
-            .unwrap_or(0);
 
         for index in 0..max_index {
             let claim_pk = OfferSecrets::derive(&self.bolt12_secret, index)
@@ -511,67 +506,94 @@ impl LightningClientModule {
                 .bolt12_registration_by_recipient(claim_pk)
                 .await?
             {
-                let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
-                let existed = dbtx.get_value(&Bolt12OfferKey(index)).await.is_some();
-                if !existed {
-                    dbtx.insert_entry(
-                        &Bolt12OfferKey(index),
-                        &Bolt12OfferRecord {
-                            registration,
-                            claim_pk,
-                            offer: None,
-                        },
-                    )
-                    .await;
-                }
-                let advanced = index + 1 > highest_next;
-                highest_next = highest_next.max(index + 1);
-                dbtx.insert_entry(&Bolt12NextOfferIndexKey, &highest_next)
-                    .await;
-                if !existed || advanced {
-                    // Atomically rewind the receive stream cursor in the same
-                    // transaction so an interruption cannot strand newly
-                    // discovered offers behind an already-advanced cursor.
-                    dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &0u64).await;
-                }
-                dbtx.commit_tx().await;
+                let newly_discovered = loop {
+                    let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
+                    let existed = dbtx.get_value(&Bolt12OfferKey(index)).await.is_some();
+                    if !existed {
+                        dbtx.insert_entry(
+                            &Bolt12OfferKey(index),
+                            &Bolt12OfferRecord {
+                                registration,
+                                claim_pk,
+                                offer: None,
+                            },
+                        )
+                        .await;
+                    }
+                    let current_next = dbtx.get_value(&Bolt12NextOfferIndexKey).await.unwrap_or(0);
+                    let new_next = current_next.max(index.saturating_add(1));
+                    let advanced = new_next > current_next;
+                    if advanced {
+                        dbtx.insert_entry(&Bolt12NextOfferIndexKey, &new_next).await;
+                    }
+                    if !existed || advanced {
+                        // Atomically rewind the receive stream cursor and bump
+                        // the monotonic rewind generation so concurrent
+                        // `receive_bolt12` batches (even starting at cursor 0)
+                        // cannot skip newly discovered offers.
+                        let rewind_gen = dbtx
+                            .get_value(&Bolt12ReceiveStreamRewindGenKey)
+                            .await
+                            .unwrap_or(0);
+                        dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &0u64).await;
+                        dbtx.insert_entry(
+                            &Bolt12ReceiveStreamRewindGenKey,
+                            &rewind_gen.saturating_add(1),
+                        )
+                        .await;
+                    }
+                    if dbtx.commit_tx_result().await.is_ok() {
+                        break !existed;
+                    }
+                };
 
-                if !existed {
+                if newly_discovered {
                     discovered += 1;
                 }
             } else if self.module_api.bolt12_recipient_used(claim_pk).await? {
-                let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
-                let advanced = index + 1 > highest_next;
-                highest_next = highest_next.max(index + 1);
-                dbtx.insert_entry(&Bolt12NextOfferIndexKey, &highest_next)
-                    .await;
-                if advanced {
-                    // A pruned offer may still have unclaimed funded receives
-                    // earlier in the stream; rewind atomically with the index
-                    // bump so the receive loop scans them.
-                    dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &0u64).await;
+                loop {
+                    let mut dbtx = self.client_ctx.module_db().begin_transaction().await;
+                    let current_next = dbtx.get_value(&Bolt12NextOfferIndexKey).await.unwrap_or(0);
+                    let new_next = current_next.max(index.saturating_add(1));
+                    if new_next > current_next {
+                        dbtx.insert_entry(&Bolt12NextOfferIndexKey, &new_next).await;
+                        // A pruned offer may still have unclaimed funded
+                        // receives earlier in the stream; rewind atomically
+                        // with the index bump and generation increment.
+                        let rewind_gen = dbtx
+                            .get_value(&Bolt12ReceiveStreamRewindGenKey)
+                            .await
+                            .unwrap_or(0);
+                        dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &0u64).await;
+                        dbtx.insert_entry(
+                            &Bolt12ReceiveStreamRewindGenKey,
+                            &rewind_gen.saturating_add(1),
+                        )
+                        .await;
+                    }
+                    if dbtx.commit_tx_result().await.is_ok() {
+                        break;
+                    }
                 }
-                dbtx.commit_tx().await;
             }
         }
 
         Ok(discovered)
     }
 
-    /// Claim keys of every offer index in use, plus a gap of unused ones.
-    /// Watching the gap catches receives for offers the federation has since
-    /// pruned, which [`Self::recover_bolt12_offers`] cannot find.
-    async fn bolt12_claim_keys(&self) -> BTreeMap<PublicKey, u64> {
-        let next = self
-            .client_ctx
-            .module_db()
-            .begin_transaction_nc()
-            .await
-            .get_value(&Bolt12NextOfferIndexKey)
+    /// Claim keys of every offer index in use, plus a gap of unused ones,
+    /// together with the offer index and rewind generation snapshot used to
+    /// build them. Watching the gap catches receives for offers the federation
+    /// has since pruned, which [`Self::recover_bolt12_offers`] cannot find.
+    async fn bolt12_claim_keys(&self) -> (BTreeMap<PublicKey, u64>, u64, u64) {
+        let mut dbtx = self.client_ctx.module_db().begin_transaction_nc().await;
+        let next = dbtx.get_value(&Bolt12NextOfferIndexKey).await.unwrap_or(0);
+        let rewind_gen = dbtx
+            .get_value(&Bolt12ReceiveStreamRewindGenKey)
             .await
             .unwrap_or(0);
 
-        (0..next + OFFER_GAP_LIMIT)
+        let keys = (0..next + OFFER_GAP_LIMIT)
             .map(|index| {
                 (
                     OfferSecrets::derive(&self.bolt12_secret, index)
@@ -580,7 +602,9 @@ impl LightningClientModule {
                     index,
                 )
             })
-            .collect()
+            .collect();
+
+        (keys, next, rewind_gen)
     }
 
     /// Process the next batch of the federation's receive stream, claiming
@@ -602,7 +626,7 @@ impl LightningClientModule {
             .await_bolt12_receives(stream_index, 128)
             .await;
 
-        let claim_keys = self.bolt12_claim_keys().await;
+        let (claim_keys, seen_next, seen_rewind_gen) = self.bolt12_claim_keys().await;
         let mut claims = vec![];
 
         for receive in receives {
@@ -632,12 +656,22 @@ impl LightningClientModule {
         }
 
         // Only advance the cursor if no concurrent recovery/rescan rewound it
-        // while we were long-polling `await_bolt12_receives`.
+        // (checked via both cursor value and monotonic rewind generation) and
+        // `Bolt12NextOfferIndexKey` did not advance after `claim_keys` was
+        // snapshotted.
         let current_cursor = dbtx
             .get_value(&Bolt12ReceiveStreamIndexKey)
             .await
             .unwrap_or(0);
-        if current_cursor == stream_index {
+        let current_rewind_gen = dbtx
+            .get_value(&Bolt12ReceiveStreamRewindGenKey)
+            .await
+            .unwrap_or(0);
+        let current_next = dbtx.get_value(&Bolt12NextOfferIndexKey).await.unwrap_or(0);
+        if current_cursor == stream_index
+            && current_rewind_gen == seen_rewind_gen
+            && current_next == seen_next
+        {
             dbtx.insert_entry(&Bolt12ReceiveStreamIndexKey, &next_index)
                 .await;
         }
