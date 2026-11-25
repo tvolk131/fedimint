@@ -53,6 +53,7 @@ use crate::db::{
     Bolt12PoolTranscriptKey, Bolt12PoolTranscriptRunPrefix, Bolt12PoolVerdictKey, LocalRun,
     RelayEvidence, SignedMessage, UnixTimeVotePrefix,
 };
+use crate::metrics::BOLT12_POOL_RUN_DURATION_SECONDS;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -433,6 +434,7 @@ impl Worker {
         *self.outbox_channels.lock().expect("not poisoned") = Some(channels.clone());
 
         // Stop when consensus moves on, so evidence is ready in time.
+        let run_started = fedimint_core::time::now();
         let outcome = tokio::select! {
             result = generate(cfg, me, api, &active, &seed, channels.clone()) => match result {
                 Ok((submission, transport)) => RunOutcome::Completed(submission, transport),
@@ -440,6 +442,18 @@ impl Worker {
             },
             () = run_ends(db, active.run) => RunOutcome::ConsensusEnded,
         };
+        let elapsed_secs = fedimint_core::time::now()
+            .duration_since(run_started)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let outcome_label = match &outcome {
+            RunOutcome::Completed(..) => "completed",
+            RunOutcome::Aborted(..) => "aborted",
+            RunOutcome::ConsensusEnded => "consensus_ended",
+        };
+        BOLT12_POOL_RUN_DURATION_SECONDS
+            .with_label_values(&[outcome_label])
+            .observe(elapsed_secs);
 
         self.finish_run(db, active.run, seed, &channels, outcome)
             .await

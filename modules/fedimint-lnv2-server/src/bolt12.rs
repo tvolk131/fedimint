@@ -36,6 +36,11 @@ use crate::db::{
     Bolt12RegistrationCountKey, Bolt12RegistrationKey, Bolt12ReservationKey, Bolt12StockKey,
     Bolt12StockRegistrationPrefix, Bolt12StreamIndexKey, Bolt12StreamKey,
 };
+use crate::metrics::{BOLT12_POOL_ITEMS, BOLT12_RECEIVES_TOTAL};
+
+fn source_label(source: Source) -> &'static str {
+    if source.is_pool() { "pool" } else { "stock" }
+}
 
 /// What an accepted output moves and costs.
 pub struct OutputEffect {
@@ -449,7 +454,27 @@ async fn process_reserve(
     dbtx.insert_entry(&Bolt12RegistrationKey(reserve.registration), &registration)
         .await;
 
+    observe_reserve_metrics(dbtx, reserve.source).await;
+
     Ok(())
+}
+
+async fn observe_reserve_metrics(dbtx: &mut DatabaseTransaction<'_>, source: Source) {
+    let label = source_label(source);
+    let pool_remaining = if source.is_pool() {
+        Some(pool::pool_len(dbtx).await)
+    } else {
+        None
+    };
+
+    dbtx.on_commit(move || {
+        BOLT12_RECEIVES_TOTAL
+            .with_label_values(&[label, "reserved"])
+            .inc();
+        if let Some(remaining) = pool_remaining {
+            BOLT12_POOL_ITEMS.set(i64::try_from(remaining).unwrap_or(i64::MAX));
+        }
+    });
 }
 
 /// Take the generated preimage at `index` for a reservation, counting it
@@ -587,6 +612,13 @@ async fn process_receive(
     dbtx.insert_entry(&Bolt12DecryptionSharesKey(outpoint), &shares)
         .await;
 
+    let label = source_label(contract.source);
+    dbtx.on_commit(move || {
+        BOLT12_RECEIVES_TOTAL
+            .with_label_values(&[label, "funded"])
+            .inc();
+    });
+
     Ok(contract.amount)
 }
 
@@ -651,6 +683,13 @@ pub async fn process_input(
             }
         }
 
+        let label = source_label(contract.source);
+        dbtx.on_commit(move || {
+            BOLT12_RECEIVES_TOTAL
+                .with_label_values(&[label, "claimed"])
+                .inc();
+        });
+
         return Ok(InputEffect {
             pub_key: contract.claim_pk,
             amount: contract.amount,
@@ -673,6 +712,13 @@ pub async fn process_input(
         dbtx.insert_entry(&Bolt12RegistrationKey(contract.registration), &registration)
             .await;
     }
+
+    let label = source_label(contract.source);
+    dbtx.on_commit(move || {
+        BOLT12_RECEIVES_TOTAL
+            .with_label_values(&[label, "refunded"])
+            .inc();
+    });
 
     Ok(InputEffect {
         pub_key: contract.refund_pk,

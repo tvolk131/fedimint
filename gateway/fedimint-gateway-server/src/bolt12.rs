@@ -31,7 +31,7 @@ use lightning::util::ser::Writeable as _;
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
-use crate::{Gateway, PublicGatewayError, Result};
+use crate::{Gateway, PublicGatewayError, Result, metrics};
 
 /// Invoice requests answered at once. Each one waits on a consensus round
 /// and two signing rounds, so they must overlap; beyond this many the
@@ -133,6 +133,16 @@ impl Gateway {
             }
         };
 
+        for outcome in [
+            "issued",
+            "error",
+            "timeout",
+            "dropped_duplicate",
+            "dropped_busy",
+        ] {
+            let _ = metrics::BOLT12_INVOICE_REQUESTS_TOTAL.with_label_values(&[outcome]);
+        }
+
         let gateway = self.clone();
         let request_tasks = task_group.clone();
 
@@ -144,11 +154,17 @@ impl Gateway {
                 // The first attempt answers over its own reply path, which
                 // reaches the same payer.
                 let Some(claim) = in_progress.claim(&request.invoice_request) else {
+                    metrics::BOLT12_INVOICE_REQUESTS_TOTAL
+                        .with_label_values(&["dropped_duplicate"])
+                        .inc();
                     debug!(target: LOG_GATEWAY, "Dropping a resent BOLT12 invoice request that is still being answered");
                     continue;
                 };
 
                 let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    metrics::BOLT12_INVOICE_REQUESTS_TOTAL
+                        .with_label_values(&["dropped_busy"])
+                        .inc();
                     debug!(target: LOG_GATEWAY, "Dropping a BOLT12 invoice request: too many in progress");
                     continue;
                 };
@@ -163,11 +179,21 @@ impl Gateway {
                     match timeout(REQUEST_TIMEOUT, gateway.answer_bolt12_request(request, lnrpc))
                         .await
                     {
-                        Ok(Ok(())) => {}
+                        Ok(Ok(())) => {
+                            metrics::BOLT12_INVOICE_REQUESTS_TOTAL
+                                .with_label_values(&["issued"])
+                                .inc();
+                        }
                         Ok(Err(err)) => {
+                            metrics::BOLT12_INVOICE_REQUESTS_TOTAL
+                                .with_label_values(&["error"])
+                                .inc();
                             info!(target: LOG_GATEWAY, err = %(&*err).fmt_compact(), "Did not answer a BOLT12 invoice request");
                         }
                         Err(_) => {
+                            metrics::BOLT12_INVOICE_REQUESTS_TOTAL
+                                .with_label_values(&["timeout"])
+                                .inc();
                             info!(target: LOG_GATEWAY, "Timed out answering a BOLT12 invoice request");
                         }
                     }
@@ -378,7 +404,20 @@ impl Gateway {
         lightning_context: &LightningContext,
         client: &fedimint_client::ClientHandleArc,
     ) -> Result<()> {
+        let started = fedimint_core::time::now();
+        let observe = |outcome: &str| {
+            metrics::BOLT12_HTLC_HANDLING_DURATION_SECONDS
+                .with_label_values(&[outcome])
+                .observe(
+                    fedimint_core::time::now()
+                        .duration_since(started)
+                        .unwrap_or_default()
+                        .as_secs_f64(),
+                );
+        };
+
         let Ok(module) = client.get_first_module::<GatewayClientModuleV2>() else {
+            observe("unmatched");
             return Err(PublicGatewayError::Unexpected(anyhow::anyhow!(
                 "Federation client has no LNv2 gateway module"
             )));
@@ -388,6 +427,7 @@ impl Gateway {
             .bolt12_reservation_for_hash(htlc_request.payment_hash)
             .await
         else {
+            observe("unmatched");
             return Err(PublicGatewayError::Unexpected(anyhow::anyhow!(
                 "Not a federated BOLT12 payment"
             )));
@@ -419,6 +459,7 @@ impl Gateway {
             .await
         {
             if !relay_err.htlc_may_be_failed_back() {
+                observe("held");
                 crit!(
                     target: LOG_GATEWAY,
                     err = %relay_err.fmt_compact(),
@@ -428,6 +469,7 @@ impl Gateway {
                 return Ok(());
             }
 
+            observe("cancelled");
             warn!(target: LOG_GATEWAY, err = %relay_err.fmt_compact(), "Failing a federated BOLT12 payment");
 
             let outcome = InterceptPaymentResponse {
@@ -440,6 +482,8 @@ impl Gateway {
             if let Err(err) = self.await_complete_htlc(outcome).await {
                 warn!(target: LOG_GATEWAY, err = %err.fmt_compact(), "Error sending HTLC response to lightning node");
             }
+        } else {
+            observe("funded");
         }
 
         Ok(())

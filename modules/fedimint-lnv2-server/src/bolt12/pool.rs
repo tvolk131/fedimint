@@ -36,6 +36,7 @@ use crate::db::{
     Bolt12PoolStickyCommitteeKey, Bolt12PoolSubmissionKey, Bolt12PoolSubmissionRunPrefix,
     Bolt12PoolVerdictKey, Bolt12PoolVerdictRunPrefix,
 };
+use crate::metrics::{BOLT12_POOL_BLAME_TOTAL, BOLT12_POOL_ITEMS, BOLT12_POOL_RUNS_TOTAL};
 
 /// Upper bound on backtracking steps when picking an undisputed committee so
 /// large federations (`N >= 25`) can never stall consensus CPU.
@@ -522,6 +523,11 @@ async fn finish(
         })
     else {
         dbtx.remove_entry(&Bolt12PoolStickyCommitteeKey).await;
+        dbtx.on_commit(|| {
+            BOLT12_POOL_RUNS_TOTAL
+                .with_label_values(&["no_majority"])
+                .inc();
+        });
         return;
     };
 
@@ -535,6 +541,7 @@ async fn finish(
     let agreeing_peers: BTreeSet<PeerId> = agreeing.iter().map(|(peer, _, _)| *peer).collect();
 
     // Blame any member whose submitted hash list disagreed with the majority.
+    let mut disagreeing_count = 0u64;
     for member in &active.committee {
         if !agreeing_peers.contains(member) {
             let previous = dbtx.get_value(&Bolt12BlameKey(*member)).await;
@@ -543,6 +550,7 @@ async fn finish(
                 &Blame::repeat(previous.as_ref(), next_run),
             )
             .await;
+            disagreeing_count += 1;
         }
     }
 
@@ -605,6 +613,22 @@ async fn finish(
     }
 
     dbtx.insert_entry(&Bolt12PoolNextKey, &next).await;
+    observe_pool_finish(dbtx, disagreeing_count).await;
+}
+
+async fn observe_pool_finish(dbtx: &mut DatabaseTransaction<'_>, disagreeing_count: u64) {
+    let ready = pool_len(dbtx).await;
+    dbtx.on_commit(move || {
+        BOLT12_POOL_ITEMS.set(i64::try_from(ready).unwrap_or(i64::MAX));
+        BOLT12_POOL_RUNS_TOTAL
+            .with_label_values(&["completed"])
+            .inc();
+        if disagreeing_count > 0 {
+            BOLT12_POOL_BLAME_TOTAL
+                .with_label_values(&["disagreeing_submission"])
+                .inc_by(disagreeing_count);
+        }
+    });
 }
 
 /// Delete the run, its submissions and any abort reports.
@@ -665,6 +689,11 @@ pub async fn process_abandon(
     ensure!(is_overdue(&active, now), "the run has not timed out");
 
     abandon_active(dbtx, active, now).await;
+    dbtx.on_commit(|| {
+        BOLT12_POOL_RUNS_TOTAL
+            .with_label_values(&["abandoned_timeout"])
+            .inc();
+    });
 
     Ok(())
 }
@@ -708,6 +737,11 @@ pub async fn process_abort(
 
     if aborts >= active.threshold() {
         abandon_active(dbtx, active, now).await;
+        dbtx.on_commit(|| {
+            BOLT12_POOL_RUNS_TOTAL
+                .with_label_values(&["abandoned_abort"])
+                .inc();
+        });
     }
 
     Ok(())
@@ -835,6 +869,15 @@ pub async fn blame_poisoned_shares(dbtx: &mut DatabaseTransaction<'_>, peers: &[
     {
         dbtx.remove_entry(&Bolt12PoolStickyCommitteeKey).await;
     }
+
+    let count = peers.len() as u64;
+    if count > 0 {
+        dbtx.on_commit(move || {
+            BOLT12_POOL_BLAME_TOTAL
+                .with_label_values(&["poisoned_share"])
+                .inc_by(count);
+        });
+    }
 }
 
 /// Blame every guardian and pair at least `threshold` verdicts name.
@@ -857,6 +900,8 @@ async fn apply_blame(
     }
 
     let next_run = dbtx.get_value(&Bolt12PoolRunCountKey).await.unwrap_or(0);
+    let mut blamed_culprits = 0u64;
+    let mut blamed_disputes = 0u64;
 
     for (culprit, _) in culprits
         .into_iter()
@@ -869,6 +914,7 @@ async fn apply_blame(
             &Blame::repeat(previous.as_ref(), next_run),
         )
         .await;
+        blamed_culprits += 1;
     }
 
     for ((a, b), _) in disputes
@@ -882,6 +928,22 @@ async fn apply_blame(
             &Blame::repeat(previous.as_ref(), next_run),
         )
         .await;
+        blamed_disputes += 1;
+    }
+
+    if blamed_culprits > 0 || blamed_disputes > 0 {
+        dbtx.on_commit(move || {
+            if blamed_culprits > 0 {
+                BOLT12_POOL_BLAME_TOTAL
+                    .with_label_values(&["culprit"])
+                    .inc_by(blamed_culprits);
+            }
+            if blamed_disputes > 0 {
+                BOLT12_POOL_BLAME_TOTAL
+                    .with_label_values(&["dispute"])
+                    .inc_by(blamed_disputes);
+            }
+        });
     }
 }
 
@@ -896,6 +958,9 @@ impl Lightning {
         if self.bolt12_worker.is_none() {
             return vec![];
         }
+
+        let ready = pool_len(dbtx).await;
+        BOLT12_POOL_ITEMS.set(i64::try_from(ready).unwrap_or(i64::MAX));
 
         let now = self.consensus_unix_time(dbtx).await;
         let me = self.our_peer_id;

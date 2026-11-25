@@ -19,13 +19,16 @@ use fedimint_lnv2_common::bolt12::{
 };
 use fedimint_lnv2_common::contracts::IncomingContract;
 #[cfg(feature = "cli")]
-use fedimint_lnv2_common::endpoint_constants::{ADD_GATEWAY_ENDPOINT, REMOVE_GATEWAY_ENDPOINT};
+use fedimint_lnv2_common::endpoint_constants::{
+    ADD_GATEWAY_ENDPOINT, BOLT12_SET_GATEWAY_VOTE_ENDPOINT, REMOVE_GATEWAY_ENDPOINT,
+};
 use fedimint_lnv2_common::endpoint_constants::{
     AWAIT_INCOMING_CONTRACT_ENDPOINT, AWAIT_INCOMING_CONTRACTS_ENDPOINT, AWAIT_PREIMAGE_ENDPOINT,
     BOLT12_AWAIT_RECEIVES_ENDPOINT, BOLT12_CONTRACT_ENDPOINT, BOLT12_DECRYPTION_SHARES_ENDPOINT,
-    BOLT12_GATEWAY_APPROVED_ENDPOINT, BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_RECIPIENT_USED_ENDPOINT,
-    BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT, BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT,
-    BOLT12_RESERVATION_ENDPOINT, CONSENSUS_BLOCK_COUNT_ENDPOINT, GATEWAYS_ENDPOINT,
+    BOLT12_GATEWAY_APPROVED_ENDPOINT, BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_POOL_ITEMS_ENDPOINT,
+    BOLT12_RECIPIENT_USED_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
+    BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT, BOLT12_RESERVATION_ENDPOINT,
+    CONSENSUS_BLOCK_COUNT_ENDPOINT, GATEWAYS_ENDPOINT,
 };
 use rand::seq::SliceRandom;
 use tpe::{DecryptionKeyShare, PublicKeyShare};
@@ -82,6 +85,10 @@ pub trait LightningFederationApi {
 
     async fn bolt12_gateway_approved(&self, gateway: PublicKey) -> FederationResult<bool>;
 
+    /// Ready federation-generated preimage hashes in the pool starting at
+    /// `min_index` (up to 32 entries per page).
+    async fn bolt12_pool_items(&self, min_index: u64) -> FederationResult<Vec<(u64, [u8; 32])>>;
+
     /// A threshold of guardians' decryption shares for a funded receive,
     /// each set verified against the contract. Retries until it has them.
     async fn bolt12_decryption_shares(
@@ -98,6 +105,14 @@ pub trait LightningFederationApi {
 
     #[cfg(feature = "cli")]
     async fn remove_gateway(&self, auth: ApiAuth, gateway: SafeUrl) -> FederationResult<bool>;
+
+    #[cfg(feature = "cli")]
+    async fn bolt12_set_gateway_vote(
+        &self,
+        auth: ApiAuth,
+        gateway: PublicKey,
+        approve: bool,
+    ) -> FederationResult<()>;
 }
 
 #[apply(async_trait_maybe_send!)]
@@ -220,6 +235,14 @@ where
         .await
     }
 
+    async fn bolt12_pool_items(&self, min_index: u64) -> FederationResult<Vec<(u64, [u8; 32])>> {
+        self.request_current_consensus(
+            BOLT12_POOL_ITEMS_ENDPOINT.to_string(),
+            ApiRequestErased::new(min_index),
+        )
+        .await
+    }
+
     async fn bolt12_decryption_shares(
         &self,
         outpoint: OutPoint,
@@ -324,5 +347,20 @@ where
             .await?;
 
         Ok(entry_existed)
+    }
+
+    #[cfg(feature = "cli")]
+    async fn bolt12_set_gateway_vote(
+        &self,
+        auth: ApiAuth,
+        gateway: PublicKey,
+        approve: bool,
+    ) -> FederationResult<()> {
+        self.request_admin(
+            BOLT12_SET_GATEWAY_VOTE_ENDPOINT,
+            ApiRequestErased::new((gateway, approve)),
+            auth,
+        )
+        .await
     }
 }

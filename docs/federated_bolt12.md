@@ -1,7 +1,7 @@
 # Federated BOLT12 offline receives
 
-Status: experimental design for the `federated-bolt12` branch. Not reviewed by a
-cryptographer. Not for real funds.
+Status: experimental proof-of-concept on the `federated-bolt12` branch. Not
+reviewed by a cryptographer. Not for real funds.
 
 A wallet registers a reusable BOLT12 offer with the federation and goes offline.
 Payers request invoices over onion messages; a gateway relays the request, the
@@ -10,8 +10,9 @@ funds a claim for the recipient once it holds the Lightning payment. The
 recipient claims later with its mnemonic-derived key. A gateway is trusted for
 availability only.
 
-This document specifies recipient-supplied stock and the pool of preimages the
-guardians generate by MPC.
+This document specifies recipient-supplied stock, the MPC-generated preimage
+pool, operator CLI commands, Prometheus metrics, and a local Mutinynet PoC
+runbook.
 
 ## Trust and parameters
 
@@ -21,6 +22,11 @@ guardians generate by MPC.
   threshold encryption key (`tpe`).
 - Enabled only when configuration is generated with
   `FM_ENABLE_FEDERATED_BOLT12=1`. Existing federations cannot enable it.
+- Pool parameters default to `DEFAULT_POOL_TARGET = 32` and
+  `DEFAULT_POOL_BATCH = 8`, and may be overridden at DKG time via
+  `FM_BOLT12_POOL_TARGET` (in `0..=256`) and `FM_BOLT12_POOL_BATCH` (in
+  `1..=32`). Guardians explicitly agree on `(public_package, pool_target,
+  pool_batch)` during DKG.
 - Only gateways approved by a guardian quorum may reserve invoices.
 
 ## Preimage sources
@@ -30,13 +36,13 @@ A payment hash that has appeared in a reservation is never issued again: the
 holder of the first invoice would gain a forged proof of payment, and a late
 payment could expose the preimage of a live invoice.
 
-1. **Stock** (this milestone). The recipient uploads pairs it generated itself:
+1. **Stock.** The recipient uploads pairs it generated itself:
    `ciphertext = tpe::encrypt(agg_pk, seed, preimage, binding)` with
    `binding = H("fedimint/bolt12/stock/v1", registration, index, payment_hash)`.
    Guardians cannot check that the ciphertext holds the right preimage, so a
    funded receive keeps LNv2's refund path: if the decrypted value does not hash
    to the payment hash, the gateway reclaims its funding.
-2. **Pool**. Committees of guardians jointly generate payment hashes whose
+2. **Pool.** Committees of guardians jointly generate payment hashes whose
    preimage nobody knows; see Generation. A registration opts in with
    `allow_pool`, and a reservation may use the pool only once the
    registration's stock is exhausted. The recipient pays `pool_fee` on top of
@@ -77,7 +83,7 @@ All state is in indexed tables; nothing is stored as one aggregate value.
 Registration {
     policy: ReceivePolicy,
     stock_len: u64,        // number of stock items ever uploaded
-    stock_next: u64,       // all indices below this are used
+    stock_unused: u64,     // stock items not yet consumed by a reservation
     voided: bool,          // set when a stock item decrypted to a wrong preimage
 }
 ReceivePolicy {
@@ -92,7 +98,7 @@ StockItem { payment_hash: [u8; 32], ciphertext: CipherText }
 Source = Stock { index } | Pool { index }
 Sealed =
     Preimage(CipherText)   // stock: the recipient's preimage
-  | Shares { run, threshold, shares: Vec<{ position, ciphertext }> }
+  | Shares { run, threshold, shares: Vec<{ position, peer, ciphertext }> }
 PoolItem { payment_hash, sealed: Sealed::Shares }
 PoolRun { run, committee: Vec<PeerId>, batch, started_at }
 Reservation {
@@ -106,7 +112,6 @@ Reservation {
     gateway_fee: Amount,
     terms: sha256,         // H(invoice request bytes, payment path bytes)
     created_at: u64,
-    funded: Option<OutPoint>,
 }
 ReceiveContract {
     reservation: ReservationId,
@@ -159,11 +164,15 @@ Outputs (`LightningOutputV0`):
 Input (`LightningInputV0`):
 
 - `Bolt12Receive(outpoint, Bolt12Unlock)`. `Bolt12Unlock` is `Stock(key)` or
-  `Pool(keys)`, matching the contract's source, with one aggregate decryption
-  key per ciphertext; each must verify against its ciphertext and binding. If
-  the decrypted stock value, or the preimage reconstructed from the decrypted
-  shares, hashes to the payment hash, the input is spendable by `claim_pk`;
-  otherwise by `refund_pk`, and a stock registration is voided. A `Pool` input
+  `Pool { keys, subset }`, matching the contract's source, with one aggregate
+  decryption key per ciphertext; each must verify against its ciphertext and
+  binding. For `Pool`, an optional `threshold`-sized `subset` of committee
+  positions lets consensus verify the preimage in `O(t^2)` without subset
+  search. If the decrypted stock value, or the preimage reconstructed from the
+  decrypted shares, hashes to the payment hash, the input is spendable by
+  `claim_pk`; otherwise by `refund_pk`, and a stock registration is voided. If
+  exactly one pool share disagrees with the reconstructed polynomial, that peer
+  is blamed (unique disagreement is sound for any `f >= 1`). A `Pool` input
   costs `pool_fee` on top of the ordinary fee, on the claim and on the refund
   alike, so a client can price it without reading the contract.
 
@@ -189,9 +198,9 @@ instead.
   `MAX_PENDING_PER_GATEWAY` (64) per gateway. Each list is a bounded vector of
   `(expires_at, ReservationId)`; expired entries are dropped, and their
   reservations deleted, whenever the list is next touched.
-- At most `MAX_PENDING_POOL` (32) pending reservations use the pool at once,
-  across all offers, so unpaid requests cannot drain it faster than runs
-  refill it.
+- At most `MAX_PENDING_POOL` (32) pending reservations use the pool at once
+  across all offers, and at most `MAX_PENDING_POOL_PER_OFFER` (4) per single
+  offer, so unpaid requests cannot drain the pool faster than runs refill it.
 - Paid receives leave the lists immediately, so only unpaid requests consume
   allowance.
 - Guardians can withdraw their vote for a gateway that abuses its allowance.
@@ -367,11 +376,16 @@ consensus only releases decryption shares once a receive is funded.
   routing prefix to the gateway instead of answering them itself. The gateway
   answers up to 16 at once, each within 60 seconds, and drops the rest; payers
   retry. Requests share the gateway's invoice rate limit.
-- A held payment is matched against every connected federation's issued
-  BOLT12 invoices by payment hash, after LNv2 and before LNv1. A payment whose
+- A held payment is matched authoritatively via `PaymentHashOwner` in
+  `gateway_db` (covering both BOLT11 and BOLT12 across all connected
+  federations) before falling back to legacy reservations. A BOLT12 payment
+  whose owning federation is temporarily unloaded is left held rather than
+  cancelled (avoiding cancelling an already-funded receive), while an
+  intercepted forward for an unloaded federation is cancelled. A payment whose
   amount differs from the invoice is failed back unfunded. The gateway never
-  issues invoices with one payment hash for two federations, so a federation
-  cannot copy another's published hash to capture its payments.
+  issues invoices with one payment hash for two federations or across BOLT11
+  and BOLT12, so a federation cannot copy another's published hash to capture
+  its payments.
 - Identical invoice requests are issued one at a time; a repeat waits for the
   first and returns its invoice rather than reserving a second hash.
 - Payment paths ask payers for a 144-block final CLTV delta. A blinded path's
@@ -408,6 +422,79 @@ other or to its LNURL key through federation state. Receives for one offer are
 publicly linkable to that offer, including their amounts. Hiding that conflicts
 with guardians verifying that funds go to the registered recipient and is out of
 scope.
+
+## CLI
+
+All federated BOLT12 commands live under `fedimint-cli module lnv2 bolt12`:
+
+- `status` — show whether federated BOLT12 is enabled, its FROST `signing_key`,
+  fees, `pool_target`/`pool_batch`, and live `pool_available` count.
+- `gateways [--gateway <url>]... [--include-unapproved]` — query gateways'
+  `/bolt12_ingress` metadata, verify signatures, and display their reservation
+  `gateway_key`, receive fee, and quorum approval status.
+- `create-offer [--description <text>] [--stock <n>] [--expiry-secs <n>] [--allow-pool] [--gateway <url>]... [--max-gateway-fee <base>,<ppm>]` —
+  register a reusable BOLT12 offer and upload initial stock.
+- `list-offers` — list this wallet's offers together with live federation stock
+  counts (`stock_len`, `stock_unused`, `voided`, `expires_at`).
+- `add-stock <offer-index> <count>` — top up single-use preimages for an offer.
+- `rescan-offers [--max-index <n>]` — extended seed-recovery probe across offer
+  indices `0..max_index` (rewinds the receive stream cursor on discovery).
+- `approve-gateway <gateway-key>` / `revoke-gateway <gateway-key>` — guardian
+  admin commands (pass `--our-id <peer> --password <api-password>`) to cast or
+  withdraw a `Bolt12GatewayVote`.
+- `gateway-approved <gateway-key>` — check whether a gateway key currently has
+  quorum approval.
+
+## Metrics
+
+Guardian Prometheus metrics (`fedimintd --bind-metrics`, prefixed with `fm_`):
+
+- `fm_lnv2_bolt12_pool_items` (gauge) — ready MPC-generated preimages in pool.
+- `fm_lnv2_bolt12_pool_runs_total{outcome}` (counter) — completed,
+  `abandoned_timeout`, `abandoned_abort`, and `no_majority` runs.
+- `fm_lnv2_bolt12_pool_run_duration_seconds{outcome}` (histogram) — local
+  wall-clock MPC run duration (`completed`, `aborted`, `consensus_ended`).
+- `fm_lnv2_bolt12_pool_blame_total{kind}` (counter) — `culprit`, `dispute`,
+  `disagreeing_submission`, and `poisoned_share` blame events.
+- `fm_lnv2_bolt12_receives_total{source,outcome}` (counter) — `stock`/`pool`
+  receives across `reserved`, `funded`, `claimed`, and `refunded`.
+
+Gateway Prometheus metrics (`gatewayd --metrics-listen`, prefixed with `fm_`):
+
+- `fm_gateway_bolt12_invoice_requests_total{outcome}` (counter) — `issued`,
+  `error`, `timeout`, `dropped_duplicate`, and `dropped_busy`.
+- `fm_gateway_bolt12_htlc_handling_duration_seconds{outcome}` (histogram) —
+  `funded`, `held`, `cancelled`, and `unmatched`.
+
+## Local Mutinynet PoC runbook
+
+`scripts/dev/mutinynet-bolt12.sh` boots a local 4-guardian federation and LDK
+gateway against Mutinynet (`https://mutinynet.com/api`, no local `bitcoind`
+required), completes DKG, connects and quorum-approves the gateway, joins a
+local `fedimint-cli` user wallet, and verifies live MPC pool replenishment and
+Prometheus metrics:
+
+```bash
+# Build required binaries (once)
+cargo build --bin fedimintd --bin fedimint-cli --bin gatewayd --bin gateway-cli
+
+# Start the 4-guardian Mutinynet federation + LDK gateway
+./scripts/dev/mutinynet-bolt12.sh start
+
+# Inspect live status, gateway balances, and BOLT12 Prometheus metrics
+./scripts/dev/mutinynet-bolt12.sh status
+
+# Stop processes (or `clean` to remove /tmp/fm-bolt12-mutinynet)
+./scripts/dev/mutinynet-bolt12.sh stop
+```
+
+Once started, fund the gateway's LDK on-chain address from
+`https://faucet.mutinynet.com`, open a channel with inbound liquidity on
+Mutinynet, peg in a small amount of ecash to cover the 100-sat offer
+registration + stock fees, create an offer with
+`fedimint-cli module lnv2 bolt12 create-offer --allow-pool`, and pay the
+returned `lno1...` offer from an independent Mutinynet BOLT12 payer (such as
+Core Lightning).
 
 ## Deferred
 
