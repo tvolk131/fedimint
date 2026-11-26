@@ -211,11 +211,14 @@ bootstrap_client_and_gateway() {
         "$FEDIMINT_CLI" --data-dir "$client_dir" join "$invite_code" >/dev/null
     fi
 
-    local fed_count
-    fed_count="$("$GATEWAY_CLI" -a "$GATEWAY_URL" --rpcpassword "$GATEWAY_PASSWORD" info \
-        | python3 -c 'import json, sys; print(len(json.load(sys.stdin).get("federations", [])))')"
-    if [[ "$fed_count" == "0" ]]; then
-        echo "Connecting LDK gateway to federation..."
+    local fed_id
+    fed_id="$("$FEDIMINT_CLI" --data-dir "$client_dir" dev decode invite-code "$invite_code" \
+        | python3 -c 'import json, sys; print(json.load(sys.stdin)["federation_id"])')"
+    local connected
+    connected="$("$GATEWAY_CLI" -a "$GATEWAY_URL" --rpcpassword "$GATEWAY_PASSWORD" info \
+        | python3 -c "import json, sys; feds = json.load(sys.stdin).get('federations', []); print(1 if any(f.get('federation_id') == '$fed_id' for f in feds) else 0)")"
+    if [[ "$connected" == "0" ]]; then
+        echo "Connecting LDK gateway to federation ($fed_id)..."
         "$GATEWAY_CLI" -a "$GATEWAY_URL" --rpcpassword "$GATEWAY_PASSWORD" connect-fed "$invite_code" >/dev/null
     fi
 
