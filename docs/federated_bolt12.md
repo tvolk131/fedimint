@@ -264,7 +264,7 @@ time.
   an undisputed, unblamed committee using lowest-dispute-degree ordering with
   bounded backtracking so large federations (`N >= 25`) never stall consensus
   CPU. A member's position in the committee is its party index in the MPC.
-- **MPC** (`fedimint-mpc`). Degree-`f` Shamir sharing over `GF(2^8)` among the
+- **MPC** ([`fedimint-mpc`](https://github.com/tvolk131/fedimint-mpc)). Degree-`f` Shamir sharing over `GF(2^8)` among the
   committee (pool generation capped at `MAX_POOL_DEGREE = 7`, `N <= 24`, so
   worst-case `2f + 1` refund subset search stays within `C(15, 8) = 6,435`
   trials), evaluating a pure-Rust low-depth SHA-256 circuit (CSA + Sklansky +
@@ -274,7 +274,7 @@ time.
   egress and CPU per gate); all `M` multiplications and input bit-checks are
   verified together via a 4-way recursive BBCGI19 inner-product proof over
   `GF((2^8)^16)` with composed Schwartz–Zippel soundness error at most
-  `(M + 6k + 2) / 2^128` (~110-bit at `batch = 4`, ~103-bit at
+  `(M + 10k + 2) / 2^128` (~110-bit at `batch = 4`, ~103-bit at
   `MAX_TRIPLES = 30_000_000`) before any public output or share is opened.
   Malicious members can make a run abort but cannot change its output or learn
   `r`.

@@ -4,7 +4,6 @@ members = [
     "crypto/aead",
     "crypto/derive-secret",
     "crypto/hkdf",
-    "crypto/mpc",
     "crypto/tbs",
     "crypto/tpe",
     "devimint",
@@ -286,7 +285,7 @@ lru = "0.16.3"
 macro_rules_attribute = "0.2.2"
 maud = "0.27.0"
 miniscript = "12.3.4"
-mpc = { package = "fedimint-mpc", path = "./crypto/mpc", version = "=0.13.0" }
+mpc = { package = "fedimint-mpc", git = "https://github.com/tvolk131/fedimint-mpc", rev = "d749af205ac05493e30efedcbeccd2469bf089a0" }
 n0-future = "0.1.3"
 nix = "0.29.0"
 opentelemetry = "0.28.0"

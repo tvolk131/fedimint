@@ -4605,10 +4605,10 @@ dependencies = [
 
 [[package]]
 name = "fedimint-mpc"
-version = "0.13.0"
+version = "0.1.0"
+source = "git+https://github.com/tvolk131/fedimint-mpc?rev=d749af205ac05493e30efedcbeccd2469bf089a0#d749af205ac05493e30efedcbeccd2469bf089a0"
 dependencies = [
  "anyhow",
- "fedimint-core",
  "gf256",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
