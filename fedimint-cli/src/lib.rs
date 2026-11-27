@@ -839,6 +839,7 @@ impl FedimintCli {
             .with_module(WalletClientInit::default())
             .with_module(MetaClientInit)
             .with_module(fedimint_lnv2_client::LightningClientInit::default())
+            .with_module(fedimint_bolt12_client::Bolt12ClientInit::default())
             .with_module(fedimint_walletv2_client::WalletClientInit)
     }
 

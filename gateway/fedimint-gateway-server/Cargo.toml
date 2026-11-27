@@ -27,6 +27,14 @@ path = "src/lib.rs"
 name = "gatewayd-tests"
 path = "tests/tests.rs"
 
+[[test]]
+name = "gatewayd-bolt12-tests"
+path = "tests/bolt12.rs"
+
+[[test]]
+name = "gatewayd-live-bolt12-tests"
+path = "tests/live_bolt12.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 aquamarine = { workspace = true }
@@ -42,6 +50,7 @@ esplora-client = { workspace = true }
 fedimint-api-client = { workspace = true }
 fedimint-bip39 = { workspace = true }
 fedimint-bitcoind = { workspace = true, features = ["bitcoincore"] }
+fedimint-bolt12-common = { workspace = true }
 fedimint-client = { workspace = true }
 fedimint-client-module = { workspace = true }
 fedimint-connectors = { workspace = true }
@@ -52,6 +61,7 @@ fedimint-eventlog = { workspace = true }
 fedimint-gateway-common = { workspace = true }
 fedimint-gateway-server-db = { workspace = true }
 fedimint-gateway-ui = { workspace = true }
+fedimint-gw-bolt12-client = { workspace = true }
 fedimint-gw-client = { workspace = true }
 fedimint-gwv2-client = { workspace = true }
 fedimint-lightning = { workspace = true }
@@ -77,6 +87,7 @@ iroh-base = { workspace = true, default-features = false, features = [
     "ticket",
 ] }
 iroh-relay = { workspace = true, default-features = false }
+lightning = { workspace = true }
 lightning-invoice = { workspace = true }
 lockable = { workspace = true }
 prost = { workspace = true }
@@ -100,6 +111,9 @@ tikv-jemallocator = { workspace = true }
 
 [dev-dependencies]
 assert_matches = { workspace = true }
+bitcoincore-rpc = { workspace = true }
+fedimint-bolt12-client = { workspace = true }
+fedimint-bolt12-server = { workspace = true }
 fedimint-dummy-client = { workspace = true }
 fedimint-dummy-common = { workspace = true }
 fedimint-dummy-server = { workspace = true }
@@ -110,6 +124,7 @@ fedimint-testing-core = { workspace = true }
 fedimint-unknown-common = { workspace = true }
 fedimint-unknown-server = { workspace = true }
 itertools = { workspace = true }
+ldk-node = { workspace = true }
 tempfile = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 tpe = { workspace = true }

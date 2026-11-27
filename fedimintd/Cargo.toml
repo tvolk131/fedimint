@@ -28,6 +28,7 @@ path = "src/lib.rs"
 anyhow = { workspace = true }
 bitcoin = { workspace = true }
 clap = { workspace = true }
+fedimint-bolt12-server = { workspace = true }
 fedimint-core = { workspace = true }
 fedimint-ln-common = { workspace = true }
 fedimint-ln-server = { workspace = true }

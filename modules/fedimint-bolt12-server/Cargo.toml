@@ -1,0 +1,44 @@
+[package]
+authors = { workspace = true }
+description = "fedimint-bolt12-server is a Fedimint server module for federated BOLT12 offline receives."
+edition = { workspace = true }
+license = { workspace = true }
+name = "fedimint-bolt12-server"
+version = { workspace = true }
+
+[lib]
+name = "fedimint_bolt12_server"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+bls12_381 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+erased-serde = { workspace = true }
+fedimint-api-client = { workspace = true }
+fedimint-bolt12-common = { workspace = true }
+fedimint-core = { workspace = true }
+fedimint-logging = { workspace = true }
+fedimint-metrics = { workspace = true }
+fedimint-server-core = { workspace = true }
+frost-secp256k1-tr = { workspace = true }
+futures = { workspace = true }
+group = { workspace = true }
+mpc = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+strum = { workspace = true }
+strum_macros = { workspace = true }
+tokio = { workspace = true }
+tpe = { workspace = true }
+tracing = { workspace = true }
+zeroize = "1"
+
+[dev-dependencies]
+fedimint-connectors = { workspace = true }
+lightning = { workspace = true }
+
+[lints]
+workspace = true

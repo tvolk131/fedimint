@@ -107,3 +107,53 @@ fn test_roundtrip_single_guardian() {
     assert!(verify_agg_dk(&dealer_agg_pk(), &agg_dk, &ct, &commitment));
     assert_eq!(preimage, decrypt_preimage(&ct, &agg_dk));
 }
+
+#[test]
+fn test_verify_non_identity_ciphertext() {
+    use bls12_381::{G1Affine, G2Affine};
+
+    use crate::{
+        CipherText, EphemeralPublicKey, EphemeralSignature, verify_non_identity_ciphertext,
+    };
+
+    let encryption_seed = [9_u8; 32];
+    let preimage = [7_u8; 32];
+    let commitment = sha256::Hash::hash(b"non-identity");
+    let valid = encrypt_preimage(&dealer_agg_pk(), &encryption_seed, &preimage, &commitment);
+    assert!(verify_non_identity_ciphertext(&valid, &commitment));
+
+    let identity_ct = CipherText {
+        pk: EphemeralPublicKey(G1Affine::identity()),
+        encrypted_preimage: [0u8; 32],
+        signature: EphemeralSignature(G2Affine::identity()),
+    };
+    assert!(verify_ciphertext(&identity_ct, &commitment));
+    assert!(!verify_non_identity_ciphertext(&identity_ct, &commitment));
+}
+
+#[test]
+fn test_verify_dk_returns_false_on_malformed_non_identity_ciphertext() {
+    let encryption_seed = [11_u8; 32];
+    let preimage = [13_u8; 32];
+    let commitment = sha256::Hash::hash(b"tpe-malformed-ct");
+    let mut bad_ct = encrypt_preimage(&dealer_agg_pk(), &encryption_seed, &preimage, &commitment);
+    // Flip a byte in the encrypted preimage so `ct` remains non-identity but
+    // fails the ciphertext pairing equation.
+    bad_ct.encrypted_preimage[0] ^= 0xff;
+
+    let agg_dk = derive_agg_dk(&dealer_agg_pk(), &encryption_seed);
+    let dks = create_dk_share(&dealer_sk(3, 0), &bad_ct);
+
+    assert!(!verify_agg_dk(
+        &dealer_agg_pk(),
+        &agg_dk,
+        &bad_ct,
+        &commitment
+    ));
+    assert!(!verify_dk_share(
+        &dealer_pk(3, 0),
+        &dks,
+        &bad_ct,
+        &commitment
+    ));
+}

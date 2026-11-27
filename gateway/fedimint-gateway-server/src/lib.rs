@@ -14,6 +14,7 @@
 #![allow(clippy::large_futures)]
 #![allow(clippy::struct_field_names)]
 
+mod bolt12;
 pub mod client;
 pub mod config;
 pub mod envs;
@@ -981,13 +982,16 @@ impl Gateway {
 
                     let mut dbtx = self_copy.gateway_db.begin_transaction().await;
                     let num_pruned = dbtx.prune_registered_incoming_contracts(cutoff_secs).await;
+                    let num_owners_pruned =
+                        dbtx.prune_expired_payment_hash_owners(cutoff_secs).await;
                     match dbtx.commit_tx_result().await {
                         Ok(()) => {
-                            if num_pruned > 0 {
+                            if num_pruned > 0 || num_owners_pruned > 0 {
                                 info!(
                                     target: LOG_GATEWAY,
                                     num_pruned,
-                                    "Pruned expired incoming contract records"
+                                    num_owners_pruned,
+                                    "Pruned expired incoming contract and payment hash records"
                                 );
                             }
                         }
@@ -1155,14 +1159,21 @@ impl Gateway {
         } else {
             self.set_gateway_state(GatewayState::Syncing).await;
             info!(target: LOG_GATEWAY, "Waiting for chain sync");
-            if let Err(err) = ln_client.wait_for_chain_sync().await {
+            // The node may take long to catch up with the chain, so stop
+            // waiting when the gateway shuts down.
+            let synced = tokio::select! {
+                synced = ln_client.wait_for_chain_sync() => synced,
+                () = handle.make_shutdown_rx() => return ReceivePaymentStreamAction::NoRetry,
+            };
+            if let Err(err) = synced {
                 warn!(target: LOG_GATEWAY, err = %err.fmt_compact(), "Failed to wait for chain sync");
                 return ReceivePaymentStreamAction::RetryAfterDelay;
             }
         }
 
+        let lnrpc = LnRpcTracked::new(ln_client, "gateway");
         let lightning_context = LightningContext {
-            lnrpc: LnRpcTracked::new(ln_client, "gateway"),
+            lnrpc: lnrpc.clone(),
             lightning_public_key,
             lightning_alias,
             lightning_network,
@@ -1192,6 +1203,7 @@ impl Gateway {
         // Runs until the connection to the lightning node breaks or we receive the
         // shutdown signal.
         let htlc_task_group = self.task_group.make_subgroup();
+        self.spawn_bolt12_request_handler(&htlc_task_group, lnrpc);
         if handle
             .cancel_on_shutdown(async move {
                 loop {
@@ -1315,9 +1327,87 @@ impl Gateway {
             None
         };
 
+        let owner = self
+            .gateway_db
+            .begin_transaction_nc()
+            .await
+            .load_payment_hash_owner(payment_request.payment_hash)
+            .await;
+
+        // When a durable owner exists in `gateway_db`, it is authoritative: a
+        // BOLT12-owned hash is never routed to BOLT11/LNv1 or another
+        // federation, and a BOLT11-owned hash is never routed to BOLT12/LNv1
+        // or forwarded. Resolve the owning client handle ONCE so concurrent
+        // federation removal cannot race between a pre-check and dispatch.
+        // If the owning federation is currently not loaded (e.g. failed to
+        // start), leave held payments (`incoming_circuit().is_none()`) held
+        // rather than cancelling a possibly funded contract, while cancelling
+        // intercepted forwards (which can never fund a fresh contract).
+        let owner_client = if let Some(owner) = &owner {
+            if let Some(client) = self
+                .federation_manager
+                .read()
+                .await
+                .client(&owner.federation_id)
+                .cloned()
+            {
+                Some((owner.federation_id, client.into_value()))
+            } else {
+                if payment_request.incoming_circuit().is_none() {
+                    warn!(
+                        target: LOG_GATEWAY,
+                        payment_hash = %payment_request.payment_hash,
+                        federation_id = %owner.federation_id,
+                        protocol = ?owner.protocol,
+                        "Owning federation for held payment is not loaded; leaving HTLC held",
+                    );
+                    return "ignore";
+                }
+                warn!(
+                    target: LOG_GATEWAY,
+                    payment_hash = %payment_request.payment_hash,
+                    federation_id = %owner.federation_id,
+                    protocol = ?owner.protocol,
+                    "Owning federation for forwarded HTLC is not loaded: cancelling HTLC",
+                );
+                Self::cancel_unmatched_lightning_payment(payment_request, lightning_context).await;
+                return "cancel";
+            }
+        } else {
+            None
+        };
+
+        if let Some(owner) = &owner
+            && owner.protocol == fedimint_gateway_server_db::PaymentHashProtocol::Bolt12
+        {
+            let (_, client) = owner_client
+                .as_ref()
+                .expect("owner_client resolved above for Some(owner)");
+            if self
+                .try_handle_lightning_payment_bolt12_for_client(
+                    &payment_request,
+                    lightning_context,
+                    client,
+                )
+                .await
+                .is_ok()
+            {
+                return "bolt12";
+            }
+
+            warn!(
+                target: LOG_GATEWAY,
+                payment_hash = %payment_request.payment_hash,
+                federation_id = %owner.federation_id,
+                "BOLT12 payment hash owner did not match a local reservation: cancelling HTLC",
+            );
+            Self::cancel_unmatched_lightning_payment(payment_request, lightning_context).await;
+            return "cancel";
+        }
+
         let lnv2_start = fedimint_core::time::now();
         let lnv2_result = self
-            .try_handle_lightning_payment_lnv2(&payment_request, lightning_context)
+            .try_handle_lightning_payment_lnv2(&payment_request, lightning_context, owner_client)
             .await;
         let lnv2_outcome = if lnv2_result.is_ok() {
             "success"
@@ -1351,6 +1441,34 @@ impl Gateway {
                 "Ignoring payment for a registered LNv2 contract whose amount does not match",
             );
             return "ignore";
+        }
+
+        // If a durable BOLT11 owner exists, terminate authoritatively without
+        // falling through to BOLT12, LNv1, or route-through forwarding.
+        if let Some(owner) = &owner {
+            let err_str = lnv2_result
+                .as_ref()
+                .err()
+                .map_or_default(|e| e.fmt_compact().to_string());
+            warn!(
+                target: LOG_GATEWAY,
+                payment_hash = %payment_request.payment_hash,
+                federation_id = %owner.federation_id,
+                err = %err_str,
+                "BOLT11 payment hash owner failed LNv2 handling: cancelling HTLC",
+            );
+            Self::cancel_unmatched_lightning_payment(payment_request, lightning_context).await;
+            return "cancel";
+        }
+
+        // Pre-upgrade legacy BOLT12 fallback: only attempted when no durable
+        // `PaymentHashOwner` record exists at all.
+        if self
+            .try_handle_lightning_payment_bolt12(&payment_request, lightning_context, None)
+            .await
+            .is_ok()
+        {
+            return "bolt12";
         }
 
         let lnv1_start = fedimint_core::time::now();
@@ -1434,6 +1552,7 @@ impl Gateway {
         &self,
         htlc_request: &InterceptPaymentRequest,
         lightning_context: &LightningContext,
+        preloaded_client: Option<(FederationId, ClientHandleArc)>,
     ) -> Result<()> {
         // If `payment_hash` has been registered as a LNv2 payment, we try to complete
         // the payment by getting the preimage from the federation
@@ -1444,10 +1563,11 @@ impl Gateway {
         // HTLC, not the sender-controlled onion forward amount, so a forged
         // `amt_to_forward` cannot satisfy the registered contract's amount
         // check while only a token amount is really locked.
-        let (contract, client) = self
-            .get_registered_incoming_contract_and_client_v2(
+        let (contract, client, federation_id, receive_enabled) = self
+            .get_registered_incoming_contract_and_client_for_htlc_v2(
                 PaymentImage::Hash(htlc_request.payment_hash),
                 htlc_request.incoming_amount_msat,
+                preloaded_client,
             )
             .await?;
 
@@ -1462,6 +1582,18 @@ impl Gateway {
         let blocks_to_claim_deadline =
             htlc_request.lnv2_blocks_to_claim_deadline(current_block_height);
 
+        if !receive_enabled {
+            return Err(PublicGatewayError::ReceiveDisabled {
+                federation_id_prefix: federation_id.to_prefix(),
+            });
+        }
+
+        // No other relay of this circuit may fund the contract between this
+        // relay and failing the HTLC back below. Only a held payment can fund
+        // a fresh contract, as a forward has no blocks left to its claim
+        // deadline, and `handle_lightning_payment` handles one delivery of a
+        // held payment at a time, so the next delivery is relayed only once
+        // this one has returned, including any fail-back.
         if let Err(err) = client
             .get_first_module::<GatewayClientModuleV2>()
             .expect("Must have client module")
@@ -1488,7 +1620,9 @@ impl Gateway {
                 htlc_id: htlc_request.htlc_id,
             };
 
-            if let Err(err) = lightning_context.lnrpc.complete_htlc(outcome).await {
+            // Retried while the Lightning node fails transiently, as the HTLC
+            // otherwise stays held until its expiry.
+            if let Err(err) = self.await_complete_htlc(outcome).await {
                 warn!(target: LOG_GATEWAY, err = %err.fmt_compact(), "Error sending HTLC response to lightning node");
             }
         }
@@ -2210,8 +2344,8 @@ impl Gateway {
         }
     }
 
-    /// Verifies that the federation has at least one lightning module (LNv1 or
-    /// LNv2) and that the network matches the gateway's network.
+    /// Verifies that the federation has at least one lightning module (LNv1,
+    /// LNv2, or BOLT12) and that the network matches the gateway's network.
     async fn check_federation_network(
         client: &ClientHandleArc,
         network: Network,
@@ -2229,10 +2363,15 @@ impl Gateway {
             .values()
             .find(|m| fedimint_lnv2_common::LightningCommonInit::KIND == m.kind);
 
+        let bolt12_cfg = config
+            .modules
+            .values()
+            .find(|m| fedimint_bolt12_common::Bolt12CommonInit::KIND == m.kind);
+
         // Ensure the federation has at least one lightning module
-        if lnv1_cfg.is_none() && lnv2_cfg.is_none() {
+        if lnv1_cfg.is_none() && lnv2_cfg.is_none() && bolt12_cfg.is_none() {
             return Err(AdminGatewayError::ClientCreationError(anyhow!(
-                "Federation {federation_id} does not have any lightning module (LNv1 or LNv2)"
+                "Federation {federation_id} does not have any lightning module (LNv1, LNv2, or BOLT12)"
             )));
         }
 
@@ -2269,6 +2408,25 @@ impl Gateway {
                 return Err(AdminGatewayError::ClientCreationError(anyhow!(format!(
                     "Unsupported LNv2 network {}",
                     ln_cfg.network
+                ))));
+            }
+        }
+
+        // Verify the BOLT12 network if present
+        if let Some(cfg) = bolt12_cfg {
+            let b12_cfg: &fedimint_bolt12_common::config::Bolt12ClientConfig =
+                cfg.cast().map_err(anyhow::Error::from)?;
+
+            if b12_cfg.network != network {
+                crit!(
+                    target: LOG_GATEWAY,
+                    federation_id = %federation_id,
+                    network = %network,
+                    "Incorrect BOLT12 network for federation",
+                );
+                return Err(AdminGatewayError::ClientCreationError(anyhow!(format!(
+                    "Unsupported BOLT12 network {}",
+                    b12_cfg.network
                 ))));
             }
         }
@@ -3787,6 +3945,24 @@ impl Gateway {
             }
         };
 
+        // Also reject any payment hash already claimed by a BOLT12
+        // reservation persisted before `PaymentHashOwner` existed.
+        let clients = self.federation_manager.read().await.clients();
+        for client in clients {
+            if let Ok(module) = client
+                .value()
+                .get_first_module::<fedimint_gw_bolt12_client::GatewayClientModuleBolt12>()
+                && module
+                    .bolt12_reservation_for_hash(payment_hash)
+                    .await
+                    .is_some()
+            {
+                return Err(PublicGatewayError::LNv2(LNv2Error::IncomingPayment(
+                    "PaymentHash is already registered".to_string(),
+                )));
+            }
+        }
+
         // Reserve the payment hash in the database before requesting the
         // invoice so a replayed payment hash is rejected without creating any
         // state on the Lightning node, and so the contract is guaranteed to be
@@ -3796,6 +3972,23 @@ impl Gateway {
         let invoice_expires_at_secs = duration_since_epoch()
             .as_secs()
             .saturating_add(u64::from(payload.expiry_secs));
+
+        if dbtx
+            .claim_payment_hash_owner(
+                payment_hash,
+                &fedimint_gateway_server_db::PaymentHashOwner {
+                    federation_id: payload.federation_id,
+                    protocol: fedimint_gateway_server_db::PaymentHashProtocol::Bolt11,
+                    expires_at_secs: invoice_expires_at_secs,
+                },
+            )
+            .await
+            .is_some()
+        {
+            return Err(PublicGatewayError::LNv2(LNv2Error::IncomingPayment(
+                "PaymentHash is already registered".to_string(),
+            )));
+        }
 
         if dbtx
             .save_registered_incoming_contract(
@@ -3834,6 +4027,12 @@ impl Gateway {
                 let mut dbtx = self.gateway_db.begin_transaction().await;
                 dbtx.delete_registered_incoming_contract(PaymentImage::Hash(payment_hash))
                     .await;
+                dbtx.release_payment_hash_owner(
+                    payment_hash,
+                    payload.federation_id,
+                    fedimint_gateway_server_db::PaymentHashProtocol::Bolt11,
+                )
+                .await;
                 if let Err(db_err) = dbtx.commit_tx_result().await {
                     warn!(
                         target: LOG_GATEWAY,
@@ -3980,6 +4179,50 @@ impl Gateway {
         Ok((registered_incoming_contract.contract, client))
     }
 
+    /// Like [`Self::get_registered_incoming_contract_and_client_v2`], but
+    /// returns `receive_enabled` to the caller so HTLC relay can resume an
+    /// already-funded contract even after receives are disabled.
+    async fn get_registered_incoming_contract_and_client_for_htlc_v2(
+        &self,
+        payment_image: PaymentImage,
+        amount_msats: u64,
+        preloaded_client: Option<(FederationId, ClientHandleArc)>,
+    ) -> Result<(IncomingContract, ClientHandleArc, FederationId, bool)> {
+        let registered_incoming_contract = self
+            .gateway_db
+            .begin_transaction_nc()
+            .await
+            .load_registered_incoming_contract(payment_image)
+            .await
+            .ok_or(PublicGatewayError::LNv2(LNv2Error::IncomingPayment(
+                "No corresponding decryption contract available".to_string(),
+            )))?;
+
+        if registered_incoming_contract.incoming_amount_msats != amount_msats {
+            return Err(PublicGatewayError::LNv2(
+                LNv2Error::IncomingAmountMismatch {
+                    registered_msats: registered_incoming_contract.incoming_amount_msats,
+                    payment_msats: amount_msats,
+                },
+            ));
+        }
+
+        let federation_id = registered_incoming_contract.federation_id;
+        let receive_enabled = self.receive_enabled(federation_id).await;
+
+        let client = match preloaded_client {
+            Some((preloaded_fid, client)) if preloaded_fid == federation_id => client,
+            _ => self.select_client(federation_id).await?.into_value(),
+        };
+
+        Ok((
+            registered_incoming_contract.contract,
+            client,
+            federation_id,
+            receive_enabled,
+        ))
+    }
+
     /// Completes (settles or cancels) an intercepted HTLC, retrying transient
     /// failures until Lightning reports a terminal outcome.
     ///
@@ -4048,6 +4291,16 @@ impl Gateway {
 
             sleep(LIGHTNING_CONTEXT_RETRY_INTERVAL).await;
         }
+    }
+}
+
+#[async_trait]
+impl fedimint_gw_bolt12_client::IGatewayClientBolt12 for Gateway {
+    async fn complete_htlc(
+        &self,
+        htlc_response: InterceptPaymentResponse,
+    ) -> std::result::Result<(), LightningRpcError> {
+        self.await_complete_htlc(htlc_response).await
     }
 }
 

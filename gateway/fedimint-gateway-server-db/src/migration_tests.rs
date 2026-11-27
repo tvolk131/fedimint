@@ -397,3 +397,76 @@ async fn test_isolated_db_migration() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn payment_hash_owner_enforces_cross_protocol_and_cross_federation_isolation() {
+    use crate::{PaymentHashOwner, PaymentHashProtocol};
+
+    let db = Database::new(MemDatabase::new(), ModuleDecoderRegistry::default());
+    let fed_a = FederationId(sha256::Hash::hash(b"fed-a"));
+    let fed_b = FederationId(sha256::Hash::hash(b"fed-b"));
+    let hash = sha256::Hash::hash(b"shared-payment-hash");
+
+    let bolt12_owner = PaymentHashOwner {
+        federation_id: fed_a,
+        protocol: PaymentHashProtocol::Bolt12,
+        expires_at_secs: 1_000,
+    };
+    let bolt11_same_fed = PaymentHashOwner {
+        federation_id: fed_a,
+        protocol: PaymentHashProtocol::Bolt11,
+        expires_at_secs: 1_000,
+    };
+    let bolt12_other_fed = PaymentHashOwner {
+        federation_id: fed_b,
+        protocol: PaymentHashProtocol::Bolt12,
+        expires_at_secs: 1_000,
+    };
+
+    // First claim succeeds.
+    let mut dbtx = db.begin_transaction().await;
+    assert_eq!(
+        dbtx.claim_payment_hash_owner(hash, &bolt12_owner).await,
+        None
+    );
+    // Duplicate claim (even same federation + protocol) is rejected so two
+    // distinct invoices can never race to share one payment hash.
+    assert_eq!(
+        dbtx.claim_payment_hash_owner(hash, &bolt12_owner).await,
+        Some(bolt12_owner.clone())
+    );
+    // Cross-protocol (BOLT11 vs BOLT12) is rejected and returns existing owner.
+    assert_eq!(
+        dbtx.claim_payment_hash_owner(hash, &bolt11_same_fed).await,
+        Some(bolt12_owner.clone())
+    );
+    // Cross-federation is rejected and returns existing owner.
+    assert_eq!(
+        dbtx.claim_payment_hash_owner(hash, &bolt12_other_fed).await,
+        Some(bolt12_owner.clone())
+    );
+    // Release with wrong owner does NOT clear it.
+    assert!(
+        !dbtx
+            .release_payment_hash_owner(hash, fed_a, PaymentHashProtocol::Bolt11)
+            .await
+    );
+    assert_eq!(dbtx.load_payment_hash_owner(hash).await, Some(bolt12_owner));
+    dbtx.commit_tx().await;
+
+    // Pruning removes expired owners and allows fresh claims.
+    let mut dbtx = db.begin_transaction().await;
+    assert_eq!(dbtx.prune_expired_payment_hash_owners(999).await, 0);
+    assert_eq!(dbtx.prune_expired_payment_hash_owners(1_001).await, 1);
+    assert_eq!(dbtx.load_payment_hash_owner(hash).await, None);
+    assert_eq!(
+        dbtx.claim_payment_hash_owner(hash, &bolt11_same_fed).await,
+        None
+    );
+    assert!(
+        dbtx.release_payment_hash_owner(hash, fed_a, PaymentHashProtocol::Bolt11)
+            .await
+    );
+    assert_eq!(dbtx.load_payment_hash_owner(hash).await, None);
+    dbtx.commit_tx().await;
+}

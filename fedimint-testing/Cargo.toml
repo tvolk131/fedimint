@@ -46,6 +46,7 @@ fedimint-server-bitcoin-rpc = { workspace = true }
 fedimint-server-core = { workspace = true }
 fedimint-testing-core = { workspace = true }
 fs-lock = { workspace = true }
+lightning = { workspace = true }
 lightning-invoice = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }

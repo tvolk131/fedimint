@@ -1,3 +1,4 @@
+pub mod bolt12;
 pub mod ldk;
 pub mod lnd;
 pub mod metrics;
@@ -28,6 +29,9 @@ use fedimint_logging::LOG_LIGHTNING;
 use fedimint_metrics::HistogramExt as _;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
+use lightning::blinded_path::message::BlindedMessagePath;
+use lightning::blinded_path::payment::BlindedPaymentPath;
+use lightning::offers::invoice_request::InvoiceRequest;
 use lightning_invoice::Bolt11Invoice;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -301,6 +305,37 @@ pub trait ILnRpcClient: Debug + Send + Sync {
     ) -> Result<Preimage, LightningRpcError>;
 
     fn sync_wallet(&self) -> Result<(), LightningRpcError>;
+
+    /// Hand invoice requests that match `filter` to the returned channel
+    /// instead of answering them from the node's own offers. A later call
+    /// replaces the filter and the channel.
+    fn bolt12_requests(
+        &self,
+        _filter: bolt12::Bolt12RequestFilter,
+    ) -> Result<tokio::sync::mpsc::Receiver<bolt12::Bolt12Request>, LightningRpcError> {
+        Err(bolt12::unsupported())
+    }
+
+    /// A blinded path through which payers send invoice requests to this
+    /// node, for inclusion in offers that others issue.
+    async fn bolt12_message_path(&self) -> Result<BlindedMessagePath, LightningRpcError> {
+        Err(bolt12::unsupported())
+    }
+
+    /// Expect a payment of exactly `amount` for `payment_hash`, whose preimage
+    /// the node does not know, in answer to `invoice_request`, and return the
+    /// path the payer must use. The payment is delivered through
+    /// [`ILnRpcClient::route_htlcs`] and completed with
+    /// [`ILnRpcClient::complete_htlc`].
+    async fn register_bolt12_payment(
+        &self,
+        _payment_hash: sha256::Hash,
+        _amount: Amount,
+        _invoice_request: &InvoiceRequest,
+        _offer_id: [u8; 32],
+    ) -> Result<BlindedPaymentPath, LightningRpcError> {
+        Err(bolt12::unsupported())
+    }
 }
 
 impl dyn ILnRpcClient {
@@ -805,6 +840,37 @@ impl ILnRpcClient for LnRpcTracked {
 
     fn sync_wallet(&self) -> Result<(), LightningRpcError> {
         tracked_call!(self, "sync_wallet", self.inner.sync_wallet())
+    }
+
+    fn bolt12_requests(
+        &self,
+        filter: bolt12::Bolt12RequestFilter,
+    ) -> Result<tokio::sync::mpsc::Receiver<bolt12::Bolt12Request>, LightningRpcError> {
+        tracked_call!(self, "bolt12_requests", self.inner.bolt12_requests(filter))
+    }
+
+    async fn bolt12_message_path(&self) -> Result<BlindedMessagePath, LightningRpcError> {
+        tracked_call!(
+            self,
+            "bolt12_message_path",
+            self.inner.bolt12_message_path().await
+        )
+    }
+
+    async fn register_bolt12_payment(
+        &self,
+        payment_hash: sha256::Hash,
+        amount: Amount,
+        invoice_request: &InvoiceRequest,
+        offer_id: [u8; 32],
+    ) -> Result<BlindedPaymentPath, LightningRpcError> {
+        tracked_call!(
+            self,
+            "register_bolt12_payment",
+            self.inner
+                .register_bolt12_payment(payment_hash, amount, invoice_request, offer_id)
+                .await
+        )
     }
 }
 

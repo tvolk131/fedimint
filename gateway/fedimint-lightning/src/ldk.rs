@@ -1,15 +1,18 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bitcoin::hashes::{Hash, sha256};
 use bitcoin::{FeeRate, Network, OutPoint};
 use fedimint_bip39::Mnemonic;
+use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::envs::is_running_in_test_env;
-use fedimint_core::task::{TaskGroup, TaskHandle, block_in_place};
+use fedimint_core::module::registry::ModuleDecoderRegistry;
+use fedimint_core::task::{TaskGroup, TaskHandle, block_in_place, sleep};
+use fedimint_core::util::backoff_util::{self, FibonacciBackoff};
 use fedimint_core::util::{FmtCompact, SafeUrl};
 use fedimint_core::{Amount, BitcoinAmountOrAll, crit};
 use fedimint_gateway_common::{
@@ -19,22 +22,29 @@ use fedimint_gateway_common::{
 use fedimint_ln_common::contracts::Preimage;
 use fedimint_logging::{LOG_LIGHTNING, LOG_LIGHTNING_LDK};
 use ldk_node::config::ChannelConfig;
+use ldk_node::external_bolt12::ExternalInvoiceRequest;
+use ldk_node::io::sqlite_store::{KV_TABLE_NAME, SQLITE_DB_FILE_NAME, SqliteStore};
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::lightning::routing::gossip::{NodeAlias, NodeId};
 use ldk_node::logger::{LogLevel, LogRecord, LogWriter};
 use ldk_node::payment::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
+use lightning::blinded_path::message::BlindedMessagePath;
+use lightning::blinded_path::payment::BlindedPaymentPath;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::offers::invoice_request::InvoiceRequest;
 use lightning::offers::offer::{Offer, OfferId};
 use lightning::routing::router::RouteParametersConfig;
 use lightning::types::payment::{PaymentHash, PaymentPreimage};
+use lightning::util::persist::KVStoreSync;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 use thiserror::Error;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{RwLock, oneshot};
+use tokio::sync::{Mutex, RwLock, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info, trace, warn};
 
 use super::{ChannelInfo, ILnRpcClient, LightningRpcError, ListChannelsResponse, RouteHtlcStream};
+use crate::bolt12::{Bolt12Request, Bolt12RequestFilter, MAX_QUEUED_BOLT12_REQUESTS};
 use crate::{
     CloseChannelsWithPeerRequest, CloseChannelsWithPeerResponse, CreateInvoiceRequest,
     CreateInvoiceResponse, GetBalancesResponse, GetLnOnchainAddressResponse, GetNodeInfoResponse,
@@ -108,9 +118,528 @@ impl LogWriter for LdkTracingLogger {
     }
 }
 
+/// The namespaces of the gateway's held-payment records in the node's store.
+/// LDK Node uses neither.
+const HELD_PAYMENTS_PRIMARY_NAMESPACE: &str = "fedimint_gateway";
+const HELD_PAYMENTS_SECONDARY_NAMESPACE: &str = "held_payments";
+
+/// Where the highest block height the gateway has seen the node reach is
+/// kept, next to the held-payment records; see
+/// [`HeldPaymentStore::observe_height`].
+const OBSERVED_HEIGHT_SECONDARY_NAMESPACE: &str = "observed_height";
+const OBSERVED_HEIGHT_KEY: &str = "best_block_height";
+
+/// How long to wait before handling an event again that could not be handled
+/// because the store failed to record its held payment.
+const HELD_PAYMENT_RECORD_RETRY: Duration = Duration::from_secs(1);
+
+/// How often to check whether the node has processed a new block, after which
+/// the records of the payments it can no longer claim are removed.
+const HELD_PAYMENT_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How often to check whether the node has synced to the chain since it
+/// started.
+const CHAIN_SYNC_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// A payment the node holds for the gateway to settle or fail, as reported by
+/// its `PaymentClaimable` event.
+#[derive(Debug, Clone, PartialEq, Eq, Encodable, Decodable)]
+struct HeldPayment {
+    claimable_amount_msat: u64,
+    claim_deadline: Option<u32>,
+    /// Whether the gateway has started to fail the payment back; see
+    /// [`HeldPaymentStore::fail_back`].
+    failing_back: bool,
+}
+
+impl HeldPayment {
+    fn intercept_request(&self, payment_hash: PaymentHash) -> InterceptPaymentRequest {
+        InterceptPaymentRequest {
+            payment_hash: sha256::Hash::from_byte_array(payment_hash.0),
+            // LDK reports the real claimable amount, so the two amounts
+            // coincide here.
+            amount_msat: self.claimable_amount_msat,
+            incoming_amount_msat: self.claimable_amount_msat,
+            expiry: self.claim_deadline.unwrap_or_default(),
+            short_channel_id: None,
+            // LDK claims payments through its own payment store, so it never
+            // intercepts forwards for the gateway.
+            incoming_chan_id: NO_INCOMING_CIRCUIT.0,
+            htlc_id: NO_INCOMING_CIRCUIT.1,
+        }
+    }
+}
+
+/// The payments the node holds that the gateway has not resolved yet.
+///
+/// LDK emits `PaymentClaimable` when a payment becomes claimable. Once the
+/// node has persisted that the event was handled, LDK does not emit it again
+/// after a clean restart, but keeps holding the payment until it is claimed,
+/// failed, or its claim deadline passes. The gateway must therefore be told
+/// about it again after a restart, or a payment it had not resolved yet stays
+/// held until LDK fails it back. Each held payment is recorded before its
+/// event is marked handled, and after a restart the gateway is told about the
+/// recorded payments (see
+/// `LdkEventHandler::deliver_held_payments_after_restart`). A record is
+/// removed once the gateway has settled or failed back its payment, or once
+/// the node can no longer claim it.
+///
+/// The records live in the node's own SQLite store, under namespaces LDK Node
+/// does not use: a write is as durable as the node's own state, and the
+/// records stay with the payments they refer to wherever the node's data goes.
+///
+/// A payment that a gateway without these records acknowledged before it was
+/// upgraded has no record, so it is not delivered again after the upgrade:
+/// the node keeps holding it until LDK fails it back at its claim deadline.
+#[derive(Clone)]
+struct HeldPaymentStore {
+    store: Arc<dyn KVStoreSync + Send + Sync>,
+
+    /// The highest block height the gateway has seen the node reach; see
+    /// [`Self::observe_height`].
+    observed_height: Arc<std::sync::Mutex<ObservedHeight>>,
+
+    /// Serializes failing a payment back with recording a payment and with
+    /// delivering a payment from its record, so a record is delivered only
+    /// while it is current, and a payer's retry recorded once the payment is
+    /// failed back is not removed with the payment's record.
+    ///
+    /// Claiming a payment and removing its record hold it too, so a delivery
+    /// from the record either comes before the claim or finds the record
+    /// removed.
+    ///
+    /// It is held only around steps that do not wait for another task:
+    /// reading, writing or removing records, sending on room already reserved
+    /// on the HTLC stream, and claiming or failing a payment back. So whoever
+    /// holds it
+    /// never waits for someone else who needs it. In particular, a delivery
+    /// waits for room on the stream before it takes the lock, as the gateway
+    /// may take an earlier payment off the stream only after it has failed
+    /// that payment back.
+    delivery_lock: Arc<Mutex<()>>,
+}
+
+/// The highest block height the gateway has seen the node reach, and the
+/// highest one written to the store.
+#[derive(Debug, Default, Clone, Copy)]
+struct ObservedHeight {
+    highest: u32,
+    persisted: u32,
+}
+
+/// What became of a payment [`HeldPaymentStore::deliver_if_current`] was
+/// asked to deliver.
+#[derive(Debug, PartialEq, Eq)]
+enum RecordedDelivery {
+    Delivered,
+    /// The payment was no longer recorded, or the gateway was failing it
+    /// back, so it was not delivered.
+    NotRecorded,
+    /// The node can no longer claim the payment, so it was not delivered.
+    NotClaimable,
+    /// The HTLC stream is closed, so nothing can be delivered.
+    StreamClosed,
+}
+
+impl HeldPaymentStore {
+    fn new(store: Arc<dyn KVStoreSync + Send + Sync>) -> Self {
+        Self {
+            store,
+            observed_height: Arc::new(std::sync::Mutex::new(ObservedHeight::default())),
+            delivery_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    /// Records that the node has reached `height`, and returns the highest
+    /// height the gateway has seen it reach, including in earlier runs once
+    /// [`Self::load_observed_height`] has read that.
+    ///
+    /// LDK fails a payment back once its best block reaches the claim
+    /// deadline, and does not hold it again if the chain tip later moves back
+    /// below the deadline. So a recorded payment is claimable only below the
+    /// highest height the node has reached, which is kept in the store so it
+    /// holds across restarts. If writing it fails, it is written again at the
+    /// next height observed.
+    fn observe_height(&self, height: u32) -> u32 {
+        let mut observed = self.observed_height.lock().expect("not poisoned");
+        observed.highest = observed.highest.max(height);
+
+        if observed.persisted < observed.highest {
+            match KVStoreSync::write(
+                &*self.store,
+                HELD_PAYMENTS_PRIMARY_NAMESPACE,
+                OBSERVED_HEIGHT_SECONDARY_NAMESPACE,
+                OBSERVED_HEIGHT_KEY,
+                observed.highest.consensus_encode_to_vec(),
+            ) {
+                Ok(()) => observed.persisted = observed.highest,
+                Err(err) => {
+                    warn!(
+                        target: LOG_LIGHTNING,
+                        height = observed.highest,
+                        err = %err.fmt_compact(),
+                        "Could not persist the highest block height the node reached, retrying"
+                    );
+                }
+            }
+        }
+
+        observed.highest
+    }
+
+    /// Reads the highest block height an earlier run saw the node reach, and
+    /// returns the highest one seen so far; see [`Self::observe_height`].
+    /// Called before any height is observed, so that height is not written
+    /// over the earlier run's. Fails if the store cannot read it, which may
+    /// succeed when tried again.
+    fn load_observed_height(&self) -> Result<u32, lightning::io::Error> {
+        let persisted = match KVStoreSync::read(
+            &*self.store,
+            HELD_PAYMENTS_PRIMARY_NAMESPACE,
+            OBSERVED_HEIGHT_SECONDARY_NAMESPACE,
+            OBSERVED_HEIGHT_KEY,
+        ) {
+            Ok(bytes) => u32::consensus_decode_whole(&bytes, &ModuleDecoderRegistry::default())
+                .inspect_err(|err| {
+                    crit!(
+                        target: LOG_LIGHTNING,
+                        err = %err.fmt_compact(),
+                        "Ignoring undecodable highest block height the node reached"
+                    );
+                })
+                .unwrap_or_default(),
+            Err(err) if err.kind() == lightning::io::ErrorKind::NotFound => 0,
+            Err(err) => return Err(err),
+        };
+
+        let mut observed = self.observed_height.lock().expect("not poisoned");
+        observed.highest = observed.highest.max(persisted);
+        observed.persisted = observed.persisted.max(persisted);
+
+        Ok(observed.highest)
+    }
+
+    fn key(payment_hash: PaymentHash) -> String {
+        hex::encode(payment_hash.0)
+    }
+
+    /// Records `payment` as held for `payment_hash`, replacing any earlier
+    /// record of it.
+    async fn record(
+        &self,
+        payment_hash: PaymentHash,
+        payment: &HeldPayment,
+    ) -> Result<(), lightning::io::Error> {
+        let _deliveries = self.delivery_lock.lock().await;
+
+        self.write(payment_hash, payment)
+    }
+
+    fn write(
+        &self,
+        payment_hash: PaymentHash,
+        payment: &HeldPayment,
+    ) -> Result<(), lightning::io::Error> {
+        KVStoreSync::write(
+            &*self.store,
+            HELD_PAYMENTS_PRIMARY_NAMESPACE,
+            HELD_PAYMENTS_SECONDARY_NAMESPACE,
+            &Self::key(payment_hash),
+            payment.consensus_encode_to_vec(),
+        )
+    }
+
+    fn remove(&self, payment_hash: PaymentHash) -> Result<(), lightning::io::Error> {
+        KVStoreSync::remove(
+            &*self.store,
+            HELD_PAYMENTS_PRIMARY_NAMESPACE,
+            HELD_PAYMENTS_SECONDARY_NAMESPACE,
+            &Self::key(payment_hash),
+            false,
+        )
+    }
+
+    /// Reads the record of `payment_hash`, if any. A record that cannot be
+    /// decoded is logged and read as none, like in [`Self::list`].
+    fn read(&self, payment_hash: PaymentHash) -> Result<Option<HeldPayment>, lightning::io::Error> {
+        let key = Self::key(payment_hash);
+        let bytes = match KVStoreSync::read(
+            &*self.store,
+            HELD_PAYMENTS_PRIMARY_NAMESPACE,
+            HELD_PAYMENTS_SECONDARY_NAMESPACE,
+            &key,
+        ) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == lightning::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+
+        Ok(Self::decode_logged(&key, &bytes).map(|(_, payment)| payment))
+    }
+
+    /// Fails the payment for `payment_hash` back by calling `fail_back`, and
+    /// removes its record once that succeeds.
+    ///
+    /// The record is first marked as failing back. It is then not delivered
+    /// again: if the gateway stops before the record is removed, the next
+    /// start finishes failing the payment back instead. If marking the record
+    /// or `fail_back` fails, the payment stays held and recorded, so the call
+    /// can be tried again. All steps hold `delivery_lock`, so a payer's retry,
+    /// which LDK reports only once the payment is failed back, is recorded
+    /// only after the payment's record is removed.
+    ///
+    /// LDK persists that it failed the payment back only after `fail_back`
+    /// returns. If the gateway stops before that, but after the record was
+    /// removed, the node may still hold the payment after a restart, with no
+    /// record, until LDK fails it back at its claim deadline. That only delays
+    /// failing the payment back.
+    async fn fail_back<T, E>(
+        &self,
+        payment_hash: PaymentHash,
+        fail_back: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Result<T, E>, lightning::io::Error> {
+        let _deliveries = self.delivery_lock.lock().await;
+
+        if let Some(payment) = self.read(payment_hash)?
+            && !payment.failing_back
+        {
+            self.write(
+                payment_hash,
+                &HeldPayment {
+                    failing_back: true,
+                    ..payment
+                },
+            )?;
+        }
+
+        let result = fail_back();
+
+        if result.is_ok()
+            && let Err(err) = self.remove(payment_hash)
+        {
+            warn!(
+                target: LOG_LIGHTNING,
+                payment_hash = %hex::encode(payment_hash.0),
+                err = %err.fmt_compact(),
+                "Could not remove the record of a payment failed back, removing it on the next start"
+            );
+        }
+
+        Ok(result)
+    }
+
+    /// Delivers the payment recorded for `payment_hash` on the HTLC stream if
+    /// it is still recorded, the gateway is not failing it back, and
+    /// `may_claim` says the node may still claim it.
+    ///
+    /// The record is read, and `may_claim` asked, only once there is room on
+    /// the stream, right before the payment is sent. Fails if the store cannot
+    /// read the record, which may succeed when tried again.
+    async fn deliver_if_current(
+        &self,
+        payment_hash: PaymentHash,
+        htlc_stream_sender: &Sender<InterceptPaymentRequest>,
+        may_claim: impl FnOnce(&HeldPayment) -> bool,
+    ) -> Result<RecordedDelivery, lightning::io::Error> {
+        // Room on the stream is reserved before the lock is taken, so the lock
+        // is never held while waiting for the gateway; see `delivery_lock`.
+        let Ok(permit) = htlc_stream_sender.reserve().await else {
+            return Ok(RecordedDelivery::StreamClosed);
+        };
+        let _deliveries = self.delivery_lock.lock().await;
+
+        let Some(payment) = self
+            .read(payment_hash)?
+            .filter(|payment| !payment.failing_back)
+        else {
+            return Ok(RecordedDelivery::NotRecorded);
+        };
+
+        if !may_claim(&payment) {
+            return Ok(RecordedDelivery::NotClaimable);
+        }
+
+        permit.send(payment.intercept_request(payment_hash));
+
+        Ok(RecordedDelivery::Delivered)
+    }
+
+    /// Removes the records of the payments `may_claim` says the node can no
+    /// longer claim. Fails if the store does, leaving the remaining records to
+    /// a later call.
+    async fn remove_unclaimable(
+        &self,
+        may_claim: impl Fn(PaymentHash, &HeldPayment) -> bool,
+    ) -> Result<(), lightning::io::Error> {
+        let _deliveries = self.delivery_lock.lock().await;
+
+        for (payment_hash, payment) in self.list()? {
+            if !may_claim(payment_hash, &payment) {
+                debug!(
+                    target: LOG_LIGHTNING,
+                    payment_hash = %hex::encode(payment_hash.0),
+                    claim_deadline = ?payment.claim_deadline,
+                    "Removing the record of a held payment the node can no longer claim"
+                );
+                self.remove(payment_hash)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Lists the recorded payments.
+    ///
+    /// Fails if the store cannot list or read the records, which may succeed
+    /// when tried again. A record that was read but cannot be decoded will not
+    /// decode on a later try either, so it is logged and skipped rather than
+    /// failing the others, and its payment is not delivered again.
+    fn list(&self) -> Result<Vec<(PaymentHash, HeldPayment)>, lightning::io::Error> {
+        let keys = KVStoreSync::list(
+            &*self.store,
+            HELD_PAYMENTS_PRIMARY_NAMESPACE,
+            HELD_PAYMENTS_SECONDARY_NAMESPACE,
+        )?;
+        let mut payments = Vec::with_capacity(keys.len());
+
+        for key in keys {
+            let bytes = match KVStoreSync::read(
+                &*self.store,
+                HELD_PAYMENTS_PRIMARY_NAMESPACE,
+                HELD_PAYMENTS_SECONDARY_NAMESPACE,
+                &key,
+            ) {
+                Ok(bytes) => bytes,
+                // Removed since it was listed: the gateway resolved it.
+                Err(err) if err.kind() == lightning::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
+            };
+
+            payments.extend(Self::decode_logged(&key, &bytes));
+        }
+
+        Ok(payments)
+    }
+
+    fn decode_logged(key: &str, bytes: &[u8]) -> Option<(PaymentHash, HeldPayment)> {
+        Self::decode(key, bytes)
+            .inspect_err(|err| {
+                crit!(
+                    target: LOG_LIGHTNING,
+                    %key,
+                    err = err.as_str(),
+                    "Skipping undecodable held payment record, its payment is not delivered again"
+                );
+            })
+            .ok()
+    }
+
+    fn decode(key: &str, bytes: &[u8]) -> Result<(PaymentHash, HeldPayment), String> {
+        let payment_hash = <[u8; 32]>::try_from(hex::decode(key).map_err(|err| err.to_string())?)
+            .map_err(|_| "key is not a payment hash".to_string())?;
+        let payment = HeldPayment::consensus_decode_whole(bytes, &ModuleDecoderRegistry::default())
+            .map_err(|err| err.to_string())?;
+
+        Ok((PaymentHash(payment_hash), payment))
+    }
+
+    /// Lists the recorded payments like [`Self::list`], retrying after each
+    /// delay of `backoff` while the store fails. Returns `None` if the task
+    /// shuts down or `backoff` gives up first.
+    async fn list_retrying(
+        &self,
+        backoff: FibonacciBackoff,
+        handle: &TaskHandle,
+    ) -> Option<Vec<(PaymentHash, HeldPayment)>> {
+        retry_store(backoff, handle, || async { self.list() }).await
+    }
+}
+
+/// Runs `op` until the store it uses does not fail, retrying after each delay
+/// of `backoff`. Returns `None` if the task shuts down or `backoff` gives up
+/// first.
+async fn retry_store<T, F>(
+    mut backoff: FibonacciBackoff,
+    handle: &TaskHandle,
+    op: impl Fn() -> F,
+) -> Option<T>
+where
+    F: Future<Output = Result<T, lightning::io::Error>>,
+{
+    loop {
+        let err = match op().await {
+            Ok(value) => return Some(value),
+            Err(err) => err,
+        };
+        let delay = backoff.next()?;
+
+        warn!(
+            target: LOG_LIGHTNING,
+            err = %err.fmt_compact(),
+            ?delay,
+            "Could not access held payment records, retrying"
+        );
+        tokio::select! {
+            () = sleep(delay) => {}
+            () = handle.make_shutdown_rx() => return None,
+        }
+    }
+}
+
+/// Decides whether a recorded held payment may still be resolved by the
+/// gateway, and so must be delivered to it again.
+///
+/// `inbound_status` is the status of the node's inbound record for the
+/// payment hash, if any, and `best_block_height` the highest height the
+/// gateway has seen the node reach; see [`HeldPaymentStore::observe_height`].
+/// A payment the node has settled (the gateway stopped after settling it but
+/// before removing its record), one the node has no inbound record of, and
+/// one whose claim deadline the node has reached are no longer claimable: LDK
+/// fails a claimable payment back once its best block reaches the claim
+/// deadline.
+///
+/// A `Failed` payment may be claimable. LDK Node marks a payment `Failed` when
+/// the gateway fails it back and keeps that status when the payer retries the
+/// invoice, which it accepts unless the payment succeeded, so the status does
+/// not tell whether the node holds a retry. The gateway removes a payment's
+/// record once it has failed the payment back, and the retry's own
+/// `PaymentClaimable` records the payment again.
+fn held_payment_is_claimable(
+    inbound_status: Option<PaymentStatus>,
+    claim_deadline: Option<u32>,
+    best_block_height: u32,
+) -> bool {
+    match inbound_status {
+        Some(PaymentStatus::Pending | PaymentStatus::Failed) => {
+            claim_deadline.is_none_or(|claim_deadline| best_block_height < claim_deadline)
+        }
+        Some(PaymentStatus::Succeeded) | None => false,
+    }
+}
+
+/// Whether the node has finished a Lightning chain sync since the client
+/// started it, given the time of its latest sync, and that of its latest sync
+/// when the client started it.
+///
+/// LDK Node loads the time of its latest sync from its store, so a node that
+/// was just started reports a sync from before the restart while it still
+/// catches up with the blocks mined since. Sync times are in whole seconds,
+/// so a first sync that ends in the same second as the last one before the
+/// restart is only seen at the next sync.
+fn lightning_synced_since_start(latest_sync: Option<u64>, sync_before_start: Option<u64>) -> bool {
+    latest_sync.is_some() && latest_sync != sync_before_start
+}
+
 pub struct GatewayLdkClient {
     /// The underlying lightning node.
     node: Arc<ldk_node::Node>,
+
+    /// The payments the node holds that the gateway has not resolved yet.
+    held_payments: HeldPaymentStore,
+
+    /// The time of the node's latest Lightning chain sync when the client
+    /// started it; see [`lightning_synced_since_start`].
+    lightning_sync_before_start: Option<u64>,
 
     task_group: TaskGroup,
 
@@ -141,6 +670,11 @@ pub struct GatewayLdkClient {
     /// actual result is still read from `node.payment()` after the wakeup; this
     /// map only signals that a terminal event has arrived.
     pending_payments: Arc<RwLock<HashMap<PaymentId, oneshot::Sender<()>>>>,
+    /// Resolves once the client has delivered the payments held from an
+    /// earlier run, and starts waiting for the node's events. Tests take it.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    startup_finished: Option<oneshot::Receiver<()>>,
 }
 
 /// Sends a channel's funding outpoint once the channel is pending, or the
@@ -256,7 +790,26 @@ impl GatewayLdkClient {
         }
 
         info!(chain_source = %chain_source, data_dir = %data_dir_str, alias = %alias, "Starting LDK Node...");
-        let node = Arc::new(node_builder.build().map_err(LdkClientInitError::Build)?);
+        // The same store `NodeBuilder::build` creates, built here so the
+        // gateway can keep its held-payment records next to the node's state.
+        std::fs::create_dir_all(data_dir).map_err(|_| {
+            LdkClientInitError::Build(ldk_node::BuildError::StoragePathAccessFailed)
+        })?;
+        let store = Arc::new(
+            SqliteStore::new(
+                data_dir.to_path_buf(),
+                Some(SQLITE_DB_FILE_NAME.to_string()),
+                Some(KV_TABLE_NAME.to_string()),
+            )
+            .map_err(|_| LdkClientInitError::Build(ldk_node::BuildError::KVStoreSetupFailed))?,
+        );
+        let held_payments = HeldPaymentStore::new(store.clone());
+        let node = Arc::new(
+            node_builder
+                .build_with_store(store)
+                .map_err(LdkClientInitError::Build)?,
+        );
+        let lightning_sync_before_start = node.status().latest_lightning_wallet_sync_timestamp;
         node.start().map_err(|err| {
             crit!(target: LOG_LIGHTNING, err = %err.fmt_compact(), "Failed to start LDK Node");
             LdkClientInitError::Start(err)
@@ -265,150 +818,54 @@ impl GatewayLdkClient {
         let (htlc_stream_sender, htlc_stream_receiver) = tokio::sync::mpsc::channel(1024);
         let task_group = TaskGroup::new();
 
-        let node_clone = node.clone();
         let pending_channels = Arc::new(RwLock::new(BTreeMap::new()));
-        let pending_channels_clone = pending_channels.clone();
         let pending_payments = Arc::new(RwLock::new(HashMap::new()));
-        let pending_payments_clone = pending_payments.clone();
+        let event_handler = LdkEventHandler {
+            node: node.clone(),
+            htlc_stream_sender,
+            pending_channels: pending_channels.clone(),
+            pending_payments: pending_payments.clone(),
+            held_payments: held_payments.clone(),
+            lightning_sync_before_start,
+        };
+        #[cfg(test)]
+        let (startup_finished_sender, startup_finished) = oneshot::channel();
         task_group.spawn("ldk lightning node event handler", |handle| async move {
-            loop {
-                Self::handle_next_event(
-                    &node_clone,
-                    &htlc_stream_sender,
-                    &handle,
-                    pending_channels_clone.clone(),
-                    pending_payments_clone.clone(),
-                )
-                .await;
+            // Before handling new events, so the gateway learns of every
+            // payment still held from an earlier run first.
+            if !event_handler
+                .deliver_held_payments_after_restart(&handle)
+                .await
+            {
+                return;
             }
+            #[cfg(test)]
+            let _ = startup_finished_sender.send(());
+
+            event_handler.handle_events(&handle).await;
         });
 
         info!("Successfully started LDK Gateway");
         Ok(GatewayLdkClient {
             node,
+            held_payments,
+            lightning_sync_before_start,
             task_group,
             htlc_stream_receiver_or: Some(htlc_stream_receiver),
             outbound_lightning_payment_lock_pool: lockable::LockPool::new(),
             outbound_offer_lock_pool: lockable::LockPool::new(),
             pending_channels,
             pending_payments,
+            #[cfg(test)]
+            startup_finished: Some(startup_finished),
         })
-    }
-
-    async fn handle_next_event(
-        node: &ldk_node::Node,
-        htlc_stream_sender: &Sender<InterceptPaymentRequest>,
-        handle: &TaskHandle,
-        pending_channels: Arc<RwLock<BTreeMap<UserChannelId, PendingChannelSender>>>,
-        pending_payments: Arc<RwLock<HashMap<PaymentId, oneshot::Sender<()>>>>,
-    ) {
-        // We manually check for task termination in case we receive a payment while the
-        // task is shutting down. In that case, we want to finish the payment
-        // before shutting this task down.
-        let event = tokio::select! {
-            event = node.next_event_async() => {
-                event
-            }
-            () = handle.make_shutdown_rx() => {
-                return;
-            }
-        };
-
-        match event {
-            ldk_node::Event::PaymentClaimable {
-                payment_id: _,
-                payment_hash,
-                claimable_amount_msat,
-                claim_deadline,
-                custom_records: _,
-            } => {
-                if let Err(err) = htlc_stream_sender
-                    .send(InterceptPaymentRequest {
-                        payment_hash: Hash::from_slice(&payment_hash.0)
-                            .expect("Failed to create Hash"),
-                        // LDK reports the real claimable amount, so the two
-                        // amounts coincide here.
-                        amount_msat: claimable_amount_msat,
-                        incoming_amount_msat: claimable_amount_msat,
-                        expiry: claim_deadline.unwrap_or_default(),
-                        short_channel_id: None,
-                        // LDK claims payments through its own payment store,
-                        // so it never intercepts forwards for the gateway.
-                        incoming_chan_id: NO_INCOMING_CIRCUIT.0,
-                        htlc_id: NO_INCOMING_CIRCUIT.1,
-                    })
-                    .await
-                {
-                    warn!(target: LOG_LIGHTNING, err = %err.fmt_compact(), "Failed send InterceptHtlcRequest to stream");
-                }
-            }
-            ldk_node::Event::ChannelPending {
-                channel_id,
-                user_channel_id,
-                former_temporary_channel_id: _,
-                counterparty_node_id: _,
-                funding_txo,
-            } => {
-                info!(target: LOG_LIGHTNING, %channel_id, "LDK Channel is pending");
-                let mut channels = pending_channels.write().await;
-                if let Some(sender) = channels.remove(&UserChannelId(user_channel_id)) {
-                    let _ = sender.send(Ok(funding_txo));
-                } else {
-                    debug!(
-                        ?user_channel_id,
-                        "No channel pending channel open for user channel id"
-                    );
-                }
-            }
-            ldk_node::Event::ChannelClosed {
-                channel_id,
-                user_channel_id,
-                counterparty_node_id: _,
-                reason,
-            } => {
-                info!(target: LOG_LIGHTNING, %channel_id, "LDK Channel is closed");
-                let mut channels = pending_channels.write().await;
-                if let Some(sender) = channels.remove(&UserChannelId(user_channel_id)) {
-                    let reason = if let Some(reason) = reason {
-                        reason.to_string()
-                    } else {
-                        "Channel has been closed".to_string()
-                    };
-                    let _ = sender.send(Err(reason));
-                } else {
-                    debug!(
-                        ?user_channel_id,
-                        "No channel pending channel open for user channel id"
-                    );
-                }
-            }
-            ldk_node::Event::PaymentSuccessful {
-                payment_id: Some(payment_id),
-                ..
-            }
-            | ldk_node::Event::PaymentFailed {
-                payment_id: Some(payment_id),
-                ..
-            } => {
-                Self::wake_pending_payment(&pending_payments, payment_id).await;
-            }
-            _ => {}
-        }
-
-        // `PaymentClaimable`, `ChannelPending`/`ChannelClosed`, and terminal
-        // outgoing payment events (`PaymentSuccessful` / `PaymentFailed`) are the
-        // only event types that we are interested in. We can safely ignore all
-        // other events.
-        if let Err(err) = node.event_handled() {
-            warn!(err = %err.fmt_compact(), "LDK could not mark event handled");
-        }
     }
 
     /// Wakes the `pay()` waiter (if any) for `payment_id` once a terminal
     /// payment event has been observed. The actual payment result is read from
     /// `node.payment()` by the woken waiter.
     async fn wake_pending_payment(
-        pending_payments: &Arc<RwLock<HashMap<PaymentId, oneshot::Sender<()>>>>,
+        pending_payments: &RwLock<HashMap<PaymentId, oneshot::Sender<()>>>,
         payment_id: PaymentId,
     ) -> PendingPaymentWakeup {
         let Some(sender) = pending_payments.write().await.remove(&payment_id) else {
@@ -470,6 +927,477 @@ impl GatewayLdkClient {
     }
 }
 
+/// Whether [`LdkEventHandler::handle_event`] delivers a held payment it
+/// records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeldPaymentDelivery {
+    Deliver,
+    /// Only record it: it is delivered from its record.
+    FromRecord,
+}
+
+/// Handles the node's events for the client, and tells the gateway about the
+/// payments the node holds for it.
+struct LdkEventHandler {
+    node: Arc<ldk_node::Node>,
+    htlc_stream_sender: Sender<InterceptPaymentRequest>,
+    pending_channels: Arc<RwLock<BTreeMap<UserChannelId, PendingChannelSender>>>,
+    pending_payments: Arc<RwLock<HashMap<PaymentId, oneshot::Sender<()>>>>,
+    held_payments: HeldPaymentStore,
+    /// See [`GatewayLdkClient::lightning_sync_before_start`].
+    lightning_sync_before_start: Option<u64>,
+}
+
+impl LdkEventHandler {
+    /// Delivers the payments the node holds for the gateway again after a
+    /// restart. Returns `false` if the task shuts down first.
+    ///
+    /// It first waits until the node has synced to the chain since it
+    /// started, so a payment is delivered only if the node can still claim it
+    /// at the chain's current height rather than at the height it had
+    /// processed before the restart.
+    ///
+    /// A queued `PaymentClaimable` event and a record can describe the same
+    /// held payment: the gateway may have stopped after recording the payment
+    /// but before the node persisted that its event was handled, and LDK Node
+    /// loads its queue when the node is built. So the events the node has
+    /// queued are handled first, as any event is, except that their held
+    /// payments are only recorded. After a restart the records alone decide
+    /// what is delivered, so each recorded payment the node may still claim is
+    /// delivered once, and a fail-back the gateway had started is finished.
+    ///
+    /// Delivery after a restart is at least once: LDK may report a payment it
+    /// still holds again after a restart on its own, apart from LDK Node's
+    /// queue, so the gateway must tolerate being told again about a payment
+    /// the node still holds. Recording the queued payments first only keeps
+    /// the common case from delivering a payment twice.
+    async fn deliver_held_payments_after_restart(&self, handle: &TaskHandle) -> bool {
+        if !self.wait_for_chain_sync(handle).await {
+            return false;
+        }
+
+        // A payment whose claim deadline the node reached before the restart
+        // stays expired even if the chain tip has moved back since.
+        if retry_store(backoff_util::background_backoff(), handle, || async {
+            self.held_payments.load_observed_height()
+        })
+        .await
+        .is_none()
+        {
+            return false;
+        }
+
+        let mut left_to_next_start = HashSet::new();
+
+        while let Some(event) = self.node.next_event() {
+            if handle.is_shutting_down() {
+                return false;
+            }
+
+            if let Some(payment_hash) = self
+                .handle_event(event, HeldPaymentDelivery::FromRecord, handle)
+                .await
+            {
+                left_to_next_start.insert(payment_hash);
+            }
+        }
+
+        self.redeliver_held_payments(handle, &left_to_next_start)
+            .await
+    }
+
+    /// Waits until the node has finished a Lightning chain sync since the
+    /// client started it. Returns `false` if the task shuts down first.
+    async fn wait_for_chain_sync(&self, handle: &TaskHandle) -> bool {
+        loop {
+            let latest_sync = self.node.status().latest_lightning_wallet_sync_timestamp;
+
+            if lightning_synced_since_start(latest_sync, self.lightning_sync_before_start) {
+                return true;
+            }
+
+            tokio::select! {
+                () = sleep(CHAIN_SYNC_POLL_INTERVAL) => {}
+                () = handle.make_shutdown_rx() => return false,
+            }
+        }
+    }
+
+    /// Whether the node may still claim a payment held for `payment_hash`
+    /// with `claim_deadline`; see [`held_payment_is_claimable`].
+    fn may_claim(&self, payment_hash: PaymentHash, claim_deadline: Option<u32>) -> bool {
+        let inbound_status = self
+            .node
+            .payment(&PaymentId(payment_hash.0))
+            .filter(|details| details.direction == PaymentDirection::Inbound)
+            .map(|details| details.status);
+        let best_block_height = self
+            .held_payments
+            .observe_height(self.node.status().current_best_block.height);
+
+        held_payment_is_claimable(inbound_status, claim_deadline, best_block_height)
+    }
+
+    /// Delivers every recorded held payment the node may still claim on the
+    /// HTLC stream, except those in `left_to_next_start`, and finishes failing
+    /// back the payments the gateway had started to fail back. Returns `false`
+    /// if the task shuts down first.
+    ///
+    /// The gateway may already have relayed a payment delivered here. Relaying
+    /// it again does not fund its incoming contract twice, and starts the
+    /// completion that settles it if an earlier relay did not. Each payment
+    /// is delivered only while its record is current; see
+    /// [`HeldPaymentStore::deliver_if_current`].
+    ///
+    /// A store that fails to read the records is retried until it succeeds or
+    /// the task shuts down. The records of payments the node can no longer
+    /// claim are left to [`Self::remove_unclaimable_held_payments`].
+    async fn redeliver_held_payments(
+        &self,
+        handle: &TaskHandle,
+        left_to_next_start: &HashSet<PaymentHash>,
+    ) -> bool {
+        let Some(payments) = self
+            .held_payments
+            .list_retrying(backoff_util::background_backoff(), handle)
+            .await
+        else {
+            return false;
+        };
+
+        for (payment_hash, payment) in payments {
+            if left_to_next_start.contains(&payment_hash) {
+                continue;
+            }
+
+            if payment.failing_back {
+                self.finish_failing_back(payment_hash).await;
+                continue;
+            }
+
+            // Waiting for room on the stream stops when the task shuts down.
+            let delivery = tokio::select! {
+                delivery = retry_store(backoff_util::background_backoff(), handle, || {
+                    self.held_payments.deliver_if_current(
+                        payment_hash,
+                        &self.htlc_stream_sender,
+                        |payment| self.may_claim(payment_hash, payment.claim_deadline),
+                    )
+                }) => delivery,
+                () = handle.make_shutdown_rx() => None,
+            };
+            let Some(delivery) = delivery else {
+                return false;
+            };
+
+            match delivery {
+                RecordedDelivery::Delivered => {
+                    info!(
+                        target: LOG_LIGHTNING,
+                        payment_hash = %hex::encode(payment_hash.0),
+                        "Delivered a payment the node still holds"
+                    );
+                }
+                RecordedDelivery::NotRecorded | RecordedDelivery::NotClaimable => {
+                    debug!(
+                        target: LOG_LIGHTNING,
+                        payment_hash = %hex::encode(payment_hash.0),
+                        ?delivery,
+                        "Not delivering a recorded payment"
+                    );
+                }
+                RecordedDelivery::StreamClosed => {
+                    warn!(
+                        target: LOG_LIGHTNING,
+                        "HTLC stream closed, not delivering the remaining held payments"
+                    );
+                    break;
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Fails back a payment the gateway had started to fail back before it
+    /// stopped, and removes its record; see [`HeldPaymentStore::fail_back`].
+    ///
+    /// If this fails, the payment stays held, and is not delivered, until the
+    /// next start or until LDK fails it back at its claim deadline. That only
+    /// delays failing the payment back.
+    async fn finish_failing_back(&self, payment_hash: PaymentHash) {
+        let result = self
+            .held_payments
+            .fail_back(payment_hash, || {
+                self.node.bolt11_payment().fail_for_hash(payment_hash)
+            })
+            .await;
+
+        match result {
+            Ok(Ok(())) => {
+                info!(
+                    target: LOG_LIGHTNING,
+                    payment_hash = %hex::encode(payment_hash.0),
+                    "Failed back a held payment the gateway had started to fail back"
+                );
+            }
+            Ok(Err(err)) => {
+                warn!(
+                    target: LOG_LIGHTNING,
+                    payment_hash = %hex::encode(payment_hash.0),
+                    err = %err.fmt_compact(),
+                    "Could not fail back a held payment, retrying on the next start"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    target: LOG_LIGHTNING,
+                    payment_hash = %hex::encode(payment_hash.0),
+                    err = %err.fmt_compact(),
+                    "Could not read held payment record, failing it back on the next start"
+                );
+            }
+        }
+    }
+
+    /// Handles the node's events until the task shuts down. Each time the node
+    /// has processed a new block, it also removes the records of the held
+    /// payments the node can no longer claim.
+    async fn handle_events(&self, handle: &TaskHandle) {
+        let mut cleanup = tokio::time::interval(HELD_PAYMENT_CLEANUP_INTERVAL);
+        let mut cleaned_at_height = None;
+
+        loop {
+            // An event that arrives is handled to the end even if the task
+            // shuts down meanwhile, except for waiting for room on the HTLC
+            // stream.
+            tokio::select! {
+                event = self.node.next_event_async() => {
+                    self.handle_event(event, HeldPaymentDelivery::Deliver, handle).await;
+                }
+                _ = cleanup.tick() => {
+                    cleaned_at_height = self
+                        .remove_unclaimable_held_payments(cleaned_at_height)
+                        .await;
+                }
+                () = handle.make_shutdown_rx() => return,
+            }
+        }
+    }
+
+    /// Removes the records of the held payments the node can no longer claim,
+    /// unless the node has processed no block since `cleaned_at_height`.
+    /// Returns the height of the latest cleanup that succeeded, so one that
+    /// failed is retried.
+    async fn remove_unclaimable_held_payments(
+        &self,
+        cleaned_at_height: Option<u32>,
+    ) -> Option<u32> {
+        let height = self.node.status().current_best_block.height;
+
+        self.held_payments.observe_height(height);
+
+        if cleaned_at_height == Some(height) {
+            return cleaned_at_height;
+        }
+
+        match self
+            .held_payments
+            .remove_unclaimable(|payment_hash, payment| {
+                self.may_claim(payment_hash, payment.claim_deadline)
+            })
+            .await
+        {
+            Ok(()) => Some(height),
+            Err(err) => {
+                warn!(
+                    target: LOG_LIGHTNING,
+                    err = %err.fmt_compact(),
+                    "Could not remove the records of held payments the node can no longer claim, retrying"
+                );
+                cleaned_at_height
+            }
+        }
+    }
+
+    /// Handles `event`, the node's next event, and marks it handled.
+    ///
+    /// A held payment that cannot be recorded leaves the event unhandled, to
+    /// be handled again. Returns the payment hash of a held payment that was
+    /// recorded but whose event could not be marked handled.
+    async fn handle_event(
+        &self,
+        event: ldk_node::Event,
+        delivery: HeldPaymentDelivery,
+        handle: &TaskHandle,
+    ) -> Option<PaymentHash> {
+        match event {
+            ldk_node::Event::PaymentClaimable {
+                payment_id: _,
+                payment_hash,
+                claimable_amount_msat,
+                claim_deadline,
+                custom_records: _,
+            } => {
+                let payment = HeldPayment {
+                    claimable_amount_msat,
+                    claim_deadline,
+                    failing_back: false,
+                };
+
+                return self
+                    .handle_payment_claimable(payment_hash, payment, delivery, handle)
+                    .await;
+            }
+            ldk_node::Event::PaymentReceived { payment_hash, .. } => {
+                // Also removed once `claim_for_hash` returned, unless that
+                // failed.
+                if let Err(err) = self.held_payments.remove(payment_hash) {
+                    warn!(
+                        target: LOG_LIGHTNING,
+                        payment_hash = %hex::encode(payment_hash.0),
+                        err = %err.fmt_compact(),
+                        "Could not remove the record of a received payment"
+                    );
+                }
+            }
+            ldk_node::Event::ChannelPending {
+                channel_id,
+                user_channel_id,
+                former_temporary_channel_id: _,
+                counterparty_node_id: _,
+                funding_txo,
+            } => {
+                info!(target: LOG_LIGHTNING, %channel_id, "LDK Channel is pending");
+                let mut channels = self.pending_channels.write().await;
+                if let Some(sender) = channels.remove(&UserChannelId(user_channel_id)) {
+                    let _ = sender.send(Ok(funding_txo));
+                } else {
+                    debug!(
+                        ?user_channel_id,
+                        "No channel pending channel open for user channel id"
+                    );
+                }
+            }
+            ldk_node::Event::ChannelClosed {
+                channel_id,
+                user_channel_id,
+                counterparty_node_id: _,
+                reason,
+            } => {
+                info!(target: LOG_LIGHTNING, %channel_id, "LDK Channel is closed");
+                let mut channels = self.pending_channels.write().await;
+                if let Some(sender) = channels.remove(&UserChannelId(user_channel_id)) {
+                    let reason = if let Some(reason) = reason {
+                        reason.to_string()
+                    } else {
+                        "Channel has been closed".to_string()
+                    };
+                    let _ = sender.send(Err(reason));
+                } else {
+                    debug!(
+                        ?user_channel_id,
+                        "No channel pending channel open for user channel id"
+                    );
+                }
+            }
+            ldk_node::Event::PaymentSuccessful {
+                payment_id: Some(payment_id),
+                ..
+            }
+            | ldk_node::Event::PaymentFailed {
+                payment_id: Some(payment_id),
+                ..
+            } => {
+                GatewayLdkClient::wake_pending_payment(&self.pending_payments, payment_id).await;
+            }
+            _ => {}
+        }
+
+        // `PaymentClaimable`, `PaymentReceived`, `ChannelPending` /
+        // `ChannelClosed`, and terminal outgoing payment events
+        // (`PaymentSuccessful` / `PaymentFailed`) are the only event types
+        // that we are interested in. We can safely ignore all other events.
+        self.mark_event_handled();
+
+        None
+    }
+
+    /// Records the held `payment` its `PaymentClaimable` event reports, marks
+    /// the event handled, and then delivers the payment if `delivery` says
+    /// so; see [`Self::handle_event`].
+    async fn handle_payment_claimable(
+        &self,
+        payment_hash: PaymentHash,
+        payment: HeldPayment,
+        delivery: HeldPaymentDelivery,
+        handle: &TaskHandle,
+    ) -> Option<PaymentHash> {
+        // An event queued before a restart may report a payment that the node
+        // has since been paid, or whose claim deadline it has since reached.
+        if !self.may_claim(payment_hash, payment.claim_deadline) {
+            debug!(
+                target: LOG_LIGHTNING,
+                payment_hash = %hex::encode(payment_hash.0),
+                claim_deadline = ?payment.claim_deadline,
+                "Not recording a held payment the node can no longer claim"
+            );
+            self.mark_event_handled();
+            return None;
+        }
+
+        // Recorded before the event is marked handled; see
+        // `HeldPaymentStore`. If the record cannot be written the event stays
+        // unhandled and is handled again.
+        if let Err(err) = self.held_payments.record(payment_hash, &payment).await {
+            warn!(
+                target: LOG_LIGHTNING,
+                payment_hash = %hex::encode(payment_hash.0),
+                err = %err.fmt_compact(),
+                "Could not record held payment, retrying"
+            );
+            sleep(HELD_PAYMENT_RECORD_RETRY).await;
+            return None;
+        }
+
+        // Marked handled before the payment is delivered, so that after a
+        // restart the payment is delivered from its record alone. If the
+        // node cannot persist that the event was handled, it may report the
+        // payment again after a restart, so the payment is delivered only
+        // then, from its record. Until then, or until LDK fails it back at its
+        // claim deadline, it stays held, which only delays resolving it.
+        if !self.mark_event_handled() {
+            return Some(payment_hash);
+        }
+
+        if delivery == HeldPaymentDelivery::Deliver {
+            // A payment not delivered before the task shuts down is
+            // delivered from its record on the next start.
+            tokio::select! {
+                sent = self.htlc_stream_sender.send(payment.intercept_request(payment_hash)) => {
+                    if let Err(err) = sent {
+                        warn!(target: LOG_LIGHTNING, err = %err.fmt_compact(), "Failed send InterceptHtlcRequest to stream");
+                    }
+                }
+                () = handle.make_shutdown_rx() => {}
+            }
+        }
+
+        None
+    }
+
+    /// Marks the node's current event handled. Returns whether the node
+    /// persisted that.
+    fn mark_event_handled(&self) -> bool {
+        if let Err(err) = self.node.event_handled() {
+            warn!(err = %err.fmt_compact(), "LDK could not mark event handled");
+            return false;
+        }
+
+        true
+    }
+}
+
 /// A failure to create the LDK Lightning node behind a [`GatewayLdkClient`].
 ///
 /// Creating the client configures an LDK node from the gateway's settings,
@@ -504,6 +1432,10 @@ enum InboundRegistrationRefusal {
     OutboundInFlight,
     /// The node holds an outbound record for the hash, pending or terminal.
     OutboundRecorded,
+    /// The node already holds an inbound record for the hash; overwriting it
+    /// would allow a colliding BOLT11/BOLT12 registration to hijack an existing
+    /// invoice.
+    InboundRecorded,
 }
 
 impl std::fmt::Display for InboundRegistrationRefusal {
@@ -515,26 +1447,21 @@ impl std::fmt::Display for InboundRegistrationRefusal {
             Self::OutboundRecorded => {
                 write!(f, "the node holds an outbound payment for this hash")
             }
+            Self::InboundRecorded => {
+                write!(f, "the node already holds an inbound payment for this hash")
+            }
         }
     }
 }
 
 /// Decides whether an invoice may be registered for a payment hash the node
-/// may already know as one of our outbound payments.
+/// may already know as an outbound or inbound payment.
 ///
-/// `ldk-node` keys BOLT11 payments by `PaymentId(payment_hash)` in both
-/// directions, and registering an invoice overwrites whatever record shares
-/// the key. Registering one for a hash we pay would erase the outbound record
-/// `pay()` reads its result from, so a settled payment would be reported as
-/// failed and the outgoing contract forfeited while the payee keeps the funds.
-///
-/// `outbound_lock_acquired` is whether the caller took the per-hash lock
-/// `pay()` holds for the whole life of a payment, and `existing_direction` is
-/// the direction of the node's record for the hash, if any. A terminal
-/// outbound record is refused as well: a restarted state machine re-runs
-/// `pay()` and needs that record to recover the payment's result instead of
-/// re-dispatching. An existing inbound record is left to the caller, whose
-/// own reservation already rejects duplicate registrations.
+/// `ldk-node` keys payments by `PaymentId(payment_hash)` across both
+/// directions and across BOLT11/BOLT12, and registering an invoice overwrites
+/// whatever record shares the key. Refusing any existing record prevents
+/// erasing an outbound payment result or letting a colliding BOLT11/BOLT12
+/// registration overwrite an active inbound invoice.
 fn check_inbound_registration(
     outbound_lock_acquired: bool,
     existing_direction: Option<PaymentDirection>,
@@ -545,7 +1472,8 @@ fn check_inbound_registration(
 
     match existing_direction {
         Some(PaymentDirection::Outbound) => Err(InboundRegistrationRefusal::OutboundRecorded),
-        Some(PaymentDirection::Inbound) | None => Ok(()),
+        Some(PaymentDirection::Inbound) => Err(InboundRegistrationRefusal::InboundRecorded),
+        None => Ok(()),
     }
 }
 
@@ -612,8 +1540,13 @@ impl ILnRpcClient for GatewayLdkClient {
             network: self.node.config().network.to_string(),
             block_height: ldk_block_height,
             // `synced_to_chain` is used for determining if the Lightning node is ready, so we care
-            // about the `lightning_sync` status.
-            synced_to_chain: lightning_sync.is_some(),
+            // about the `lightning_sync` status. A sync from before the node was
+            // started does not count: the node may still be catching up with
+            // the blocks mined since.
+            synced_to_chain: lightning_synced_since_start(
+                lightning_sync,
+                self.lightning_sync_before_start,
+            ),
         })
     }
 
@@ -757,20 +1690,70 @@ impl ILnRpcClient for GatewayLdkClient {
 
         let ph_hex_str = hex::encode(payment_hash);
 
-        if let PaymentAction::Settle(preimage) = action {
-            self.node
-                .bolt11_payment()
-                .claim_for_hash(ph, claimable_amount_msat, PaymentPreimage(preimage.0))
-                .map_err(|err| htlc_completion_error(&err, &ph_hex_str))?;
-        } else {
+        let PaymentAction::Settle(preimage) = action else {
             warn!(target: LOG_LIGHTNING, payment_hash = %ph_hex_str, "Unwinding payment because the action was not `Settle`");
-            self.node
-                .bolt11_payment()
-                .fail_for_hash(ph)
-                .map_err(|err| htlc_completion_error(&err, &ph_hex_str))?;
+
+            // See `HeldPaymentStore::fail_back`. If the record cannot be marked,
+            // or the node cannot fail the payment back, the payment stays held
+            // and recorded, and the call can be retried.
+            return self
+                .held_payments
+                .fail_back(ph, || {
+                    self.node
+                        .bolt11_payment()
+                        .fail_for_hash(ph)
+                        .map_err(|err| htlc_completion_error(&err, &ph_hex_str))
+                })
+                .await
+                .map_err(|err| {
+                    warn!(
+                        target: LOG_LIGHTNING,
+                        payment_hash = %ph_hex_str,
+                        err = %err.fmt_compact(),
+                        "Could not mark held payment record, leaving the payment held"
+                    );
+                    LightningRpcError::FailedToCompleteHtlc {
+                        failure_reason: format!(
+                            "Could not mark held payment record: {}",
+                            err.fmt_compact()
+                        ),
+                    }
+                })?;
+        };
+
+        // Claimed and removed under `delivery_lock`, like a fail-back, so a
+        // delivery from the record either comes before the claim or finds the
+        // record removed. Neither step waits for room on the HTLC stream.
+        let _deliveries = self.held_payments.delivery_lock.lock().await;
+
+        let result = self
+            .node
+            .bolt11_payment()
+            .claim_for_hash(ph, claimable_amount_msat, PaymentPreimage(preimage.0))
+            .map_err(|err| htlc_completion_error(&err, &ph_hex_str));
+
+        // The gateway has resolved the payment once the node claimed it or
+        // rejected the claim for good, so it is not delivered again: LDK
+        // persists the preimage before `claim_for_hash` returns, and finishes
+        // the claim after a restart on its own. A transient failure keeps the
+        // record, so the payment is delivered again when the node next starts
+        // unless a retry claims it first. A record that cannot be removed here
+        // is removed once LDK Node reports the payment received, or the node
+        // can no longer claim it.
+        if matches!(
+            result,
+            Ok(()) | Err(LightningRpcError::HtlcCompletionRejected { .. })
+        ) && let Err(err) = self.held_payments.remove(ph)
+        {
+            warn!(
+                target: LOG_LIGHTNING,
+                payment_hash = %ph_hex_str,
+                err = %err.fmt_compact(),
+                "Could not remove held payment record"
+            );
         }
 
-        return Ok(());
+        result
     }
 
     async fn create_invoice(
@@ -1352,6 +2335,89 @@ impl ILnRpcClient for GatewayLdkClient {
         });
         Ok(())
     }
+
+    // The node hands a request it does not claim back by value, once per
+    // onion message; boxing it would allocate for every request the node
+    // answers itself.
+    #[allow(clippy::result_large_err)]
+    fn bolt12_requests(
+        &self,
+        filter: Bolt12RequestFilter,
+    ) -> Result<tokio::sync::mpsc::Receiver<Bolt12Request>, LightningRpcError> {
+        let (sender, receiver) = tokio::sync::mpsc::channel(MAX_QUEUED_BOLT12_REQUESTS);
+        // The node owns the handler, so the handler must not own the node.
+        let node = Arc::downgrade(&self.node);
+
+        self.node.set_external_bolt12_request_handler(Arc::new(
+            move |request: ExternalInvoiceRequest| {
+                if !filter(request.invoice_request()) {
+                    return Err(request);
+                }
+
+                let invoice_request = request.invoice_request().clone();
+                let node: Weak<ldk_node::Node> = node.clone();
+
+                let request = Bolt12Request::new(invoice_request, move |invoice| {
+                    node.upgrade()
+                        .ok_or_else(|| LightningRpcError::Bolt12Error {
+                            failure_reason: "The Lightning node has stopped".to_string(),
+                        })?
+                        .respond_external_bolt12(request, invoice)
+                        .map_err(|err| LightningRpcError::Bolt12Error {
+                            failure_reason: format!("Cannot queue the invoice: {err}"),
+                        })
+                });
+
+                if sender.try_send(request).is_err() {
+                    debug!(target: LOG_LIGHTNING, "Dropping a BOLT12 invoice request: the queue is full");
+                }
+
+                Ok(())
+            },
+        ));
+
+        Ok(receiver)
+    }
+
+    async fn bolt12_message_path(&self) -> Result<BlindedMessagePath, LightningRpcError> {
+        Ok(self.node.external_bolt12_message_path())
+    }
+
+    async fn register_bolt12_payment(
+        &self,
+        payment_hash: sha256::Hash,
+        amount: Amount,
+        invoice_request: &InvoiceRequest,
+        offer_id: [u8; 32],
+    ) -> Result<BlindedPaymentPath, LightningRpcError> {
+        // The same guard as `create_invoice`: a registration must not
+        // overwrite the record of a payment we send for this hash.
+        let payment_id = PaymentId(payment_hash.to_byte_array());
+        let outbound_lock_guard = self
+            .outbound_lightning_payment_lock_pool
+            .try_lock(payment_id);
+        let existing_direction = self
+            .node
+            .payment(&payment_id)
+            .map(|details| details.direction);
+
+        check_inbound_registration(outbound_lock_guard.is_some(), existing_direction).map_err(
+            |refusal| LightningRpcError::Bolt12Error {
+                failure_reason: format!("Payment hash cannot be registered: {refusal}"),
+            },
+        )?;
+
+        self.node
+            .register_external_bolt12_payment(
+                PaymentHash(payment_hash.to_byte_array()),
+                amount.msats,
+                invoice_request,
+                OfferId(offer_id),
+            )
+            .map_err(|err| LightningRpcError::Bolt12Error {
+                failure_reason: format!("Cannot register the payment: {err}"),
+            })
+    }
 }
 
 /// Maps LDK's `PaymentKind` to an optional preimage and an optional payment
@@ -1373,13 +2439,7 @@ fn get_preimage_and_payment_hash(
             Some(sha256::Hash::from_slice(&hash.0).expect("Failed to convert payment hash")),
             fedimint_gateway_common::PaymentKind::Bolt11,
         ),
-        PaymentKind::Bolt11Jit {
-            hash,
-            preimage,
-            secret: _,
-            lsp_fee_limits: _,
-            ..
-        } => (
+        PaymentKind::Bolt11Jit { hash, preimage, .. } => (
             preimage.map(|p| Preimage(p.0)),
             Some(sha256::Hash::from_slice(&hash.0).expect("Failed to convert payment hash")),
             fedimint_gateway_common::PaymentKind::Bolt11,

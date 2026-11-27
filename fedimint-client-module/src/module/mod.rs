@@ -121,6 +121,13 @@ pub trait ClientContextIface: MaybeSend + MaybeSync {
 
     async fn operation_exists(&self, operation_id: OperationId) -> bool;
 
+    /// See `Client::operation_exists_dbtx`.
+    async fn operation_exists_dbtx(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        operation_id: OperationId,
+    ) -> bool;
+
     async fn config(&self) -> ClientConfig;
 
     fn db(&self) -> &Database;
@@ -546,6 +553,23 @@ where
 
     pub async fn operation_exists(&self, op_id: OperationId) -> bool {
         self.client.get().operation_exists(op_id).await
+    }
+
+    /// Whether the operation has any state machine, active or inactive, as
+    /// seen within an ongoing database transaction.
+    ///
+    /// This is the evidence [`Self::operation_exists`] uses, so a caller can
+    /// decide atomically, the same way it decided outside the transaction,
+    /// whether it is about to create an operation that already exists.
+    pub async fn operation_exists_dbtx(
+        &self,
+        dbtx: &mut DatabaseTransaction<'_>,
+        op_id: OperationId,
+    ) -> bool {
+        self.client
+            .get()
+            .operation_exists_dbtx(&mut dbtx.global_dbtx(self.global_dbtx_access_token), op_id)
+            .await
     }
 
     pub async fn get_own_active_states(&self) -> Vec<(M::States, ActiveStateMeta)> {

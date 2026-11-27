@@ -1,0 +1,37 @@
+[package]
+authors = { workspace = true }
+description = "fedimint-gw-bolt12-client is the gateway client module for servicing federated BOLT12 offline receives."
+edition = { workspace = true }
+license = { workspace = true }
+name = "fedimint-gw-bolt12-client"
+version = { workspace = true }
+
+[lib]
+name = "fedimint_gw_bolt12_client"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+bitcoin = { workspace = true }
+erased-serde = { workspace = true }
+fedimint-api-client = { workspace = true }
+fedimint-bolt12-common = { workspace = true }
+fedimint-client = { workspace = true }
+fedimint-client-module = { workspace = true }
+fedimint-core = { workspace = true }
+fedimint-eventlog = { workspace = true }
+fedimint-lightning = { workspace = true }
+fedimint-logging = { workspace = true }
+frost-secp256k1-tr = { workspace = true }
+futures = { workspace = true }
+lightning = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tpe = { workspace = true }
+tracing = { workspace = true, features = ["log"] }
+
+[lints]
+workspace = true

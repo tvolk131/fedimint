@@ -81,7 +81,14 @@ pub fn derive_agg_dk(
 }
 
 fn derive_ephemeral_sk(encryption_seed: &[u8; 32]) -> Scalar {
-    Scalar::random(&mut ChaChaRng::from_seed(*encryption_seed))
+    let mut rng = ChaChaRng::from_seed(*encryption_seed);
+
+    loop {
+        let sk = Scalar::random(&mut rng);
+        if !bool::from(sk.is_zero()) {
+            return sk;
+        }
+    }
 }
 
 fn xor_with_hash(mut bytes: [u8; 32], agg_dk: &AggregateDecryptionKey) -> [u8; 32] {
@@ -129,11 +136,21 @@ pub fn verify_ciphertext(ct: &CipherText, commitment: &sha256::Hash) -> bool {
     pairing(&G1Affine::generator(), &ct.signature.0) == pairing(&ct.pk.0, &message)
 }
 
+/// Like [`verify_ciphertext`], additionally rejecting the degenerate identity
+/// ciphertext (`ephemeral_sk == 0`) whose aggregate decryption key is the
+/// publicly known identity element.
+pub fn verify_non_identity_ciphertext(ct: &CipherText, commitment: &sha256::Hash) -> bool {
+    !bool::from(ct.pk.0.is_identity())
+        && !bool::from(ct.signature.0.is_identity())
+        && verify_ciphertext(ct, commitment)
+}
+
 pub fn decrypt_preimage(ct: &CipherText, agg_dk: &AggregateDecryptionKey) -> [u8; 32] {
     xor_with_hash(ct.encrypted_preimage, agg_dk)
 }
 
-/// The function asserts that the ciphertext is valid.
+/// Returns `false` if the ciphertext is invalid or the aggregate decryption
+/// key does not verify against `agg_pk` and `ct`.
 pub fn verify_agg_dk(
     agg_pk: &AggregatePublicKey,
     agg_dk: &AggregateDecryptionKey,
@@ -142,10 +159,9 @@ pub fn verify_agg_dk(
 ) -> bool {
     let message = hash_to_message(&ct.encrypted_preimage, &ct.pk.0, commitment);
 
-    assert_eq!(
-        pairing(&G1Affine::generator(), &ct.signature.0),
-        pairing(&ct.pk.0, &message)
-    );
+    if pairing(&G1Affine::generator(), &ct.signature.0) != pairing(&ct.pk.0, &message) {
+        return false;
+    }
 
     // Since the ciphertext is valid its signature is the ecdh point of the message
     // and the ephemeral public key. Hence, the following equation holds if and only
@@ -159,7 +175,8 @@ pub fn create_dk_share(sks: &SecretKeyShare, ct: &CipherText) -> DecryptionKeySh
     DecryptionKeyShare(ct.pk.0.mul(sks.0).to_affine())
 }
 
-/// The function asserts that the ciphertext is valid.
+/// Returns `false` if the ciphertext is invalid or the decryption key share
+/// does not verify against `pks` and `ct`.
 pub fn verify_dk_share(
     pks: &PublicKeyShare,
     dks: &DecryptionKeyShare,
@@ -168,10 +185,9 @@ pub fn verify_dk_share(
 ) -> bool {
     let message = hash_to_message(&ct.encrypted_preimage, &ct.pk.0, commitment);
 
-    assert_eq!(
-        pairing(&G1Affine::generator(), &ct.signature.0),
-        pairing(&ct.pk.0, &message)
-    );
+    if pairing(&G1Affine::generator(), &ct.signature.0) != pairing(&ct.pk.0, &message) {
+        return false;
+    }
 
     // Since the ciphertext is valid its signature is the ecdh point of the message
     // and the ephemeral public key. Hence, the following equation holds if and only

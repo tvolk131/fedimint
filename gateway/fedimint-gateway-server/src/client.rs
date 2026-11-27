@@ -15,6 +15,7 @@ use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_derive_secret::DerivableSecret;
 use fedimint_gateway_common::FederationConfig;
 use fedimint_gateway_server_db::GatewayDbExt as _;
+use fedimint_gw_bolt12_client::GatewayClientInitBolt12;
 use fedimint_gw_client::GatewayClientInit;
 use fedimint_gwv2_client::GatewayClientInitV2;
 
@@ -76,6 +77,10 @@ impl GatewayClientBuilder {
         });
 
         registry.attach(GatewayClientInitV2 {
+            gateway: gateway.clone(),
+        });
+
+        registry.attach(GatewayClientInitBolt12 {
             gateway: gateway.clone(),
         });
 

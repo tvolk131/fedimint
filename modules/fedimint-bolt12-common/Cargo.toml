@@ -1,0 +1,32 @@
+[package]
+authors = { workspace = true }
+description = "fedimint-bolt12-common defines consensus, config, and API types for federated BOLT12 offline receives."
+edition = { workspace = true }
+license = { workspace = true }
+name = "fedimint-bolt12-common"
+version = { workspace = true }
+
+[lib]
+name = "fedimint_bolt12_common"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+bitcoin = { workspace = true }
+fedimint-connectors = { workspace = true }
+fedimint-core = { workspace = true }
+fedimint-ln-common = { workspace = true }
+group = { workspace = true }
+lightning = { workspace = true }
+lightning-invoice = { workspace = true }
+mpc = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tpe = { workspace = true }
+
+[lints]
+workspace = true

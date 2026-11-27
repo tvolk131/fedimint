@@ -197,6 +197,14 @@ impl Fixtures {
 
     /// Creates a new Gateway that can be used for module tests.
     pub async fn new_gateway(&self) -> Gateway {
+        self.new_gateway_with_lightning(Arc::new(FakeLightningTest::new()))
+            .await
+    }
+
+    /// Creates a new Gateway backed by `ln_client`, for tests that bring a
+    /// real Lightning node. The gateway is marked as running; the test feeds
+    /// it payments itself.
+    pub async fn new_gateway_with_lightning(&self, ln_client: Arc<dyn ILnRpcClient>) -> Gateway {
         // Use server_gens.iter() to match the alphabetical order used by the server
         // when assigning module instance IDs (BTreeMap iteration order)
         let module_kinds: Vec<_> = self
@@ -226,6 +234,10 @@ impl Fixtures {
                 // Remove LN NG module because the gateway adds one
                 **kind != ModuleKind::from_static_str("lnv2")
             })
+            .filter(|(kind, _)| {
+                // Remove BOLT12 module because the gateway adds one
+                **kind != ModuleKind::from_static_str("bolt12")
+            })
             .map(|(_, client)| client.clone())
             .collect();
 
@@ -236,8 +248,6 @@ impl Fixtures {
             GatewayClientBuilder::new(path.clone(), registry, DatabaseBackend::RocksDb)
                 .await
                 .expect("Failed to initialize gateway");
-
-        let ln_client: Arc<dyn ILnRpcClient> = Arc::new(FakeLightningTest::new());
 
         let LightningInfo::Connected {
             public_key: lightning_public_key,

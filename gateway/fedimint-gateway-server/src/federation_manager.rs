@@ -12,6 +12,9 @@ use fedimint_core::util::{FmtCompact as _, Spanned};
 use fedimint_core::{PeerId, TieredCounts};
 use fedimint_gateway_common::FederationInfo;
 use fedimint_gateway_server_db::GatewayDbtxNcExt as _;
+use fedimint_gw_bolt12_client::{
+    GatewayClientModuleBolt12, GatewayOperationMetaBolt12, GatewayOperationRoleBolt12,
+};
 use fedimint_gw_client::GatewayClientModule;
 use fedimint_gwv2_client::{GatewayClientModuleV2, GatewayOperationMetaV2};
 use fedimint_logging::LOG_GATEWAY;
@@ -78,12 +81,27 @@ impl FederationManager {
     }
 
     async fn remove_client(&mut self, federation_id: FederationId) -> AdminResult<()> {
+        let current = self
+            .clients
+            .get(&federation_id)
+            .ok_or(FederationNotConnected {
+                federation_id_prefix: federation_id.to_prefix(),
+            })?;
+
+        // Check uniqueness BEFORE removing from `clients` / `index_to_federation`.
+        // Because we hold `&mut self`, if `strong_count == 1` no other handle
+        // exists anywhere to clone, so `remove` + `into_inner` cannot fail and
+        // leave the federation half-removed.
+        if Arc::strong_count(current.value()) != 1 {
+            return Err(AdminGatewayError::ClientRemovalError(format!(
+                "Federation client {federation_id} is not unique, failed to shutdown client"
+            )));
+        }
+
         let client = self
             .clients
             .remove(&federation_id)
-            .ok_or(FederationNotConnected {
-                federation_id_prefix: federation_id.to_prefix(),
-            })?
+            .expect("checked present above")
             .into_value();
 
         self.index_to_federation
@@ -94,7 +112,7 @@ impl FederationManager {
                 client.shutdown().await;
                 Ok(())
             }
-            _ => Err(AdminGatewayError::ClientRemovalError(format!(
+            None => Err(AdminGatewayError::ClientRemovalError(format!(
                 "Federation client {federation_id} is not unique, failed to shutdown client"
             ))),
         }
@@ -110,6 +128,24 @@ impl FederationManager {
                 let log_entry = operation_log.get_operation(op_id).await;
                 if let Some(entry) = log_entry {
                     match entry.operation_module_kind() {
+                        "bolt12" => {
+                            let Ok(meta) = entry.try_meta::<GatewayOperationMetaBolt12>() else {
+                                warn!(
+                                    target: LOG_GATEWAY,
+                                    operation_id = %op_id.fmt_short(),
+                                    "Skipping BOLT12 operation with invalid metadata while waiting for incoming payments",
+                                );
+                                continue;
+                            };
+                            if meta.role != GatewayOperationRoleBolt12::CircuitComplete {
+                                continue;
+                            }
+                            let bolt12 = client
+                                .value()
+                                .get_first_module::<GatewayClientModuleBolt12>()
+                                .map_err(anyhow::Error::from)?;
+                            bolt12.await_completion(op_id).await;
+                        }
                         "lnv2" => {
                             let Ok(meta) = entry.try_meta::<GatewayOperationMetaV2>() else {
                                 warn!(
@@ -212,6 +248,11 @@ impl FederationManager {
 
     pub fn has_federation(&self, federation_id: FederationId) -> bool {
         self.clients.contains_key(&federation_id)
+    }
+
+    /// Every connected federation's client.
+    pub fn clients(&self) -> Vec<Spanned<ClientHandleArc>> {
+        self.clients.values().cloned().collect()
     }
 
     pub fn client(&self, federation_id: &FederationId) -> Option<&Spanned<ClientHandleArc>> {

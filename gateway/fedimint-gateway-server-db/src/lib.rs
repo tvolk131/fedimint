@@ -108,6 +108,35 @@ pub trait GatewayDbtxNcExt {
         operation_id: OperationId,
     ) -> OperationId;
 
+    /// Atomically reserves `payment_hash` for `(federation_id, protocol)` across
+    /// both BOLT11 and BOLT12 and all connected federations. Returns `None` on
+    /// success, or `Some(existing)` if another invoice/federation already owns
+    /// the payment hash.
+    async fn claim_payment_hash_owner(
+        &mut self,
+        payment_hash: sha256::Hash,
+        owner: &PaymentHashOwner,
+    ) -> Option<PaymentHashOwner>;
+
+    /// Loads the persisted owner of `payment_hash`, if any.
+    async fn load_payment_hash_owner(
+        &mut self,
+        payment_hash: sha256::Hash,
+    ) -> Option<PaymentHashOwner>;
+
+    /// Releases `payment_hash` only if it is currently owned by
+    /// `(federation_id, protocol)`.
+    async fn release_payment_hash_owner(
+        &mut self,
+        payment_hash: sha256::Hash,
+        federation_id: FederationId,
+        protocol: PaymentHashProtocol,
+    ) -> bool;
+
+    /// Deletes all payment hash ownership records whose `expires_at_secs` is
+    /// strictly before `expired_before_secs`, returning the number removed.
+    async fn prune_expired_payment_hash_owners(&mut self, expired_before_secs: u64) -> usize;
+
     /// Reads and serializes structures from the gateway's database for the
     /// purpose for serializing to JSON for inspection.
     async fn dump_database(
@@ -284,6 +313,78 @@ impl<Cap: Send> GatewayDbtxNcExt for DatabaseTransaction<'_, Cap> {
         }
     }
 
+    async fn claim_payment_hash_owner(
+        &mut self,
+        payment_hash: sha256::Hash,
+        owner: &PaymentHashOwner,
+    ) -> Option<PaymentHashOwner> {
+        if let Some(existing) = self.get_value(&PaymentHashOwnerKey(payment_hash)).await {
+            return Some(existing);
+        }
+
+        // Backwards compatibility: if a pre-upgrade BOLT11 contract already
+        // registered this payment hash without a `PaymentHashOwner` row, treat
+        // it as owned by that BOLT11 federation.
+        if let Some(existing_bolt11) = self
+            .get_value(&RegisteredIncomingContractKey(PaymentImage::Hash(
+                payment_hash,
+            )))
+            .await
+        {
+            return Some(PaymentHashOwner {
+                federation_id: existing_bolt11.federation_id,
+                protocol: PaymentHashProtocol::Bolt11,
+                expires_at_secs: existing_bolt11.invoice_expires_at_secs,
+            });
+        }
+
+        self.insert_entry(&PaymentHashOwnerKey(payment_hash), owner)
+            .await;
+        None
+    }
+
+    async fn load_payment_hash_owner(
+        &mut self,
+        payment_hash: sha256::Hash,
+    ) -> Option<PaymentHashOwner> {
+        self.get_value(&PaymentHashOwnerKey(payment_hash)).await
+    }
+
+    async fn release_payment_hash_owner(
+        &mut self,
+        payment_hash: sha256::Hash,
+        federation_id: FederationId,
+        protocol: PaymentHashProtocol,
+    ) -> bool {
+        if let Some(existing) = self.get_value(&PaymentHashOwnerKey(payment_hash)).await
+            && existing.federation_id == federation_id
+            && existing.protocol == protocol
+        {
+            self.remove_entry(&PaymentHashOwnerKey(payment_hash)).await;
+            return true;
+        }
+        false
+    }
+
+    async fn prune_expired_payment_hash_owners(&mut self, expired_before_secs: u64) -> usize {
+        let expired = self
+            .find_by_prefix(&PaymentHashOwnerPrefix)
+            .await
+            .filter_map(
+                |(key, owner): (PaymentHashOwnerKey, PaymentHashOwner)| async move {
+                    (owner.expires_at_secs < expired_before_secs).then_some(key.0)
+                },
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+        let count = expired.len();
+        for hash in expired {
+            self.remove_entry(&PaymentHashOwnerKey(hash)).await;
+        }
+        count
+    }
+
     async fn dump_database(
         &mut self,
         prefix_names: Vec<String>,
@@ -382,7 +483,42 @@ enum DbKeyPrefix {
     Iroh = 0x11,
     FederationBackup = 0x12,
     ClaimedOutgoingPaymentImage = 0x13,
+    PaymentHashOwner = 0x14,
 }
+
+/// Which Lightning receive protocol owns an inbound payment hash on this
+/// gateway.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Encodable, Decodable, Serialize, Deserialize)]
+pub enum PaymentHashProtocol {
+    Bolt11,
+    Bolt12,
+}
+
+/// Persistent ownership of an inbound payment hash across BOLT11, BOLT12, and
+/// all federations connected to this gateway.
+#[derive(Debug, Clone, Eq, PartialEq, Encodable, Decodable, Serialize, Deserialize)]
+pub struct PaymentHashOwner {
+    pub federation_id: FederationId,
+    pub protocol: PaymentHashProtocol,
+    pub expires_at_secs: u64,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Encodable, Decodable)]
+struct PaymentHashOwnerKey(sha256::Hash);
+
+#[derive(Debug, Encodable, Decodable)]
+struct PaymentHashOwnerPrefix;
+
+impl_db_record!(
+    key = PaymentHashOwnerKey,
+    value = PaymentHashOwner,
+    db_prefix = DbKeyPrefix::PaymentHashOwner,
+);
+
+impl_db_lookup!(
+    key = PaymentHashOwnerKey,
+    query_prefix = PaymentHashOwnerPrefix
+);
 
 impl std::fmt::Display for DbKeyPrefix {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {

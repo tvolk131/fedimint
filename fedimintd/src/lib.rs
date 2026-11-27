@@ -569,6 +569,10 @@ pub fn default_modules() -> ServerModuleInitRegistry {
     server_gens.attach(LightningInit);
     server_gens.attach(fedimint_lnv2_server::LightningInit);
 
+    if is_env_var_set(fedimint_bolt12_server::FM_ENABLE_FEDERATED_BOLT12_ENV) {
+        server_gens.attach(fedimint_bolt12_server::Bolt12Init);
+    }
+
     if !is_env_var_set(FM_DISABLE_META_MODULE_ENV) {
         server_gens.attach(MetaInit);
     }
