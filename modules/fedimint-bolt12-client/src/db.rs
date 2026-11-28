@@ -1,4 +1,4 @@
-use fedimint_bolt12_common::bolt12::RegistrationId;
+use fedimint_bolt12_common::protocol::RegistrationId;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::{impl_db_lookup, impl_db_record};
@@ -7,10 +7,10 @@ use strum_macros::EnumIter;
 #[repr(u8)]
 #[derive(Clone, EnumIter, Debug)]
 pub enum DbKeyPrefix {
-    Bolt12NextOfferIndex = 0x01,
-    Bolt12Offer = 0x02,
-    Bolt12ReceiveStreamIndex = 0x03,
-    Bolt12ReceiveStreamRewindGen = 0x04,
+    NextOfferIndex = 0x01,
+    Offer = 0x02,
+    ReceiveStreamIndex = 0x03,
+    ReceiveStreamRewindGen = 0x04,
 }
 
 impl std::fmt::Display for DbKeyPrefix {
@@ -26,7 +26,7 @@ pub struct Bolt12NextOfferIndexKey;
 impl_db_record!(
     key = Bolt12NextOfferIndexKey,
     value = u64,
-    db_prefix = DbKeyPrefix::Bolt12NextOfferIndex,
+    db_prefix = DbKeyPrefix::NextOfferIndex,
 );
 
 /// Local record of a registered federated BOLT12 offer.
@@ -47,7 +47,7 @@ pub struct Bolt12OfferPrefix;
 impl_db_record!(
     key = Bolt12OfferKey,
     value = Bolt12OfferRecord,
-    db_prefix = DbKeyPrefix::Bolt12Offer,
+    db_prefix = DbKeyPrefix::Offer,
 );
 
 impl_db_lookup!(key = Bolt12OfferKey, query_prefix = Bolt12OfferPrefix);
@@ -59,7 +59,7 @@ pub struct Bolt12ReceiveStreamIndexKey;
 impl_db_record!(
     key = Bolt12ReceiveStreamIndexKey,
     value = u64,
-    db_prefix = DbKeyPrefix::Bolt12ReceiveStreamIndex,
+    db_prefix = DbKeyPrefix::ReceiveStreamIndex,
 );
 
 /// Monotonic generation bumped whenever an offer recovery rewinds
@@ -70,5 +70,5 @@ pub struct Bolt12ReceiveStreamRewindGenKey;
 impl_db_record!(
     key = Bolt12ReceiveStreamRewindGenKey,
     value = u64,
-    db_prefix = DbKeyPrefix::Bolt12ReceiveStreamRewindGen,
+    db_prefix = DbKeyPrefix::ReceiveStreamRewindGen,
 );

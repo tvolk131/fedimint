@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use fedimint_api_client::api::{FederationApiExt, ServerError};
 use fedimint_api_client::query::FilterMapThreshold;
-use fedimint_bolt12_common::bolt12::{Bolt12Unlock, ReceiveContract};
-use fedimint_bolt12_common::endpoint_constants::BOLT12_DECRYPTION_SHARES_ENDPOINT;
+use fedimint_bolt12_common::endpoint_constants::DECRYPTION_SHARES_ENDPOINT;
+use fedimint_bolt12_common::protocol::{Bolt12Unlock, ReceiveContract};
 use fedimint_bolt12_common::{Bolt12Input, Bolt12InputV0};
 use fedimint_client_module::DynGlobalClientContext;
 use fedimint_client_module::sm::{ClientSMDatabaseTransaction, State, StateTransition};
@@ -17,7 +17,7 @@ use fedimint_core::module::{Amounts, ApiRequestErased};
 use fedimint_core::secp256k1::Keypair;
 use fedimint_core::util::FmtCompact;
 use fedimint_core::{NumPeersExt, OutPoint, PeerId, runtime};
-use fedimint_logging::LOG_CLIENT_MODULE_GW;
+use fedimint_logging::LOG_CLIENT_MODULE_GW_BOLT12;
 use serde::{Deserialize, Serialize};
 use tpe::{
     AggregateDecryptionKey, AggregatePublicKey, DecryptionKeyShare, PublicKeyShare,
@@ -184,7 +184,7 @@ impl Bolt12ReceiveStateMachine {
                 },
                 num_peers,
             ),
-            BOLT12_DECRYPTION_SHARES_ENDPOINT.to_owned(),
+            DECRYPTION_SHARES_ENDPOINT.to_owned(),
             ApiRequestErased::new(outpoint),
         );
 
@@ -267,7 +267,7 @@ impl Bolt12ReceiveStateMachine {
             }
             DecryptionOutcome::InconsistentKeys => {
                 warn!(
-                    target: LOG_CLIENT_MODULE_GW,
+                    target: LOG_CLIENT_MODULE_GW_BOLT12,
                     "Failed to obtain decryption key. Client config's public keys are inconsistent"
                 );
 
@@ -336,7 +336,7 @@ impl Bolt12ReceiveStateMachine {
             // in a state, not a panic in the executor.
             Err(err) => {
                 warn!(
-                    target: LOG_CLIENT_MODULE_GW,
+                    target: LOG_CLIENT_MODULE_GW_BOLT12,
                     err = %err.fmt_compact(),
                     amount = %old_state.contract.amount,
                     "Not refunding BOLT12 receive, its amount does not cover the refund fee"

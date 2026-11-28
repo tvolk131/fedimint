@@ -7,9 +7,11 @@
 //! Gateway client module for servicing federated BOLT12 offline receives.
 
 mod api;
-pub mod bolt12;
 pub mod complete_sm;
 pub mod events;
+pub mod receive;
+pub mod receive_sm;
+pub mod signing;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -19,7 +21,6 @@ use std::time::Duration;
 use api::GatewayBolt12FederationApi;
 use bitcoin::hashes::sha256;
 use bitcoin::secp256k1::{Keypair, SECP256K1};
-use bolt12::Bolt12ReceiveSMState;
 pub use complete_sm::IncomingCircuitKey;
 use complete_sm::{CircuitCompleteSMCommon, CircuitCompleteStateMachine, CompleteSMState};
 use fedimint_api_client::api::{DynModuleApi, FederationError};
@@ -46,6 +47,7 @@ use fedimint_core::util::FmtCompact as _;
 use fedimint_core::{apply, async_trait_maybe_send};
 use fedimint_lightning::{InterceptPaymentResponse, LightningRpcError};
 use futures::StreamExt as _;
+use receive_sm::Bolt12ReceiveSMState;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tpe::{AggregatePublicKey, PublicKeyShare};
@@ -219,7 +221,7 @@ impl ClientModule for GatewayClientModuleBolt12 {
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Decodable, Encodable)]
 pub enum GatewayClientStateMachinesBolt12 {
     CircuitComplete(CircuitCompleteStateMachine),
-    Bolt12Receive(bolt12::Bolt12ReceiveStateMachine),
+    Bolt12Receive(receive_sm::Bolt12ReceiveStateMachine),
 }
 
 impl fmt::Display for GatewayClientStateMachinesBolt12 {

@@ -12,11 +12,11 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, ensure};
-use fedimint_bolt12_common::bolt12::invoice::{Issuer, Terms, signing_digest, unsigned_invoice};
-use fedimint_bolt12_common::bolt12::{
+use fedimint_bolt12_common::config::Bolt12ModuleConfig;
+use fedimint_bolt12_common::invoice::{Issuer, Terms, signing_digest, unsigned_invoice};
+use fedimint_bolt12_common::protocol::{
     NonceRequest, NonceResponse, ReservationId, SignRequest, quorum,
 };
-use fedimint_bolt12_common::config::Bolt12ModuleConfig;
 use fedimint_core::db::{Database, DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::secp256k1::PublicKey;
 use frost_secp256k1_tr as frost;

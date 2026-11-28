@@ -10,10 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, ensure};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
-use fedimint_bolt12_common::bolt12::{
+use fedimint_bolt12_common::config::{Bolt12ModuleConfig, Bolt12PrivateConfig};
+use fedimint_bolt12_common::protocol::{
     Bolt12Config, MAX_POOL_BATCH, MAX_POOL_DEGREE, MAX_POOL_TARGET, PoolRun, quorum,
 };
-use fedimint_bolt12_common::config::{Bolt12ModuleConfig, Bolt12PrivateConfig};
 use fedimint_core::PeerId;
 use fedimint_core::bitcoin::hashes::{Hash, sha256};
 use fedimint_core::encoding::Encodable;

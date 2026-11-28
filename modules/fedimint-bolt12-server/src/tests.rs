@@ -5,16 +5,16 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use fedimint_bolt12_common::Bolt12InputError;
-use fedimint_bolt12_common::bolt12::{
-    AddStock, Bolt12Config, Bolt12Output, Bolt12Unlock, INVOICE_LIFETIME, MAX_PENDING_PER_GATEWAY,
-    MAX_PENDING_PER_OFFER, MAX_REGISTRATION_LIFETIME, MAX_STOCK_BATCH, ReceiveContract,
-    ReceivePolicy, Register, RegistrationId, Reservation, ReservationId, Reserve, Source,
-    StockItem, terms_hash,
-};
 use fedimint_bolt12_common::config::{
     Bolt12ConfigConsensus, Bolt12ConfigPrivate, Bolt12ModuleConfig, FeeConsensus,
 };
 use fedimint_bolt12_common::gateway_api::PaymentFee;
+use fedimint_bolt12_common::protocol::{
+    AddStock, Bolt12Config, Bolt12OutputV0, Bolt12Unlock, INVOICE_LIFETIME,
+    MAX_PENDING_PER_GATEWAY, MAX_PENDING_PER_OFFER, MAX_REGISTRATION_LIFETIME, MAX_STOCK_BATCH,
+    ReceiveContract, ReceivePolicy, Register, RegistrationId, Reservation, ReservationId, Reserve,
+    Source, StockItem, terms_hash,
+};
 use fedimint_core::bitcoin::hashes::{Hash, sha256};
 use fedimint_core::db::mem_impl::MemDatabase;
 use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
@@ -24,7 +24,7 @@ use fedimint_core::{Amount, NumPeersExt, OutPoint, PeerId, TransactionId};
 use rand::rngs::OsRng;
 use tpe::{SecretKeyShare, aggregate_dk_shares};
 
-use super::{
+use crate::consensus::{
     OutputEffect, gateway_is_approved, process_gateway_vote, process_input, process_output,
 };
 use crate::db::{
@@ -111,7 +111,11 @@ impl Federation {
 
     /// Apply an output the way the server does: keep its writes only if it
     /// was accepted.
-    async fn apply(&mut self, output: Bolt12Output, now: u64) -> Result<(OutPoint, OutputEffect)> {
+    async fn apply(
+        &mut self,
+        output: Bolt12OutputV0,
+        now: u64,
+    ) -> Result<(OutPoint, OutputEffect)> {
         let outpoint = self.next_outpoint();
         let mut dbtx = self.db.begin_transaction().await;
 
@@ -124,7 +128,7 @@ impl Federation {
     }
 
     /// Why an output is rejected, or `None` if it is accepted and applied.
-    async fn rejection(&mut self, output: Bolt12Output, now: u64) -> Option<String> {
+    async fn rejection(&mut self, output: Bolt12OutputV0, now: u64) -> Option<String> {
         self.apply(output, now).await.err().map(|e| e.to_string())
     }
 
@@ -278,7 +282,7 @@ async fn register(fed: &mut Federation, expires_at: u64, now: u64) -> Offer {
     let policy = policy(&key, expires_at);
 
     fed.apply(
-        Bolt12Output::Register(Register::new(policy.clone(), &key)),
+        Bolt12OutputV0::Register(Register::new(policy.clone(), &key)),
         now,
     )
     .await
@@ -296,7 +300,7 @@ async fn offer_with_stock(fed: &mut Federation, count: u64) -> Offer {
     let items = stock(fed, &offer, 0, count);
 
     fed.apply(
-        Bolt12Output::AddStock(AddStock::new(offer.id, 0, items, &offer.key)),
+        Bolt12OutputV0::AddStock(AddStock::new(offer.id, 0, items, &offer.key)),
         NOW,
     )
     .await
@@ -331,7 +335,7 @@ async fn funded_receive_is_claimable_by_the_recipient() -> Result<()> {
     let request = reserve(&offer, 0, &gateway);
     let id = request.reservation_id();
 
-    let (_, effect) = fed.apply(Bolt12Output::Reserve(request), NOW).await?;
+    let (_, effect) = fed.apply(Bolt12OutputV0::Reserve(request), NOW).await?;
 
     // Reservations move nothing and cost nothing.
     assert_eq!((effect.amount, effect.fee), (Amount::ZERO, Amount::ZERO));
@@ -345,7 +349,7 @@ async fn funded_receive_is_claimable_by_the_recipient() -> Result<()> {
         sha256::Hash::hash(&preimage(&offer, 0)).to_byte_array()
     );
 
-    let (outpoint, effect) = fed.apply(Bolt12Output::Receive(id), NOW + 30).await?;
+    let (outpoint, effect) = fed.apply(Bolt12OutputV0::Receive(id), NOW + 30).await?;
     let net = Amount::from_sats(10_000 - 60);
 
     assert!(effect.funded);
@@ -358,7 +362,7 @@ async fn funded_receive_is_claimable_by_the_recipient() -> Result<()> {
     // Funding consumes the reservation, so it cannot be funded twice.
     assert!(fed.reservation(id).await.is_none());
     assert!(
-        fed.apply(Bolt12Output::Receive(id), NOW + 31)
+        fed.apply(Bolt12OutputV0::Receive(id), NOW + 31)
             .await
             .is_err()
     );
@@ -424,11 +428,11 @@ async fn wrong_decryption_key_cannot_spend() -> Result<()> {
     let second = reserve(&offer, 1, &gateway);
     let (first_id, second_id) = (first.reservation_id(), second.reservation_id());
 
-    fed.apply(Bolt12Output::Reserve(first), NOW).await?;
-    fed.apply(Bolt12Output::Reserve(second), NOW).await?;
+    fed.apply(Bolt12OutputV0::Reserve(first), NOW).await?;
+    fed.apply(Bolt12OutputV0::Reserve(second), NOW).await?;
 
-    let (first_outpoint, _) = fed.apply(Bolt12Output::Receive(first_id), NOW).await?;
-    let (second_outpoint, _) = fed.apply(Bolt12Output::Receive(second_id), NOW).await?;
+    let (first_outpoint, _) = fed.apply(Bolt12OutputV0::Receive(first_id), NOW).await?;
+    let (second_outpoint, _) = fed.apply(Bolt12OutputV0::Receive(second_id), NOW).await?;
 
     // A valid key for one receive is not a valid key for another.
     let other_key = fed.unlock(second_outpoint).await;
@@ -467,7 +471,7 @@ async fn stock_without_the_preimage_refunds_the_gateway_and_voids_the_offer() ->
     let good = stock(&fed, &offer, 1, 1).remove(0);
 
     fed.apply(
-        Bolt12Output::AddStock(AddStock::new(offer.id, 0, vec![bad, good], &offer.key)),
+        Bolt12OutputV0::AddStock(AddStock::new(offer.id, 0, vec![bad, good], &offer.key)),
         NOW,
     )
     .await?;
@@ -476,9 +480,9 @@ async fn stock_without_the_preimage_refunds_the_gateway_and_voids_the_offer() ->
     let request = reserve(&offer, 0, &gateway);
     let id = request.reservation_id();
 
-    fed.apply(Bolt12Output::Reserve(request), NOW).await?;
+    fed.apply(Bolt12OutputV0::Reserve(request), NOW).await?;
 
-    let (outpoint, _) = fed.apply(Bolt12Output::Receive(id), NOW).await?;
+    let (outpoint, _) = fed.apply(Bolt12OutputV0::Receive(id), NOW).await?;
     let key = fed.unlock(outpoint).await;
 
     assert_eq!(
@@ -492,7 +496,7 @@ async fn stock_without_the_preimage_refunds_the_gateway_and_voids_the_offer() ->
 
     // The remaining, valid stock can no longer be reserved.
     let error = fed
-        .apply(Bolt12Output::Reserve(reserve(&offer, 1, &gateway)), NOW)
+        .apply(Bolt12OutputV0::Reserve(reserve(&offer, 1, &gateway)), NOW)
         .await
         .err()
         .expect("voided offer rejects reservations");
@@ -513,7 +517,7 @@ async fn reservation_requires_an_approved_gateway_and_policy_compliant_terms() -
     fed.vote(1, gateway.public_key(), true).await?;
 
     assert!(
-        fed.rejection(Bolt12Output::Reserve(reserve(&offer, 0, &gateway)), NOW)
+        fed.rejection(Bolt12OutputV0::Reserve(reserve(&offer, 0, &gateway)), NOW)
             .await
             .expect("unapproved gateway is rejected")
             .contains("not approved")
@@ -526,7 +530,7 @@ async fn reservation_requires_an_approved_gateway_and_policy_compliant_terms() -
     tampered.amount = Amount::from_sats(20_000);
 
     assert!(
-        fed.rejection(Bolt12Output::Reserve(tampered), NOW)
+        fed.rejection(Bolt12OutputV0::Reserve(tampered), NOW)
             .await
             .expect("tampered reservation is rejected")
             .contains("signature")
@@ -543,7 +547,7 @@ async fn reservation_requires_an_approved_gateway_and_policy_compliant_terms() -
     );
 
     assert!(
-        fed.rejection(Bolt12Output::Reserve(greedy), NOW)
+        fed.rejection(Bolt12OutputV0::Reserve(greedy), NOW)
             .await
             .is_some()
     );
@@ -559,13 +563,13 @@ async fn reservation_requires_an_approved_gateway_and_policy_compliant_terms() -
     );
 
     assert!(
-        fed.rejection(Bolt12Output::Reserve(dust), NOW)
+        fed.rejection(Bolt12OutputV0::Reserve(dust), NOW)
             .await
             .is_some()
     );
 
     assert!(
-        fed.rejection(Bolt12Output::Reserve(reserve(&offer, 9, &gateway)), NOW)
+        fed.rejection(Bolt12OutputV0::Reserve(reserve(&offer, 9, &gateway)), NOW)
             .await
             .expect("missing stock is rejected")
             .contains("stock item")
@@ -573,7 +577,7 @@ async fn reservation_requires_an_approved_gateway_and_policy_compliant_terms() -
 
     assert!(
         fed.rejection(
-            Bolt12Output::Reserve(reserve(&offer, 0, &gateway)),
+            Bolt12OutputV0::Reserve(reserve(&offer, 0, &gateway)),
             NOW + 86_400
         )
         .await
@@ -582,13 +586,13 @@ async fn reservation_requires_an_approved_gateway_and_policy_compliant_terms() -
     );
 
     // None of the rejected attempts consumed the stock item.
-    fed.apply(Bolt12Output::Reserve(reserve(&offer, 0, &gateway)), NOW)
+    fed.apply(Bolt12OutputV0::Reserve(reserve(&offer, 0, &gateway)), NOW)
         .await?;
 
     // A stock item is single use, even after its invoice expires unpaid.
     assert!(
         fed.rejection(
-            Bolt12Output::Reserve(reserve(&offer, 0, &gateway)),
+            Bolt12OutputV0::Reserve(reserve(&offer, 0, &gateway)),
             NOW + INVOICE_LIFETIME + 1
         )
         .await
@@ -599,7 +603,7 @@ async fn reservation_requires_an_approved_gateway_and_policy_compliant_terms() -
     fed.vote(1, gateway.public_key(), false).await?;
 
     assert!(
-        fed.rejection(Bolt12Output::Reserve(reserve(&offer, 1, &gateway)), NOW)
+        fed.rejection(Bolt12OutputV0::Reserve(reserve(&offer, 1, &gateway)), NOW)
             .await
             .expect("revoked gateway is rejected")
             .contains("not approved")
@@ -657,11 +661,14 @@ async fn unpaid_reservations_are_bounded_per_offer_and_free_up_on_expiry_or_paym
 
         ids.push(request.reservation_id());
 
-        fed.apply(Bolt12Output::Reserve(request), NOW).await?;
+        fed.apply(Bolt12OutputV0::Reserve(request), NOW).await?;
     }
 
     let over = fed
-        .apply(Bolt12Output::Reserve(reserve(&offer, 8, &gateway)), NOW + 1)
+        .apply(
+            Bolt12OutputV0::Reserve(reserve(&offer, 8, &gateway)),
+            NOW + 1,
+        )
         .await
         .err()
         .expect("ninth unpaid invoice is rejected");
@@ -669,21 +676,27 @@ async fn unpaid_reservations_are_bounded_per_offer_and_free_up_on_expiry_or_paym
     assert!(over.to_string().contains("this offer"));
 
     // Paying one invoice frees its slot immediately.
-    fed.apply(Bolt12Output::Receive(ids[0]), NOW + 1).await?;
-    fed.apply(Bolt12Output::Reserve(reserve(&offer, 8, &gateway)), NOW + 1)
-        .await?;
+    fed.apply(Bolt12OutputV0::Receive(ids[0]), NOW + 1).await?;
+    fed.apply(
+        Bolt12OutputV0::Reserve(reserve(&offer, 8, &gateway)),
+        NOW + 1,
+    )
+    .await?;
 
     assert!(
-        fed.apply(Bolt12Output::Reserve(reserve(&offer, 9, &gateway)), NOW + 1)
-            .await
-            .is_err()
+        fed.apply(
+            Bolt12OutputV0::Reserve(reserve(&offer, 9, &gateway)),
+            NOW + 1
+        )
+        .await
+        .is_err()
     );
 
     // Once the first batch expires its slots free up and its rows are deleted;
     // the reservation made at NOW + 1 is still pending.
     let later = NOW + INVOICE_LIFETIME;
 
-    fed.apply(Bolt12Output::Reserve(reserve(&offer, 9, &gateway)), later)
+    fed.apply(Bolt12OutputV0::Reserve(reserve(&offer, 9, &gateway)), later)
         .await?;
 
     for id in &ids[1..] {
@@ -702,7 +715,7 @@ async fn unpaid_reservations_are_bounded_per_offer_and_free_up_on_expiry_or_paym
 
     // An expired reservation cannot be funded.
     assert!(
-        fed.apply(Bolt12Output::Receive(ids[1]), later)
+        fed.apply(Bolt12OutputV0::Receive(ids[1]), later)
             .await
             .is_err()
     );
@@ -721,10 +734,10 @@ async fn expired_invoice_cannot_be_funded() -> Result<()> {
     let request = reserve(&offer, 0, &gateway);
     let id = request.reservation_id();
 
-    fed.apply(Bolt12Output::Reserve(request), NOW).await?;
+    fed.apply(Bolt12OutputV0::Reserve(request), NOW).await?;
 
     let error = fed
-        .apply(Bolt12Output::Receive(id), NOW + INVOICE_LIFETIME)
+        .apply(Bolt12OutputV0::Receive(id), NOW + INVOICE_LIFETIME)
         .await
         .err()
         .expect("funding at expiry is rejected");
@@ -732,7 +745,7 @@ async fn expired_invoice_cannot_be_funded() -> Result<()> {
     assert!(error.to_string().contains("expired"));
 
     // The rejection rolled back, so funding one second earlier still works.
-    fed.apply(Bolt12Output::Receive(id), NOW + INVOICE_LIFETIME - 1)
+    fed.apply(Bolt12OutputV0::Receive(id), NOW + INVOICE_LIFETIME - 1)
         .await?;
 
     Ok(())
@@ -761,8 +774,11 @@ async fn unpaid_reservations_are_bounded_per_gateway_across_offers() -> Result<(
                 break 'fill;
             }
 
-            fed.apply(Bolt12Output::Reserve(reserve(offer, index, &gateway)), NOW)
-                .await?;
+            fed.apply(
+                Bolt12OutputV0::Reserve(reserve(offer, index, &gateway)),
+                NOW,
+            )
+            .await?;
 
             reserved += 1;
         }
@@ -771,7 +787,7 @@ async fn unpaid_reservations_are_bounded_per_gateway_across_offers() -> Result<(
     let last = offers.last().expect("offers exist");
 
     let over = fed
-        .apply(Bolt12Output::Reserve(reserve(last, 0, &gateway)), NOW)
+        .apply(Bolt12OutputV0::Reserve(reserve(last, 0, &gateway)), NOW)
         .await
         .err()
         .expect("gateway allowance is exhausted");
@@ -779,8 +795,11 @@ async fn unpaid_reservations_are_bounded_per_gateway_across_offers() -> Result<(
     assert!(over.to_string().contains("this gateway"));
 
     // Another gateway has its own allowance for the same offer.
-    fed.apply(Bolt12Output::Reserve(reserve(last, 0, &other_gateway)), NOW)
-        .await?;
+    fed.apply(
+        Bolt12OutputV0::Reserve(reserve(last, 0, &other_gateway)),
+        NOW,
+    )
+    .await?;
 
     Ok(())
 }
@@ -796,7 +815,7 @@ async fn stock_uploads_are_validated() -> Result<()> {
     // Wrong signer.
     let add = AddStock::new(offer.id, 0, items.clone(), &other.key);
     assert!(
-        fed.rejection(Bolt12Output::AddStock(add), NOW)
+        fed.rejection(Bolt12OutputV0::AddStock(add), NOW)
             .await
             .is_some()
     );
@@ -804,7 +823,7 @@ async fn stock_uploads_are_validated() -> Result<()> {
     // Wrong start index: the ciphertexts are bound to indices 0 and 1.
     let add = AddStock::new(offer.id, 1, items.clone(), &offer.key);
     assert!(
-        fed.rejection(Bolt12Output::AddStock(add), NOW)
+        fed.rejection(Bolt12OutputV0::AddStock(add), NOW)
             .await
             .is_some()
     );
@@ -813,7 +832,7 @@ async fn stock_uploads_are_validated() -> Result<()> {
     let foreign = stock(&fed, &other, 0, 1);
     let add = AddStock::new(offer.id, 0, foreign, &offer.key);
     assert!(
-        fed.rejection(Bolt12Output::AddStock(add), NOW)
+        fed.rejection(Bolt12OutputV0::AddStock(add), NOW)
             .await
             .is_some()
     );
@@ -832,7 +851,7 @@ async fn stock_uploads_are_validated() -> Result<()> {
     });
     let add = AddStock::new(offer.id, 0, repeated, &offer.key);
     assert!(
-        fed.rejection(Bolt12Output::AddStock(add), NOW)
+        fed.rejection(Bolt12OutputV0::AddStock(add), NOW)
             .await
             .is_some()
     );
@@ -840,7 +859,7 @@ async fn stock_uploads_are_validated() -> Result<()> {
     // Empty and oversized batches.
     let add = AddStock::new(offer.id, 0, vec![], &offer.key);
     assert!(
-        fed.rejection(Bolt12Output::AddStock(add), NOW)
+        fed.rejection(Bolt12OutputV0::AddStock(add), NOW)
             .await
             .is_some()
     );
@@ -848,14 +867,14 @@ async fn stock_uploads_are_validated() -> Result<()> {
     let oversized = stock(&fed, &offer, 0, MAX_STOCK_BATCH as u64 + 1);
     let add = AddStock::new(offer.id, 0, oversized, &offer.key);
     assert!(
-        fed.rejection(Bolt12Output::AddStock(add), NOW)
+        fed.rejection(Bolt12OutputV0::AddStock(add), NOW)
             .await
             .is_some()
     );
 
     let (_, effect) = fed
         .apply(
-            Bolt12Output::AddStock(AddStock::new(offer.id, 0, items.clone(), &offer.key)),
+            Bolt12OutputV0::AddStock(AddStock::new(offer.id, 0, items.clone(), &offer.key)),
             NOW,
         )
         .await?;
@@ -866,7 +885,7 @@ async fn stock_uploads_are_validated() -> Result<()> {
     // The same hashes cannot be uploaded again, by anyone.
     let add = AddStock::new(offer.id, 2, items, &offer.key);
     assert!(
-        fed.rejection(Bolt12Output::AddStock(add), NOW)
+        fed.rejection(Bolt12OutputV0::AddStock(add), NOW)
             .await
             .is_some()
     );
@@ -894,7 +913,7 @@ async fn registrations_are_validated() -> Result<()> {
     // Signed by a key other than the claim key.
     let register = Register::new(policy(&key, NOW + 100), &other_key);
     assert!(
-        fed.rejection(Bolt12Output::Register(register), NOW)
+        fed.rejection(Bolt12OutputV0::Register(register), NOW)
             .await
             .is_some()
     );
@@ -902,14 +921,14 @@ async fn registrations_are_validated() -> Result<()> {
     // Already expired, and expiring too far ahead.
     let register = Register::new(policy(&key, NOW), &key);
     assert!(
-        fed.rejection(Bolt12Output::Register(register), NOW)
+        fed.rejection(Bolt12OutputV0::Register(register), NOW)
             .await
             .is_some()
     );
 
     let register = Register::new(policy(&key, NOW + MAX_REGISTRATION_LIFETIME + 1), &key);
     assert!(
-        fed.rejection(Bolt12Output::Register(register), NOW)
+        fed.rejection(Bolt12OutputV0::Register(register), NOW)
             .await
             .is_some()
     );
@@ -917,7 +936,7 @@ async fn registrations_are_validated() -> Result<()> {
     let short_lived = policy(&key, NOW + 100);
     let (_, effect) = fed
         .apply(
-            Bolt12Output::Register(Register::new(short_lived.clone(), &key)),
+            Bolt12OutputV0::Register(Register::new(short_lived.clone(), &key)),
             NOW,
         )
         .await?;
@@ -927,7 +946,7 @@ async fn registrations_are_validated() -> Result<()> {
     // The claim key and the handle are each unique among live registrations.
     let register = Register::new(policy(&key, NOW + 200), &key);
     assert!(
-        fed.rejection(Bolt12Output::Register(register), NOW)
+        fed.rejection(Bolt12OutputV0::Register(register), NOW)
             .await
             .is_some()
     );
@@ -936,7 +955,7 @@ async fn registrations_are_validated() -> Result<()> {
     same_handle.handle = short_lived.handle;
     let register = Register::new(same_handle, &other_key);
     assert!(
-        fed.rejection(Bolt12Output::Register(register), NOW)
+        fed.rejection(Bolt12OutputV0::Register(register), NOW)
             .await
             .is_some()
     );
@@ -952,7 +971,7 @@ async fn expired_registrations_are_pruned_with_their_unused_stock() -> Result<()
     let short_lived = policy(&key, NOW + 100);
 
     fed.apply(
-        Bolt12Output::Register(Register::new(short_lived.clone(), &key)),
+        Bolt12OutputV0::Register(Register::new(short_lived.clone(), &key)),
         NOW,
     )
     .await?;
@@ -965,7 +984,7 @@ async fn expired_registrations_are_pruned_with_their_unused_stock() -> Result<()
     let items = stock(&fed, &offer, 0, 2);
 
     fed.apply(
-        Bolt12Output::AddStock(AddStock::new(offer.id, 0, items.clone(), &offer.key)),
+        Bolt12OutputV0::AddStock(AddStock::new(offer.id, 0, items.clone(), &offer.key)),
         NOW,
     )
     .await?;
@@ -977,7 +996,8 @@ async fn expired_registrations_are_pruned_with_their_unused_stock() -> Result<()
     let request = reserve(&offer, 0, &gateway);
     let reservation = request.reservation_id();
 
-    fed.apply(Bolt12Output::Reserve(request), NOW + 99).await?;
+    fed.apply(Bolt12OutputV0::Reserve(request), NOW + 99)
+        .await?;
 
     // Expired but still inside the window in which its last invoice could be
     // funded: a new registration does not prune it yet.
@@ -1025,7 +1045,7 @@ async fn expired_registrations_are_pruned_with_their_unused_stock() -> Result<()
     // be uploaded again; the one that reached a reservation cannot.
     assert!(
         fed.apply(
-            Bolt12Output::Register(Register::new(policy(&offer.key, after + 1_000), &offer.key)),
+            Bolt12OutputV0::Register(Register::new(policy(&offer.key, after + 1_000), &offer.key)),
             after,
         )
         .await
@@ -1040,7 +1060,7 @@ async fn expired_registrations_are_pruned_with_their_unused_stock() -> Result<()
     let renewed_id = renewed.id();
 
     fed.apply(
-        Bolt12Output::Register(Register::new(renewed, &renewed_key)),
+        Bolt12OutputV0::Register(Register::new(renewed, &renewed_key)),
         after,
     )
     .await?;
@@ -1059,7 +1079,7 @@ async fn expired_registrations_are_pruned_with_their_unused_stock() -> Result<()
 
     assert!(
         fed.apply(
-            Bolt12Output::AddStock(AddStock::new(
+            Bolt12OutputV0::AddStock(AddStock::new(
                 renewed_id,
                 0,
                 vec![reserved_hash],
@@ -1072,7 +1092,7 @@ async fn expired_registrations_are_pruned_with_their_unused_stock() -> Result<()
     );
 
     fed.apply(
-        Bolt12Output::AddStock(AddStock::new(
+        Bolt12OutputV0::AddStock(AddStock::new(
             renewed_id,
             0,
             vec![unused_hash],
@@ -1093,7 +1113,7 @@ async fn register_at(fed: &mut Federation, now: u64) {
 async fn outputs_are_rejected_before_the_consensus_clock_is_established() {
     let mut fed = Federation::new();
     let key = Keypair::new(SECP256K1, &mut OsRng);
-    let output = Bolt12Output::Register(Register::new(policy(&key, 100), &key));
+    let output = Bolt12OutputV0::Register(Register::new(policy(&key, 100), &key));
 
     let rejection = fed
         .rejection(output.clone(), 0)
@@ -1129,7 +1149,7 @@ async fn gateway_votes_leave_no_rows_behind_and_are_bounded() -> Result<()> {
     assert_eq!(rows().await, 0);
 
     // A guardian cannot track fresh keys without bound.
-    for _ in 0..super::MAX_APPROVALS_PER_GUARDIAN {
+    for _ in 0..crate::consensus::MAX_APPROVALS_PER_GUARDIAN {
         fed.vote(1, Keypair::new(SECP256K1, &mut OsRng).public_key(), true)
             .await?;
     }

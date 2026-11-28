@@ -15,12 +15,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use fedimint_bolt12_common::Bolt12ConsensusItem;
-use fedimint_bolt12_common::bolt12::{
+use fedimint_bolt12_common::config::Bolt12ModuleConfig;
+use fedimint_bolt12_common::protocol::{
     AbandonedRun, Blame, Bolt12Config, MAX_POOL_TARGET, POOL_RUN_TIMEOUT, PoolItem, PoolRun,
     PoolShare, PoolVerdict, STICKY_COMMITTEE_RUNS, Sealed, SealedShare, StickyCommittee,
     pool_share_binding, quorum,
 };
-use fedimint_bolt12_common::config::Bolt12ModuleConfig;
 use fedimint_core::PeerId;
 use fedimint_core::bitcoin::hashes::sha256;
 use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};

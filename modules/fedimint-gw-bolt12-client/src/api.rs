@@ -1,11 +1,10 @@
 use fedimint_api_client::api::{FederationApiExt, FederationResult, IModuleFederationApi};
-use fedimint_bolt12_common::bolt12::{
-    Registration, RegistrationId, Reservation, ReservationId, StockItem,
-};
 use fedimint_bolt12_common::endpoint_constants::{
-    BOLT12_GATEWAY_APPROVED_ENDPOINT, BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_POOL_ITEMS_ENDPOINT,
-    BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT, BOLT12_RESERVATION_ENDPOINT,
-    BOLT12_STOCK_ITEMS_ENDPOINT,
+    GATEWAY_APPROVED_ENDPOINT, NEXT_STOCK_ENDPOINT, POOL_ITEMS_ENDPOINT,
+    REGISTRATION_BY_HANDLE_ENDPOINT, RESERVATION_ENDPOINT, STOCK_ITEMS_ENDPOINT,
+};
+use fedimint_bolt12_common::protocol::{
+    Registration, RegistrationId, Reservation, ReservationId, StockItem,
 };
 use fedimint_core::module::ApiRequestErased;
 use fedimint_core::secp256k1::PublicKey;
@@ -47,7 +46,7 @@ where
 {
     async fn bolt12_gateway_approved(&self, gateway: PublicKey) -> FederationResult<bool> {
         self.request_current_consensus(
-            BOLT12_GATEWAY_APPROVED_ENDPOINT.to_string(),
+            GATEWAY_APPROVED_ENDPOINT.to_string(),
             ApiRequestErased::new(gateway),
         )
         .await
@@ -58,7 +57,7 @@ where
         handle: [u8; 32],
     ) -> FederationResult<Option<(RegistrationId, Registration)>> {
         self.request_current_consensus(
-            BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT.to_string(),
+            REGISTRATION_BY_HANDLE_ENDPOINT.to_string(),
             ApiRequestErased::new(handle),
         )
         .await
@@ -69,7 +68,7 @@ where
         registration: RegistrationId,
     ) -> FederationResult<Option<(u64, StockItem)>> {
         self.request_current_consensus(
-            BOLT12_NEXT_STOCK_ENDPOINT.to_string(),
+            NEXT_STOCK_ENDPOINT.to_string(),
             ApiRequestErased::new(registration),
         )
         .await
@@ -81,7 +80,7 @@ where
         min_index: u64,
     ) -> FederationResult<Vec<(u64, StockItem)>> {
         self.request_current_consensus(
-            BOLT12_STOCK_ITEMS_ENDPOINT.to_string(),
+            STOCK_ITEMS_ENDPOINT.to_string(),
             ApiRequestErased::new((registration, min_index)),
         )
         .await
@@ -92,7 +91,7 @@ where
         reservation: ReservationId,
     ) -> FederationResult<Option<Reservation>> {
         self.request_current_consensus(
-            BOLT12_RESERVATION_ENDPOINT.to_string(),
+            RESERVATION_ENDPOINT.to_string(),
             ApiRequestErased::new(reservation),
         )
         .await
@@ -100,7 +99,7 @@ where
 
     async fn bolt12_pool_items(&self, min_index: u64) -> FederationResult<Vec<(u64, [u8; 32])>> {
         self.request_current_consensus(
-            BOLT12_POOL_ITEMS_ENDPOINT.to_string(),
+            POOL_ITEMS_ENDPOINT.to_string(),
             ApiRequestErased::new(min_index),
         )
         .await

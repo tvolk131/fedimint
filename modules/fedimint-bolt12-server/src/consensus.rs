@@ -4,24 +4,18 @@
 //! consensus time. No BOLT12 message is parsed and no network I/O happens while
 //! a transaction or consensus item is applied. See `docs/federated_bolt12.md`.
 
-mod api;
-pub mod keys;
-pub mod pool;
-pub mod signer;
-pub mod transport;
-pub mod worker;
-
+use crate::pool;
 use anyhow::{Context, Result, ensure};
 use fedimint_bolt12_common::Bolt12InputError;
-use fedimint_bolt12_common::bolt12::{
-    AddStock, Bolt12Output, Bolt12Unlock, INVOICE_LIFETIME, MAX_PENDING_PER_GATEWAY,
+use fedimint_bolt12_common::config::Bolt12ModuleConfig;
+use fedimint_bolt12_common::protocol::{
+    AddStock, Bolt12OutputV0, Bolt12Unlock, INVOICE_LIFETIME, MAX_PENDING_PER_GATEWAY,
     MAX_PENDING_PER_OFFER, MAX_PENDING_POOL, MAX_PENDING_POOL_PER_OFFER, MAX_REGISTRATION_LIFETIME,
     MAX_REGISTRATIONS, MAX_STOCK, MAX_STOCK_BATCH, Pending, PoolItem,
     REGISTRATIONS_PRUNED_PER_REGISTER, Register, Registration, RegistrationId, Reservation,
     ReservationId, Reserve, Sealed, Source, StreamedReceive, output_amount_and_fee, quorum,
     reservation_is_economical,
 };
-use fedimint_bolt12_common::config::Bolt12ModuleConfig;
 use fedimint_core::db::{DatabaseTransaction, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::{Amount, OutPoint, PeerId};
@@ -54,7 +48,7 @@ pub struct OutputEffect {
 pub async fn process_output(
     dbtx: &mut DatabaseTransaction<'_>,
     cfg: &Bolt12ModuleConfig,
-    output: &Bolt12Output,
+    output: &Bolt12OutputV0,
     outpoint: OutPoint,
     now: u64,
 ) -> Result<OutputEffect> {
@@ -66,19 +60,19 @@ pub async fn process_output(
     ensure!(now > 0, "the consensus clock is not established yet");
 
     let receive_amount = match output {
-        Bolt12Output::Register(register) => {
+        Bolt12OutputV0::Register(register) => {
             process_register(dbtx, register, now).await?;
             Amount::ZERO
         }
-        Bolt12Output::AddStock(add) => {
+        Bolt12OutputV0::AddStock(add) => {
             process_add_stock(dbtx, add, now).await?;
             Amount::ZERO
         }
-        Bolt12Output::Reserve(reserve) => {
+        Bolt12OutputV0::Reserve(reserve) => {
             process_reserve(dbtx, cfg, reserve, now).await?;
             Amount::ZERO
         }
-        Bolt12Output::Receive(reservation) => {
+        Bolt12OutputV0::Receive(reservation) => {
             process_receive(dbtx, cfg, *reservation, outpoint, now).await?
         }
     };
@@ -90,7 +84,7 @@ pub async fn process_output(
     Ok(OutputEffect {
         amount,
         fee,
-        funded: matches!(output, Bolt12Output::Receive(..)),
+        funded: matches!(output, Bolt12OutputV0::Receive(..)),
     })
 }
 
@@ -761,6 +755,3 @@ pub async fn process_gateway_vote(
 
     Ok(())
 }
-
-#[cfg(test)]
-mod tests;

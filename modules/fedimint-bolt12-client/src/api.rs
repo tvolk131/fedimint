@@ -5,17 +5,15 @@ use fedimint_api_client::api::{
     FederationApiExt, FederationResult, IModuleFederationApi, ServerError, ServerResult,
 };
 use fedimint_api_client::query::FilterMapThreshold;
-use fedimint_bolt12_common::bolt12::{
+use fedimint_bolt12_common::endpoint_constants::{
+    ADD_GATEWAY_ENDPOINT, AWAIT_RECEIVES_ENDPOINT, CONTRACT_ENDPOINT, DECRYPTION_SHARES_ENDPOINT,
+    GATEWAY_APPROVED_ENDPOINT, GATEWAYS_ENDPOINT, NEXT_STOCK_ENDPOINT, POOL_ITEMS_ENDPOINT,
+    RECIPIENT_USED_ENDPOINT, REGISTRATION_BY_HANDLE_ENDPOINT, REGISTRATION_BY_RECIPIENT_ENDPOINT,
+    REMOVE_GATEWAY_ENDPOINT, RESERVATION_ENDPOINT, SET_GATEWAY_VOTE_ENDPOINT,
+};
+use fedimint_bolt12_common::protocol::{
     ReceiveContract, Registration, RegistrationId, Reservation, ReservationId, StockItem,
     StreamedReceive,
-};
-use fedimint_bolt12_common::endpoint_constants::{
-    ADD_GATEWAY_ENDPOINT, BOLT12_AWAIT_RECEIVES_ENDPOINT, BOLT12_CONTRACT_ENDPOINT,
-    BOLT12_DECRYPTION_SHARES_ENDPOINT, BOLT12_GATEWAY_APPROVED_ENDPOINT,
-    BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_POOL_ITEMS_ENDPOINT, BOLT12_RECIPIENT_USED_ENDPOINT,
-    BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT, BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT,
-    BOLT12_RESERVATION_ENDPOINT, BOLT12_SET_GATEWAY_VOTE_ENDPOINT, GATEWAYS_ENDPOINT,
-    REMOVE_GATEWAY_ENDPOINT,
 };
 use fedimint_core::module::{ApiAuth, ApiRequestErased};
 use fedimint_core::secp256k1::PublicKey;
@@ -157,7 +155,7 @@ where
         handle: [u8; 32],
     ) -> FederationResult<Option<(RegistrationId, Registration)>> {
         self.request_current_consensus(
-            BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT.to_string(),
+            REGISTRATION_BY_HANDLE_ENDPOINT.to_string(),
             ApiRequestErased::new(handle),
         )
         .await
@@ -168,7 +166,7 @@ where
         claim_pk: PublicKey,
     ) -> FederationResult<Option<(RegistrationId, Registration)>> {
         self.request_current_consensus(
-            BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT.to_string(),
+            REGISTRATION_BY_RECIPIENT_ENDPOINT.to_string(),
             ApiRequestErased::new(claim_pk),
         )
         .await
@@ -176,7 +174,7 @@ where
 
     async fn bolt12_recipient_used(&self, claim_pk: PublicKey) -> FederationResult<bool> {
         self.request_current_consensus(
-            BOLT12_RECIPIENT_USED_ENDPOINT.to_string(),
+            RECIPIENT_USED_ENDPOINT.to_string(),
             ApiRequestErased::new(claim_pk),
         )
         .await
@@ -187,7 +185,7 @@ where
         registration: RegistrationId,
     ) -> FederationResult<Option<(u64, StockItem)>> {
         self.request_current_consensus(
-            BOLT12_NEXT_STOCK_ENDPOINT.to_string(),
+            NEXT_STOCK_ENDPOINT.to_string(),
             ApiRequestErased::new(registration),
         )
         .await
@@ -198,7 +196,7 @@ where
         reservation: ReservationId,
     ) -> FederationResult<Option<Reservation>> {
         self.request_current_consensus(
-            BOLT12_RESERVATION_ENDPOINT.to_string(),
+            RESERVATION_ENDPOINT.to_string(),
             ApiRequestErased::new(reservation),
         )
         .await
@@ -209,7 +207,7 @@ where
         outpoint: OutPoint,
     ) -> FederationResult<Option<ReceiveContract>> {
         self.request_current_consensus(
-            BOLT12_CONTRACT_ENDPOINT.to_string(),
+            CONTRACT_ENDPOINT.to_string(),
             ApiRequestErased::new(outpoint),
         )
         .await
@@ -217,7 +215,7 @@ where
 
     async fn await_bolt12_receives(&self, start: u64, n: usize) -> (Vec<StreamedReceive>, u64) {
         self.request_current_consensus_retry(
-            BOLT12_AWAIT_RECEIVES_ENDPOINT.to_string(),
+            AWAIT_RECEIVES_ENDPOINT.to_string(),
             ApiRequestErased::new((start, n)),
         )
         .await
@@ -225,7 +223,7 @@ where
 
     async fn bolt12_gateway_approved(&self, gateway: PublicKey) -> FederationResult<bool> {
         self.request_current_consensus(
-            BOLT12_GATEWAY_APPROVED_ENDPOINT.to_string(),
+            GATEWAY_APPROVED_ENDPOINT.to_string(),
             ApiRequestErased::new(gateway),
         )
         .await
@@ -233,7 +231,7 @@ where
 
     async fn bolt12_pool_items(&self, min_index: u64) -> FederationResult<Vec<(u64, [u8; 32])>> {
         self.request_current_consensus(
-            BOLT12_POOL_ITEMS_ENDPOINT.to_string(),
+            POOL_ITEMS_ENDPOINT.to_string(),
             ApiRequestErased::new(min_index),
         )
         .await
@@ -271,7 +269,7 @@ where
                 },
                 self.all_peers().to_num_peers(),
             ),
-            BOLT12_DECRYPTION_SHARES_ENDPOINT.to_string(),
+            DECRYPTION_SHARES_ENDPOINT.to_string(),
             ApiRequestErased::new(outpoint),
         )
         .await
@@ -284,7 +282,7 @@ where
         approve: bool,
     ) -> FederationResult<()> {
         self.request_admin(
-            BOLT12_SET_GATEWAY_VOTE_ENDPOINT,
+            SET_GATEWAY_VOTE_ENDPOINT,
             ApiRequestErased::new((gateway, approve)),
             auth,
         )

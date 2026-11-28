@@ -9,14 +9,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use fedimint_api_client::api::{DynModuleApi, FederationApiExt};
-use fedimint_bolt12_common::bolt12::invoice::{
-    Issuer, Terms, sign, signing_digest, unsigned_invoice,
-};
-use fedimint_bolt12_common::bolt12::{
+use fedimint_bolt12_common::config::Bolt12ClientConfig;
+use fedimint_bolt12_common::endpoint_constants::{NONCE_ENDPOINT, SIGN_ENDPOINT};
+use fedimint_bolt12_common::invoice::{Issuer, Terms, sign, signing_digest, unsigned_invoice};
+use fedimint_bolt12_common::protocol::{
     NonceRequest, NonceResponse, ReceivePolicy, Reservation, SignRequest, quorum,
 };
-use fedimint_bolt12_common::config::Bolt12ClientConfig;
-use fedimint_bolt12_common::endpoint_constants::{BOLT12_NONCE_ENDPOINT, BOLT12_SIGN_ENDPOINT};
 use fedimint_core::PeerId;
 use fedimint_core::module::ApiRequestErased;
 use fedimint_core::secp256k1::Keypair;
@@ -122,7 +120,7 @@ pub async fn sign_invoice(
             timeout(
                 ROUND_TIMEOUT,
                 api.request_single_peer::<NonceResponse>(
-                    BOLT12_NONCE_ENDPOINT.to_owned(),
+                    NONCE_ENDPOINT.to_owned(),
                     ApiRequestErased::new(&nonce_request),
                     *peer,
                 ),
@@ -163,7 +161,7 @@ pub async fn sign_invoice(
             timeout(
                 ROUND_TIMEOUT,
                 api.request_single_peer::<Vec<u8>>(
-                    BOLT12_SIGN_ENDPOINT.to_owned(),
+                    SIGN_ENDPOINT.to_owned(),
                     ApiRequestErased::new(&sign_request),
                     *peer,
                 ),

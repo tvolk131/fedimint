@@ -7,9 +7,17 @@
 
 //! Server module for federated BOLT12 offline receives.
 
-mod bolt12;
+mod api;
+mod consensus;
 pub mod db;
+mod keys;
 mod metrics;
+mod pool;
+mod signer;
+#[cfg(test)]
+mod tests;
+mod transport;
+mod worker;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -47,7 +55,7 @@ use fedimint_core::{
     Amount, NumPeers, NumPeersExt, OutPoint, PeerId, apply, async_trait_maybe_send,
     push_db_key_items, push_db_pair_items,
 };
-use fedimint_logging::LOG_MODULE_LNV2;
+use fedimint_logging::LOG_MODULE_BOLT12;
 use fedimint_server_core::config::{PeerHandleOps, eval_poly_g1};
 use fedimint_server_core::migration::ServerModuleDbMigrationFn;
 use fedimint_server_core::{
@@ -61,12 +69,12 @@ use strum::IntoEnumIterator;
 use tpe::{AggregatePublicKey, PublicKeyShare, SecretKeyShare, derive_pk_share};
 use tracing::trace;
 
-pub use crate::bolt12::keys::{
-    FM_BOLT12_POOL_BATCH_ENV, FM_BOLT12_POOL_TARGET_ENV, FM_ENABLE_FEDERATED_BOLT12_ENV,
-};
 use crate::db::{
     Bolt12ContractPrefix, Bolt12GatewayDesiredVotePrefix, Bolt12GatewayVoteKey, DbKeyPrefix,
     GatewayKey, GatewayPrefix, UnixTimeVoteKey, UnixTimeVotePrefix,
+};
+pub use crate::keys::{
+    FM_BOLT12_POOL_BATCH_ENV, FM_BOLT12_POOL_TARGET_ENV, FM_ENABLE_FEDERATED_BOLT12_ENV,
 };
 use crate::metrics::BOLT12_FUNDED_CONTRACT_SATS;
 
@@ -154,7 +162,7 @@ impl ServerModuleInit for Bolt12Init {
         let cfg: Bolt12ModuleConfig = args.cfg().to_typed()?;
 
         let worker = (cfg.consensus.bolt12.pool_target > 0).then(|| {
-            bolt12::worker::Worker::spawn(
+            worker::Worker::spawn(
                 cfg.clone(),
                 args.our_peer_id(),
                 args.db().clone(),
@@ -178,8 +186,8 @@ impl ServerModuleInit for Bolt12Init {
         args: &ConfigGenModuleArgs,
     ) -> BTreeMap<PeerId, ServerModuleConfig> {
         let polynomial = dealer_polynomial(peers.to_num_peers());
-        let (bolt12_public, bolt12_private) = bolt12::keys::fixture(peers)
-            .expect("Valid federated BOLT12 configuration for guardian count");
+        let (bolt12_public, bolt12_private) =
+            keys::fixture(peers).expect("Valid federated BOLT12 configuration for guardian count");
 
         let tpe_pks = peers
             .iter()
@@ -218,7 +226,7 @@ impl ServerModuleInit for Bolt12Init {
         args: &ConfigGenModuleArgs,
     ) -> anyhow::Result<ServerModuleConfig> {
         let (polynomial, sks) = peers.run_dkg_g1().await?;
-        let (bolt12_public, bolt12_private) = bolt12::keys::generate(peers).await?;
+        let (bolt12_public, bolt12_private) = keys::generate(peers).await?;
 
         let server = Bolt12ModuleConfig {
             consensus: Bolt12ConfigConsensus {
@@ -258,7 +266,7 @@ impl ServerModuleInit for Bolt12Init {
             "Preimage encryption secret key share does not match our public key share"
         );
 
-        bolt12::keys::validate(*identity, &config)?;
+        keys::validate(*identity, &config)?;
 
         Ok(())
     }
@@ -316,8 +324,8 @@ fn dealer_sk(polynomial: &[Scalar], peer: PeerId) -> SecretKeyShare {
 pub struct Bolt12 {
     cfg: Bolt12ModuleConfig,
     our_peer_id: PeerId,
-    signer: tokio::sync::Mutex<bolt12::signer::Signer>,
-    worker: Option<Arc<bolt12::worker::Worker>>,
+    signer: tokio::sync::Mutex<signer::Signer>,
+    worker: Option<Arc<worker::Worker>>,
     db: Database,
 }
 
@@ -365,7 +373,7 @@ impl ServerModule for Bolt12 {
         consensus_item: Bolt12ConsensusItem,
         peer: PeerId,
     ) -> anyhow::Result<()> {
-        trace!(target: LOG_MODULE_LNV2, ?consensus_item, "Processing bolt12 consensus item");
+        trace!(target: LOG_MODULE_BOLT12, ?consensus_item, "Processing bolt12 consensus item");
 
         match consensus_item {
             Bolt12ConsensusItem::UnixTimeVote(vote) => {
@@ -379,30 +387,30 @@ impl ServerModule for Bolt12 {
                 Ok(())
             }
             Bolt12ConsensusItem::GatewayVote { gateway, approve } => {
-                bolt12::process_gateway_vote(dbtx, &self.cfg, peer, gateway, approve).await
+                consensus::process_gateway_vote(dbtx, &self.cfg, peer, gateway, approve).await
             }
             Bolt12ConsensusItem::PoolStart { run } => {
                 let now = self.consensus_unix_time(dbtx).await;
-                bolt12::pool::process_start(dbtx, &self.cfg, run, now).await
+                pool::process_start(dbtx, &self.cfg, run, now).await
             }
             Bolt12ConsensusItem::PoolShares { run, shares } => {
-                bolt12::pool::process_shares(dbtx, &self.cfg, peer, run, shares).await
+                pool::process_shares(dbtx, &self.cfg, peer, run, shares).await
             }
             Bolt12ConsensusItem::PoolAbandon { run } => {
                 let now = self.consensus_unix_time(dbtx).await;
-                bolt12::pool::process_abandon(dbtx, &self.cfg, run, now).await
+                pool::process_abandon(dbtx, &self.cfg, run, now).await
             }
             Bolt12ConsensusItem::PoolAbort { run } => {
                 let now = self.consensus_unix_time(dbtx).await;
-                bolt12::pool::process_abort(dbtx, &self.cfg, peer, run, now).await
+                pool::process_abort(dbtx, &self.cfg, peer, run, now).await
             }
             Bolt12ConsensusItem::PoolEvidence { run, digest } => {
                 let now = self.consensus_unix_time(dbtx).await;
-                bolt12::pool::process_evidence(dbtx, &self.cfg, peer, run, digest, now).await
+                pool::process_evidence(dbtx, &self.cfg, peer, run, digest, now).await
             }
             Bolt12ConsensusItem::PoolVerdict { run, verdict } => {
                 let now = self.consensus_unix_time(dbtx).await;
-                bolt12::pool::process_verdict(dbtx, &self.cfg, peer, run, verdict, now).await
+                pool::process_verdict(dbtx, &self.cfg, peer, run, verdict, now).await
             }
             Bolt12ConsensusItem::Default { variant, .. } => Err(anyhow!(
                 "Received bolt12 consensus item with unknown variant {variant}"
@@ -418,7 +426,7 @@ impl ServerModule for Bolt12 {
     ) -> Result<InputMeta, Bolt12InputError> {
         let Bolt12InputV0::Receive(outpoint, unlock) = input.ensure_v0_ref()?;
 
-        let effect = bolt12::process_input(dbtx, &self.cfg, *outpoint, unlock).await?;
+        let effect = consensus::process_input(dbtx, &self.cfg, *outpoint, unlock).await?;
 
         let fee = self
             .cfg
@@ -446,7 +454,7 @@ impl ServerModule for Bolt12 {
         let output = output.ensure_v0_ref()?;
         let now = self.consensus_unix_time(dbtx).await;
 
-        let effect = bolt12::process_output(dbtx, &self.cfg, output, outpoint, now)
+        let effect = consensus::process_output(dbtx, &self.cfg, output, outpoint, now)
             .await
             .map_err(|e| Bolt12OutputError::Bolt12(e.to_string()))?;
 

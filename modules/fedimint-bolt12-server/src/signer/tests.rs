@@ -2,17 +2,17 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use bls12_381::Scalar;
-use fedimint_bolt12_common::bolt12::invoice::{
-    Issuer, Terms, encode_payment_path, offer_hash, routing_metadata, sign, unsigned_invoice,
-};
-use fedimint_bolt12_common::bolt12::{
-    INVOICE_LIFETIME, NonceRequest, ReceivePolicy, Registration, RegistrationId, Reservation,
-    ReservationId, Sealed, SignRequest, Source, terms_hash,
-};
 use fedimint_bolt12_common::config::{
     Bolt12ConfigConsensus, Bolt12ConfigPrivate, Bolt12ModuleConfig, FeeConsensus,
 };
 use fedimint_bolt12_common::gateway_api::PaymentFee;
+use fedimint_bolt12_common::invoice::{
+    Issuer, Terms, encode_payment_path, offer_hash, routing_metadata, sign, unsigned_invoice,
+};
+use fedimint_bolt12_common::protocol::{
+    INVOICE_LIFETIME, NonceRequest, ReceivePolicy, Registration, RegistrationId, Reservation,
+    ReservationId, Sealed, SignRequest, Source, terms_hash,
+};
 use fedimint_core::bitcoin::Network;
 use fedimint_core::bitcoin::hashes::{Hash, sha256};
 use fedimint_core::config::FederationId;
@@ -38,8 +38,8 @@ use lightning::util::ser::Writeable;
 use rand::rngs::OsRng;
 
 use super::{Approval, MAX_ATTEMPTS, Signer, approve};
-use crate::bolt12::keys;
 use crate::db::{Bolt12RegistrationKey, Bolt12ReservationKey};
+use crate::keys;
 
 const NOW: u64 = 1_700_000_000;
 const AMOUNT_MSATS: u64 = 50_000;

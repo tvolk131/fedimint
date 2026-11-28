@@ -1,15 +1,15 @@
-use fedimint_bolt12_common::bolt12::RegistrationId;
+use fedimint_bolt12_common::protocol::RegistrationId;
 use fedimint_core::bitcoin::hashes::{Hash as _, sha256};
 use fedimint_core::db::mem_impl::MemDatabase;
 use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped as _};
 use fedimint_core::module::registry::ModuleRegistry;
 use fedimint_core::secp256k1::{Keypair, SECP256K1};
 
-use super::{advance_bolt12_stream_cursor, record_rescanned_bolt12_offer};
 use crate::db::{
     Bolt12NextOfferIndexKey, Bolt12OfferKey, Bolt12OfferRecord, Bolt12ReceiveStreamIndexKey,
     Bolt12ReceiveStreamRewindGenKey,
 };
+use crate::offers::{advance_bolt12_stream_cursor, record_rescanned_bolt12_offer};
 
 #[tokio::test]
 async fn cursor_zero_aba_does_not_skip_rescanned_offer() {

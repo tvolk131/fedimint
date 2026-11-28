@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use fedimint_bolt12_common::bolt12::{
-    BLAME_DECAY_RUNS, Blame, Bolt12Output, EVIDENCE_WINDOW, JUDGE_TIMEOUT, POOL_RUN_TIMEOUT,
+use fedimint_bolt12_common::protocol::{
+    BLAME_DECAY_RUNS, Blame, Bolt12OutputV0, EVIDENCE_WINDOW, JUDGE_TIMEOUT, POOL_RUN_TIMEOUT,
     PoolShare, PoolVerdict, Register, Reserve, STICKY_COMMITTEE_RUNS, Sealed, Source,
     pool_share_binding, quorum, terms_hash,
 };
@@ -17,11 +17,11 @@ use mpc::field::{F, point};
 use rand::rngs::OsRng;
 
 use super::{Federation, NOW, Offer, gateway, policy, register};
-use crate::bolt12::pool::{self, pool_len};
 use crate::db::{
     Bolt12BlameKey, Bolt12DisputeKey, Bolt12PoolAbandonedKey, Bolt12PoolRunKey,
     Bolt12ReservationKey,
 };
+use crate::pool::{self, pool_len};
 
 /// Preimages dealt as threshold-two shares to a three-member committee, and
 /// each member's submission.
@@ -248,7 +248,7 @@ async fn pooled_offer(fed: &mut Federation) -> Offer {
     policy.allow_pool = true;
 
     fed.apply(
-        Bolt12Output::Register(Register::new(policy.clone(), &key)),
+        Bolt12OutputV0::Register(Register::new(policy.clone(), &key)),
         NOW,
     )
     .await
@@ -342,7 +342,7 @@ async fn generated_preimages_fill_the_pool_and_pay_out() -> Result<()> {
     let request = reserve_pool(&offer, 0, Amount::from_sats(10_000), &gateway);
     let id = request.reservation_id();
 
-    fed.apply(Bolt12Output::Reserve(request), NOW).await?;
+    fed.apply(Bolt12OutputV0::Reserve(request), NOW).await?;
 
     let reservation = fed
         .db
@@ -365,14 +365,14 @@ async fn generated_preimages_fill_the_pool_and_pay_out() -> Result<()> {
     // The item is gone for everyone else.
     assert!(
         fed.apply(
-            Bolt12Output::Reserve(reserve_pool(&offer, 0, Amount::from_sats(10_000), &gateway)),
+            Bolt12OutputV0::Reserve(reserve_pool(&offer, 0, Amount::from_sats(10_000), &gateway)),
             NOW
         )
         .await
         .is_err()
     );
 
-    let (outpoint, _) = fed.apply(Bolt12Output::Receive(id), NOW + 30).await?;
+    let (outpoint, _) = fed.apply(Bolt12OutputV0::Receive(id), NOW + 30).await?;
     let unlock = fed.unlock(outpoint).await;
 
     assert!(unlock.is_pool());
@@ -407,7 +407,7 @@ async fn pool_reservations_need_consent_no_stock_and_room_for_the_fee() -> Resul
 
     assert!(
         fed.rejection(
-            Bolt12Output::Reserve(reserve_pool(&plain, 0, Amount::from_sats(10_000), &gateway)),
+            Bolt12OutputV0::Reserve(reserve_pool(&plain, 0, Amount::from_sats(10_000), &gateway)),
             NOW
         )
         .await
@@ -427,12 +427,12 @@ async fn pool_reservations_need_consent_no_stock_and_room_for_the_fee() -> Resul
     };
 
     fed.apply(
-        Bolt12Output::Register(Register::new(stocked_policy, &stocked.key)),
+        Bolt12OutputV0::Register(Register::new(stocked_policy, &stocked.key)),
         NOW,
     )
     .await?;
     fed.apply(
-        Bolt12Output::AddStock(fedimint_bolt12_common::bolt12::AddStock::new(
+        Bolt12OutputV0::AddStock(fedimint_bolt12_common::protocol::AddStock::new(
             stocked.id,
             0,
             super::stock(&fed, &stocked, 0, 1),
@@ -444,7 +444,7 @@ async fn pool_reservations_need_consent_no_stock_and_room_for_the_fee() -> Resul
 
     assert!(
         fed.rejection(
-            Bolt12Output::Reserve(reserve_pool(
+            Bolt12OutputV0::Reserve(reserve_pool(
                 &stocked,
                 0,
                 Amount::from_sats(10_000),
@@ -462,7 +462,7 @@ async fn pool_reservations_need_consent_no_stock_and_room_for_the_fee() -> Resul
 
     assert!(
         fed.rejection(
-            Bolt12Output::Reserve(reserve_pool(&pooled, 0, Amount::from_sats(80), &gateway)),
+            Bolt12OutputV0::Reserve(reserve_pool(&pooled, 0, Amount::from_sats(80), &gateway)),
             NOW
         )
         .await
@@ -509,9 +509,9 @@ async fn more_than_f_faulty_members_leave_the_gateway_a_refund() -> Result<()> {
     let request = reserve_pool(&offer, 0, Amount::from_sats(10_000), &gateway);
     let id = request.reservation_id();
 
-    fed.apply(Bolt12Output::Reserve(request), NOW).await?;
+    fed.apply(Bolt12OutputV0::Reserve(request), NOW).await?;
 
-    let (outpoint, _) = fed.apply(Bolt12Output::Receive(id), NOW).await?;
+    let (outpoint, _) = fed.apply(Bolt12OutputV0::Receive(id), NOW).await?;
     let contract = fed.contract(outpoint).await;
 
     assert!(matches!(&contract.sealed, Sealed::Shares { shares, .. } if shares.len() == 2));
@@ -558,9 +558,9 @@ async fn a_wrong_share_is_outvoted_by_the_correct_ones() -> Result<()> {
     let request = reserve_pool(&offer, 1, Amount::from_sats(10_000), &gateway);
     let id = request.reservation_id();
 
-    fed.apply(Bolt12Output::Reserve(request), NOW).await?;
+    fed.apply(Bolt12OutputV0::Reserve(request), NOW).await?;
 
-    let (outpoint, _) = fed.apply(Bolt12Output::Receive(id), NOW).await?;
+    let (outpoint, _) = fed.apply(Bolt12OutputV0::Receive(id), NOW).await?;
     let unlock = fed.unlock(outpoint).await;
 
     assert_eq!(
@@ -940,11 +940,11 @@ async fn evidence_is_revealed_only_for_abandoned_runs_and_only_signed_messages_c
 {
     use fedimint_core::secp256k1::SecretKey;
 
-    use crate::bolt12::transport::message_digest;
-    use crate::bolt12::worker::{evidence_digest, serve_evidence, signed_messages};
     use crate::db::{
         Bolt12PoolLocalRunKey, Bolt12PoolTranscriptKey, LocalRun, RelayEvidence, SignedMessage,
     };
+    use crate::transport::message_digest;
+    use crate::worker::{evidence_digest, serve_evidence, signed_messages};
 
     let mut fed = Federation::new();
     let secrets: Vec<SecretKey> = (0..4).map(|_| SecretKey::new(&mut OsRng)).collect();
@@ -1249,7 +1249,7 @@ async fn adversarial_federation_throughput_under_k_equals_f() -> Result<()> {
 async fn transport_relay_recovers_blocked_link() -> Result<()> {
     use fedimint_core::secp256k1::SecretKey;
 
-    use crate::bolt12::transport::{ChannelLimits, Channels, FetchRequest, verify_packet_envelope};
+    use crate::transport::{ChannelLimits, Channels, FetchRequest, verify_packet_envelope};
 
     let committee = peers(&[0, 1, 2]);
     let limits = ChannelLimits::for_run(3, 1, 4);
@@ -1365,13 +1365,13 @@ fn encrypt_test_packet(
     chunk: u32,
     chunks: u32,
     plaintext: &[u8],
-) -> crate::bolt12::transport::MpcPacket {
+) -> crate::transport::MpcPacket {
     use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
     use chacha20poly1305::{ChaCha20Poly1305, Nonce};
     use fedimint_core::encoding::Encodable as _;
 
-    use crate::bolt12::keys::transport_key;
-    use crate::bolt12::transport::{
+    use crate::keys::transport_key;
+    use crate::transport::{
         MpcPacket, ephemeral_secret, packet_digest, recipient_ephemeral_secret,
     };
 
@@ -1431,10 +1431,10 @@ fn encrypt_test_packet(
 async fn transport_faults_convict_malicious_sender() -> Result<()> {
     use fedimint_core::secp256k1::SecretKey;
 
-    use crate::bolt12::transport::{
+    use crate::db::TransportFault;
+    use crate::transport::{
         ChannelLimits, Channels, MpcPacket, packet_digest, verify_transport_fault_convicts,
     };
-    use crate::db::TransportFault;
 
     let committee = peers(&[0, 1, 2]);
     // Batch 32 permits multiple chunks so multi-chunk and 2-vs-3 conflict tests
@@ -1537,10 +1537,10 @@ async fn transport_faults_convict_malicious_sender() -> Result<()> {
 async fn transport_honest_packets_resist_framing() -> Result<()> {
     use fedimint_core::secp256k1::SecretKey;
 
-    use crate::bolt12::transport::{
+    use crate::db::{BadPacket, TransportFault};
+    use crate::transport::{
         CHUNK, ChannelLimits, Channels, MpcPacket, verify_transport_fault_convicts,
     };
-    use crate::db::{BadPacket, TransportFault};
 
     let committee = peers(&[0, 1, 2]);
     let limits = ChannelLimits::for_run(3, 1, 16);
@@ -1630,8 +1630,8 @@ async fn transport_honest_packets_resist_framing() -> Result<()> {
 async fn per_run_limits_block_oversized_messages_and_cover_max_faults() -> Result<()> {
     use fedimint_core::secp256k1::SecretKey;
 
-    use crate::bolt12::transport::{CHUNK, ChannelLimits, Channels};
-    use crate::bolt12::worker::max_evidence_page_hex;
+    use crate::transport::{CHUNK, ChannelLimits, Channels};
+    use crate::worker::max_evidence_page_hex;
 
     let committee = peers(&[0, 1, 2]);
     let limits = ChannelLimits::for_run(3, 1, 4);
@@ -1697,7 +1697,7 @@ async fn per_run_limits_block_oversized_messages_and_cover_max_faults() -> Resul
 #[tokio::test]
 async fn poisoned_pool_share_blames_culprit_and_rejects_bad_subset_witness() -> Result<()> {
     use fedimint_bolt12_common::Bolt12InputError;
-    use fedimint_bolt12_common::bolt12::Bolt12Unlock;
+    use fedimint_bolt12_common::protocol::Bolt12Unlock;
 
     let mut fed = Federation::new();
     fed.start(0, NOW).await?;
@@ -1721,10 +1721,10 @@ async fn poisoned_pool_share_blames_culprit_and_rejects_bad_subset_witness() -> 
 
     let request = reserve_pool(&offer, 0, Amount::from_sats(10_000), &gw);
     let reservation_id = request.reservation_id();
-    let (_, _) = fed.apply(Bolt12Output::Reserve(request), NOW).await?;
+    let (_, _) = fed.apply(Bolt12OutputV0::Reserve(request), NOW).await?;
 
     let (outpoint, _) = fed
-        .apply(Bolt12Output::Receive(reservation_id), NOW + 30)
+        .apply(Bolt12OutputV0::Receive(reservation_id), NOW + 30)
         .await?;
 
     let Bolt12Unlock::Pool { keys, .. } = fed.unlock(outpoint).await else {
@@ -1758,8 +1758,8 @@ async fn poisoned_pool_share_blames_culprit_and_rejects_bad_subset_witness() -> 
 async fn post_take_equivocation_does_not_overwrite_and_convicts() -> Result<()> {
     use fedimint_core::secp256k1::SecretKey;
 
-    use crate::bolt12::transport::{ChannelLimits, Channels, verify_transport_fault_convicts};
     use crate::db::TransportFault;
+    use crate::transport::{ChannelLimits, Channels, verify_transport_fault_convicts};
 
     let committee = peers(&[0, 1, 2]);
     let limits = ChannelLimits::for_run(3, 1, 4);
@@ -1855,10 +1855,10 @@ async fn post_take_equivocation_does_not_overwrite_and_convicts() -> Result<()> 
 async fn fake_round0_ephemeral_key_convicts_sender_and_protects_honest() -> Result<()> {
     use fedimint_core::secp256k1::SecretKey;
 
-    use crate::bolt12::transport::{
+    use crate::db::BadPacket;
+    use crate::transport::{
         ChannelLimits, Channels, MpcPacket, packet_digest, verify_r0_ephemeral_fault,
     };
-    use crate::db::BadPacket;
 
     let committee = peers(&[0, 1, 2]);
     let limits = ChannelLimits::for_run(3, 1, 4);
@@ -1952,7 +1952,7 @@ async fn verdict_rejects_mixed_culprits_and_disputes() -> Result<()> {
 
 #[tokio::test]
 async fn keys_validate_rejects_duplicate_xonly_and_high_degree() -> Result<()> {
-    use crate::bolt12::keys;
+    use crate::keys;
 
     let make_cfg = |guardians: u16, public, private| {
         let mut fed = Federation::with_guardians(guardians);
@@ -1977,7 +1977,7 @@ async fn keys_validate_rejects_duplicate_xonly_and_high_degree() -> Result<()> {
 
     // pool_batch exceeding MAX_POOL_BATCH must be rejected.
     let (mut public2, privates2) = keys::fixture(&peer_ids)?;
-    public2.pool_batch = fedimint_bolt12_common::bolt12::MAX_POOL_BATCH + 1;
+    public2.pool_batch = fedimint_bolt12_common::protocol::MAX_POOL_BATCH + 1;
     let bad_batch = make_cfg(4, public2, privates2[&PeerId::from(0)].clone());
     assert!(keys::validate(PeerId::from(0), &bad_batch).is_err());
 
@@ -1996,10 +1996,10 @@ async fn keys_validate_rejects_duplicate_xonly_and_high_degree() -> Result<()> {
 
 #[tokio::test]
 async fn serve_evidence_streams_multiple_pages_by_entry() -> Result<()> {
-    use crate::bolt12::worker::{evidence_digest, serve_evidence};
     use crate::db::{
         Bolt12PoolLocalRunKey, Bolt12PoolTranscriptKey, LocalRun, RelayEvidence, SignedMessage,
     };
+    use crate::worker::{evidence_digest, serve_evidence};
 
     let fed = Federation::new();
     fed.start(0, NOW).await?;
@@ -2087,7 +2087,7 @@ async fn funding_reservation_prunes_local_nonce_keys() -> Result<()> {
 
     let request = reserve_pool(&offer, 0, Amount::from_sats(10_000), &gw);
     let reservation_id = request.reservation_id();
-    let (_, _) = fed.apply(Bolt12Output::Reserve(request), NOW).await?;
+    let (_, _) = fed.apply(Bolt12OutputV0::Reserve(request), NOW).await?;
 
     // Seed local FROST nonce tracking rows for this reservation.
     let mut dbtx = fed.db.begin_transaction().await;
@@ -2101,7 +2101,7 @@ async fn funding_reservation_prunes_local_nonce_keys() -> Result<()> {
 
     // Funding consumes the reservation and must prune all local nonce rows.
     let _ = fed
-        .apply(Bolt12Output::Receive(reservation_id), NOW + 30)
+        .apply(Bolt12OutputV0::Receive(reservation_id), NOW + 30)
         .await?;
 
     let mut dbtx = fed.db.begin_transaction_nc().await;
@@ -2128,10 +2128,10 @@ async fn funding_reservation_prunes_local_nonce_keys() -> Result<()> {
 async fn oversized_equivocation_convicts_sender_without_poisoning_evidence() -> Result<()> {
     use fedimint_core::secp256k1::SecretKey;
 
-    use crate::bolt12::transport::{
+    use crate::db::TransportFault;
+    use crate::transport::{
         CHUNK, ChannelLimits, Channels, message_digest, verify_transport_fault_convicts,
     };
-    use crate::db::TransportFault;
 
     let committee = peers(&[0, 1, 2]);
     // Default config: N = 4, f = 1, batch = 4 -> limits.message = 92_441,
@@ -2228,7 +2228,7 @@ async fn oversized_equivocation_convicts_sender_without_poisoning_evidence() -> 
 
 #[tokio::test]
 async fn degree_two_perturbation_cannot_frame_honest_guardians() -> Result<()> {
-    use fedimint_bolt12_common::bolt12::Bolt12Unlock;
+    use fedimint_bolt12_common::protocol::Bolt12Unlock;
     use mpc::field::evaluate;
 
     // N = 7 (f = 2, committee = [0, 1, 2, 3, 4], threshold = 3).
@@ -2288,9 +2288,9 @@ async fn degree_two_perturbation_cannot_frame_honest_guardians() -> Result<()> {
 
     let request = reserve_pool(&offer, 0, Amount::from_sats(10_000), &gw);
     let reservation_id = request.reservation_id();
-    fed.apply(Bolt12Output::Reserve(request), NOW).await?;
+    fed.apply(Bolt12OutputV0::Reserve(request), NOW).await?;
     let (outpoint, _) = fed
-        .apply(Bolt12Output::Receive(reservation_id), NOW + 30)
+        .apply(Bolt12OutputV0::Receive(reservation_id), NOW + 30)
         .await?;
 
     // Aggregate decryption keys from 5 of 7 guardians.

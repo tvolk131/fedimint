@@ -23,7 +23,7 @@ use lightning::offers::offer::Offer;
 use lightning::types::payment::PaymentHash;
 use lightning::util::ser::{BigSize, Readable, Writeable};
 
-use super::{INVOICE_LIFETIME, ReceivePolicy, Reservation, terms_hash};
+use crate::protocol::{INVOICE_LIFETIME, ReceivePolicy, Reservation, terms_hash};
 
 /// Upper bound on an offer, an invoice request or an encoded payment path.
 pub const MAX_BOLT12_BYTES: usize = 16_384;

@@ -12,19 +12,19 @@ use anyhow::{Context as _, Result, ensure};
 use bitcoin::hashes::{Hash as _, sha256};
 use fedimint_api_client::api::{DynModuleApi, FederationApiExt as _};
 use fedimint_bolt12_client::api::Bolt12FederationApi as _;
-use fedimint_bolt12_client::bolt12::Bolt12OfferParams;
+use fedimint_bolt12_client::offers::Bolt12OfferParams;
 use fedimint_bolt12_client::{Bolt12ClientInit, Bolt12ClientModule};
 use fedimint_bolt12_common::Bolt12Output;
-use fedimint_bolt12_common::bolt12::invoice::{encode_payment_path, parse_routing_metadata};
-use fedimint_bolt12_common::bolt12::{
-    Bolt12Output as Bolt12InnerOutput, INVOICE_LIFETIME, Registration, RegistrationId, Reservation,
-    Reserve, Source, terms_hash,
-};
 use fedimint_bolt12_common::endpoint_constants::{
-    BOLT12_DECRYPTION_SHARES_ENDPOINT, BOLT12_MPC_FETCH_ENDPOINT, BOLT12_MPC_RELAY_ENDPOINT,
-    BOLT12_NEXT_POOL_ENDPOINT, BOLT12_SET_GATEWAY_VOTE_ENDPOINT,
+    DECRYPTION_SHARES_ENDPOINT, MPC_FETCH_ENDPOINT, MPC_RELAY_ENDPOINT, NEXT_POOL_ENDPOINT,
+    SET_GATEWAY_VOTE_ENDPOINT,
 };
 use fedimint_bolt12_common::gateway_api::PaymentFee;
+use fedimint_bolt12_common::invoice::{encode_payment_path, parse_routing_metadata};
+use fedimint_bolt12_common::protocol::{
+    Bolt12OutputV0, INVOICE_LIFETIME, Registration, RegistrationId, Reservation, Reserve, Source,
+    terms_hash,
+};
 use fedimint_bolt12_server::Bolt12Init;
 use fedimint_client::secret::{PlainRootSecretStrategy, RootSecretStrategy as _};
 use fedimint_client::transaction::{ClientOutput, ClientOutputBundle, TransactionBuilder};
@@ -39,7 +39,7 @@ use fedimint_core::util::{backoff_util, retry};
 use fedimint_core::{Amount, OutPoint, PeerId, sats};
 use fedimint_dummy_client::{DummyClientInit, DummyClientModule};
 use fedimint_dummy_server::DummyInit;
-use fedimint_gw_bolt12_client::bolt12::signing::{SigningJob, sign_invoice};
+use fedimint_gw_bolt12_client::signing::{SigningJob, sign_invoice};
 use fedimint_testing::federation::FederationTest;
 use fedimint_testing::fixtures::Fixtures;
 use lightning::blinded_path::message::{BlindedMessagePath, MessageContext, OffersContext};
@@ -72,14 +72,13 @@ impl EntropySource for Entropy {
 /// Test federations generate their configuration in-process and read this
 /// switch from the environment. Every test in this binary sets it before
 /// building a federation, and nothing unsets it.
-fn enable_bolt12() {
+fn configure_test_pool() {
     static ENABLE: Once = Once::new();
 
     ENABLE.call_once(|| {
         // SAFETY: runs once, before this test spawns any federation task that
         // reads the environment; other tests block on the `Once` until done.
         unsafe {
-            std::env::set_var("FM_ENABLE_FEDERATED_BOLT12", "1");
             std::env::set_var("FM_BOLT12_POOL_TARGET", "8");
             std::env::set_var("FM_BOLT12_POOL_BATCH", "4");
         }
@@ -87,7 +86,7 @@ fn enable_bolt12() {
 }
 
 fn fixtures() -> Fixtures {
-    enable_bolt12();
+    configure_test_pool();
 
     Fixtures::new_primary(DummyClientInit, DummyInit)
         .with_module(Bolt12ClientInit::default(), Bolt12Init)
@@ -128,18 +127,18 @@ fn ingress_path() -> BlindedMessagePath {
 async fn create_offer(
     bolt12: &Bolt12ClientModule,
     stock: u64,
-) -> Result<(Offer, fedimint_bolt12_client::bolt12::Bolt12Offer)> {
+) -> Result<(Offer, fedimint_bolt12_client::offers::Bolt12Offer)> {
     create_offer_with(bolt12, offer_params(stock)).await
 }
 
 async fn create_offer_with(
     bolt12: &Bolt12ClientModule,
     params: Bolt12OfferParams,
-) -> Result<(Offer, fedimint_bolt12_client::bolt12::Bolt12Offer)> {
+) -> Result<(Offer, fedimint_bolt12_client::offers::Bolt12Offer)> {
     retry(
         "offer registration",
         backoff_util::aggressive_backoff(),
-        || bolt12.create_bolt12_offer(params.clone()),
+        || bolt12.create_offer(params.clone()),
     )
     .await
 }
@@ -243,7 +242,7 @@ impl TestGateway {
                 .await?
                 .with_module(module_id)
                 .request_admin::<()>(
-                    BOLT12_SET_GATEWAY_VOTE_ENDPOINT,
+                    SET_GATEWAY_VOTE_ENDPOINT,
                     ApiRequestErased::new((self.key.public_key(), true)),
                     ApiAuth::new("pass".to_string()),
                 )
@@ -275,7 +274,7 @@ impl TestGateway {
 
     /// Submit a BOLT12 output worth `amount` and wait for the federation's
     /// verdict.
-    async fn submit(&self, output: Bolt12InnerOutput, amount: Amount) -> Result<OutPoint> {
+    async fn submit(&self, output: Bolt12OutputV0, amount: Amount) -> Result<OutPoint> {
         let module_id = self
             .client
             .get_first_instance(&Bolt12ClientModule::kind())
@@ -334,7 +333,7 @@ async fn issue_invoice(gateway: &TestGateway, offer: &Offer, amount: Amount) -> 
         None => {
             let (index, payment_hash) = api
                 .request_current_consensus::<Option<(u64, [u8; 32])>>(
-                    BOLT12_NEXT_POOL_ENDPOINT.to_owned(),
+                    NEXT_POOL_ENDPOINT.to_owned(),
                     ApiRequestErased::new(()),
                 )
                 .await?
@@ -359,7 +358,7 @@ async fn issue_invoice(gateway: &TestGateway, offer: &Offer, amount: Amount) -> 
     let id = reserve.reservation_id();
 
     gateway
-        .submit(Bolt12InnerOutput::Reserve(reserve), Amount::ZERO)
+        .submit(Bolt12OutputV0::Reserve(reserve), Amount::ZERO)
         .await?;
 
     let reservation = api.bolt12_reservation(id).await?.context("reservation")?;
@@ -404,7 +403,7 @@ async fn released_preimage(
     for peer in cfg.tpe_pks.keys().take(3) {
         let peer_shares: Vec<DecryptionKeyShare> = api
             .request_single_peer(
-                BOLT12_DECRYPTION_SHARES_ENDPOINT.to_owned(),
+                DECRYPTION_SHARES_ENDPOINT.to_owned(),
                 ApiRequestErased::new(outpoint),
                 *peer,
             )
@@ -462,12 +461,12 @@ async fn offline_wallet_receives_and_claims_after_restoring_from_seed() -> Resul
         let (offer, registered) = create_offer(&bolt12, 2).await?;
 
         let state = bolt12
-            .bolt12_offer_state(registered.index)
+            .offer_state(registered.index)
             .await?
             .context("offer state")?;
 
         assert_eq!((state.stock_len, state.stock_unused), (2, 2));
-        assert_eq!(bolt12.bolt12_offers().await, vec![registered]);
+        assert_eq!(bolt12.offers().await, vec![registered]);
         assert_eq!(offer.paths().len(), 2);
 
         offer
@@ -511,12 +510,12 @@ async fn offline_wallet_receives_and_claims_after_restoring_from_seed() -> Resul
     // Funding the wrong amount is rejected and releases nothing.
     assert!(
         gateway
-            .submit(Bolt12InnerOutput::Receive(id), net.saturating_sub(sats(1)))
+            .submit(Bolt12OutputV0::Receive(id), net.saturating_sub(sats(1)))
             .await
             .is_err()
     );
 
-    let outpoint = gateway.submit(Bolt12InnerOutput::Receive(id), net).await?;
+    let outpoint = gateway.submit(Bolt12OutputV0::Receive(id), net).await?;
 
     // Funding released the preimage to the gateway, which would now settle
     // the Lightning payment.
@@ -532,7 +531,7 @@ async fn offline_wallet_receives_and_claims_after_restoring_from_seed() -> Resul
     // A funded reservation cannot be funded again.
     assert!(
         gateway
-            .submit(Bolt12InnerOutput::Receive(id), net)
+            .submit(Bolt12OutputV0::Receive(id), net)
             .await
             .is_err()
     );
@@ -544,21 +543,21 @@ async fn offline_wallet_receives_and_claims_after_restoring_from_seed() -> Resul
     await_balance_at_least(&restored, net.saturating_sub(sats(100))).await?;
 
     let bolt12 = restored.get_first_module::<Bolt12ClientModule>()?;
-    let offers = bolt12.bolt12_offers().await;
+    let offers = bolt12.offers().await;
 
     // The federation remembers the registration but not the offer string.
     assert_eq!(offers.len(), 1);
     assert_eq!(offers[0].offer, None);
 
     let state = bolt12
-        .bolt12_offer_state(offers[0].index)
+        .offer_state(offers[0].index)
         .await?
         .context("offer state")?;
 
     assert_eq!((state.stock_len, state.stock_unused), (2, 1));
 
     // A restored wallet derives the same stock secrets, so it can top up.
-    let state = bolt12.add_bolt12_stock(offers[0].index, 3).await?;
+    let state = bolt12.add_stock(offers[0].index, 3).await?;
 
     assert_eq!((state.stock_len, state.stock_unused), (5, 4));
 
@@ -581,7 +580,7 @@ async fn each_invoice_uses_a_fresh_hash_and_unpaid_ones_are_bounded() -> Result<
 
     let mut hashes = std::collections::BTreeSet::new();
 
-    for _ in 0..fedimint_bolt12_common::bolt12::MAX_PENDING_PER_OFFER {
+    for _ in 0..fedimint_bolt12_common::protocol::MAX_PENDING_PER_OFFER {
         let issued = issue_invoice(&gateway, &offer, INVOICE_AMOUNT).await?;
 
         assert!(hashes.insert(issued.reservation.payment_hash));
@@ -596,7 +595,7 @@ async fn each_invoice_uses_a_fresh_hash_and_unpaid_ones_are_bounded() -> Result<
 
     // Each unpaid invoice still consumed a stock item for good.
     let state = bolt12
-        .bolt12_offer_state(registered.index)
+        .offer_state(registered.index)
         .await?
         .context("offer state")?;
 
@@ -628,7 +627,7 @@ async fn signing_works_with_one_guardian_offline() -> Result<()> {
     let net = INVOICE_AMOUNT.saturating_sub(GATEWAY_FEE);
 
     let before = wallet.get_balance_for_btc().await?;
-    let outpoint = gateway.submit(Bolt12InnerOutput::Receive(id), net).await?;
+    let outpoint = gateway.submit(Bolt12OutputV0::Receive(id), net).await?;
 
     assert!(
         released_preimage(&gateway, outpoint, &issued.reservation)
@@ -690,7 +689,7 @@ async fn generated_preimages_take_over_when_stock_runs_out() -> Result<()> {
     let balance = wallet.get_balance_for_btc().await?;
     let net = INVOICE_AMOUNT.saturating_sub(GATEWAY_FEE);
     let id = Reservation::id(second.reservation.registration, second.reservation.source);
-    let outpoint = gateway.submit(Bolt12InnerOutput::Receive(id), net).await?;
+    let outpoint = gateway.submit(Bolt12OutputV0::Receive(id), net).await?;
 
     // Nobody knew the preimage until funding released the shares.
     let preimage = released_preimage(&gateway, outpoint, &second.reservation)
@@ -745,7 +744,7 @@ async fn pool_generation_keeps_working_with_one_guardian_offline() -> Result<()>
     let api = gateway.api()?;
     assert!(
         api.request_single_peer::<Vec<String>>(
-            BOLT12_MPC_FETCH_ENDPOINT.to_owned(),
+            MPC_FETCH_ENDPOINT.to_owned(),
             ApiRequestErased::new("deadbeef"),
             PeerId::from(0),
         )
@@ -754,7 +753,7 @@ async fn pool_generation_keeps_working_with_one_guardian_offline() -> Result<()>
     );
     assert!(
         api.request_single_peer::<Vec<String>>(
-            BOLT12_MPC_RELAY_ENDPOINT.to_owned(),
+            MPC_RELAY_ENDPOINT.to_owned(),
             ApiRequestErased::new("deadbeef"),
             PeerId::from(0),
         )
@@ -776,7 +775,7 @@ async fn pool_generation_keeps_working_with_one_guardian_offline() -> Result<()>
         assert!(matches!(issued.reservation.source, Source::Pool { .. }));
 
         let id = Reservation::id(issued.reservation.registration, issued.reservation.source);
-        let outpoint = gateway.submit(Bolt12InnerOutput::Receive(id), net).await?;
+        let outpoint = gateway.submit(Bolt12OutputV0::Receive(id), net).await?;
 
         let preimage = released_preimage(&gateway, outpoint, &issued.reservation)
             .await?

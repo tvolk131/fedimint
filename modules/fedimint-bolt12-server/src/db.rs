@@ -1,4 +1,4 @@
-use fedimint_bolt12_common::bolt12::{
+use fedimint_bolt12_common::protocol::{
     AbandonedRun, Blame, Pending, PoolItem, PoolRun, PoolShare, PoolVerdict, ReceiveContract,
     Registration, RegistrationId, Reservation, ReservationId, StickyCommittee, StockItem,
     StreamedReceive,
@@ -15,42 +15,42 @@ use tpe::DecryptionKeyShare;
 pub enum DbKeyPrefix {
     UnixTimeVote = 0x01,
     Gateway = 0x02,
-    Bolt12Registration = 0x20,
-    Bolt12RegistrationCount = 0x21,
-    Bolt12Handle = 0x22,
-    Bolt12Recipient = 0x23,
-    Bolt12Expiry = 0x24,
-    Bolt12Stock = 0x25,
-    Bolt12PaymentHash = 0x26,
-    Bolt12Reservation = 0x27,
-    Bolt12OfferPending = 0x28,
-    Bolt12GatewayPending = 0x29,
-    Bolt12GatewayVote = 0x2a,
-    Bolt12GatewayDesiredVote = 0x2b,
-    Bolt12Contract = 0x2c,
-    Bolt12StreamIndex = 0x2d,
-    Bolt12Stream = 0x2e,
-    Bolt12ContractIndex = 0x2f,
-    Bolt12Nonce = 0x30,
-    Bolt12NonceCount = 0x31,
-    Bolt12DecryptionShares = 0x32,
-    Bolt12PoolItem = 0x33,
-    Bolt12PoolNext = 0x34,
-    Bolt12PoolPending = 0x35,
-    Bolt12PoolRun = 0x36,
-    Bolt12PoolRunCount = 0x37,
-    Bolt12PoolSubmission = 0x38,
-    Bolt12PoolLocalRun = 0x39,
-    Bolt12PoolAbandoned = 0x3a,
-    Bolt12PoolVerdict = 0x3b,
-    Bolt12Blame = 0x3c,
-    Bolt12Dispute = 0x3d,
-    Bolt12PoolTranscript = 0x3e,
-    Bolt12PoolLocalVerdict = 0x3f,
-    Bolt12GatewayApprovalCount = 0x40,
-    Bolt12PoolStickyCommittee = 0x41,
-    Bolt12PoolAbort = 0x42,
-    Bolt12PoolRelayEvidence = 0x43,
+    Registration = 0x20,
+    RegistrationCount = 0x21,
+    Handle = 0x22,
+    Recipient = 0x23,
+    Expiry = 0x24,
+    Stock = 0x25,
+    PaymentHash = 0x26,
+    Reservation = 0x27,
+    OfferPending = 0x28,
+    GatewayPending = 0x29,
+    GatewayVote = 0x2a,
+    GatewayDesiredVote = 0x2b,
+    Contract = 0x2c,
+    StreamIndex = 0x2d,
+    Stream = 0x2e,
+    ContractIndex = 0x2f,
+    Nonce = 0x30,
+    NonceCount = 0x31,
+    DecryptionShares = 0x32,
+    PoolItem = 0x33,
+    PoolNext = 0x34,
+    PoolPending = 0x35,
+    PoolRun = 0x36,
+    PoolRunCount = 0x37,
+    PoolSubmission = 0x38,
+    PoolLocalRun = 0x39,
+    PoolAbandoned = 0x3a,
+    PoolVerdict = 0x3b,
+    Blame = 0x3c,
+    Dispute = 0x3d,
+    PoolTranscript = 0x3e,
+    PoolLocalVerdict = 0x3f,
+    GatewayApprovalCount = 0x40,
+    PoolStickyCommittee = 0x41,
+    PoolAbort = 0x42,
+    PoolRelayEvidence = 0x43,
 }
 
 impl std::fmt::Display for DbKeyPrefix {
@@ -98,7 +98,7 @@ pub struct Bolt12RegistrationPrefix;
 impl_db_record!(
     key = Bolt12RegistrationKey,
     value = Registration,
-    db_prefix = DbKeyPrefix::Bolt12Registration,
+    db_prefix = DbKeyPrefix::Registration,
 );
 
 impl_db_lookup!(
@@ -113,7 +113,7 @@ pub struct Bolt12RegistrationCountKey;
 impl_db_record!(
     key = Bolt12RegistrationCountKey,
     value = u64,
-    db_prefix = DbKeyPrefix::Bolt12RegistrationCount,
+    db_prefix = DbKeyPrefix::RegistrationCount,
 );
 
 #[derive(Debug, Encodable, Decodable)]
@@ -122,7 +122,7 @@ pub struct Bolt12HandleKey(pub [u8; 32]);
 impl_db_record!(
     key = Bolt12HandleKey,
     value = RegistrationId,
-    db_prefix = DbKeyPrefix::Bolt12Handle,
+    db_prefix = DbKeyPrefix::Handle,
 );
 
 #[derive(Debug, Encodable, Decodable)]
@@ -131,7 +131,7 @@ pub struct Bolt12RecipientKey(pub PublicKey);
 impl_db_record!(
     key = Bolt12RecipientKey,
     value = RegistrationId,
-    db_prefix = DbKeyPrefix::Bolt12Recipient,
+    db_prefix = DbKeyPrefix::Recipient,
 );
 
 /// Registrations ordered by expiry, so expired ones can be pruned without a
@@ -145,7 +145,7 @@ pub struct Bolt12ExpiryPrefix;
 impl_db_record!(
     key = Bolt12ExpiryKey,
     value = (),
-    db_prefix = DbKeyPrefix::Bolt12Expiry,
+    db_prefix = DbKeyPrefix::Expiry,
 );
 
 impl_db_lookup!(key = Bolt12ExpiryKey, query_prefix = Bolt12ExpiryPrefix);
@@ -160,7 +160,7 @@ pub struct Bolt12StockRegistrationPrefix(pub RegistrationId);
 impl_db_record!(
     key = Bolt12StockKey,
     value = StockItem,
-    db_prefix = DbKeyPrefix::Bolt12Stock,
+    db_prefix = DbKeyPrefix::Stock,
 );
 
 impl_db_lookup!(
@@ -176,7 +176,7 @@ pub struct Bolt12PaymentHashKey(pub [u8; 32]);
 impl_db_record!(
     key = Bolt12PaymentHashKey,
     value = (),
-    db_prefix = DbKeyPrefix::Bolt12PaymentHash,
+    db_prefix = DbKeyPrefix::PaymentHash,
 );
 
 /// Unfunded reservations only: funding removes the row.
@@ -186,7 +186,7 @@ pub struct Bolt12ReservationKey(pub ReservationId);
 impl_db_record!(
     key = Bolt12ReservationKey,
     value = Reservation,
-    db_prefix = DbKeyPrefix::Bolt12Reservation,
+    db_prefix = DbKeyPrefix::Reservation,
     notify_on_modify = true
 );
 
@@ -196,7 +196,7 @@ pub struct Bolt12OfferPendingKey(pub RegistrationId);
 impl_db_record!(
     key = Bolt12OfferPendingKey,
     value = Vec<Pending>,
-    db_prefix = DbKeyPrefix::Bolt12OfferPending,
+    db_prefix = DbKeyPrefix::OfferPending,
 );
 
 #[derive(Debug, Encodable, Decodable)]
@@ -205,7 +205,7 @@ pub struct Bolt12GatewayPendingKey(pub PublicKey);
 impl_db_record!(
     key = Bolt12GatewayPendingKey,
     value = Vec<Pending>,
-    db_prefix = DbKeyPrefix::Bolt12GatewayPending,
+    db_prefix = DbKeyPrefix::GatewayPending,
 );
 
 /// A guardian's approval of a gateway. Only approvals are stored.
@@ -221,7 +221,7 @@ pub struct Bolt12GatewayVotePrefix;
 impl_db_record!(
     key = Bolt12GatewayVoteKey,
     value = bool,
-    db_prefix = DbKeyPrefix::Bolt12GatewayVote,
+    db_prefix = DbKeyPrefix::GatewayVote,
 );
 
 impl_db_lookup!(
@@ -240,7 +240,7 @@ pub struct Bolt12GatewayDesiredVotePrefix;
 impl_db_record!(
     key = Bolt12GatewayDesiredVoteKey,
     value = bool,
-    db_prefix = DbKeyPrefix::Bolt12GatewayDesiredVote,
+    db_prefix = DbKeyPrefix::GatewayDesiredVote,
 );
 
 impl_db_lookup!(
@@ -257,7 +257,7 @@ pub struct Bolt12ContractPrefix;
 impl_db_record!(
     key = Bolt12ContractKey,
     value = ReceiveContract,
-    db_prefix = DbKeyPrefix::Bolt12Contract,
+    db_prefix = DbKeyPrefix::Contract,
     notify_on_modify = true
 );
 
@@ -271,7 +271,7 @@ pub struct Bolt12StreamIndexKey;
 impl_db_record!(
     key = Bolt12StreamIndexKey,
     value = u64,
-    db_prefix = DbKeyPrefix::Bolt12StreamIndex,
+    db_prefix = DbKeyPrefix::StreamIndex,
     notify_on_modify = true
 );
 
@@ -284,7 +284,7 @@ pub struct Bolt12StreamPrefix(pub u64);
 impl_db_record!(
     key = Bolt12StreamKey,
     value = StreamedReceive,
-    db_prefix = DbKeyPrefix::Bolt12Stream,
+    db_prefix = DbKeyPrefix::Stream,
 );
 
 impl_db_lookup!(key = Bolt12StreamKey, query_prefix = Bolt12StreamPrefix);
@@ -295,7 +295,7 @@ pub struct Bolt12ContractIndexKey(pub OutPoint);
 impl_db_record!(
     key = Bolt12ContractIndexKey,
     value = u64,
-    db_prefix = DbKeyPrefix::Bolt12ContractIndex,
+    db_prefix = DbKeyPrefix::ContractIndex,
 );
 
 /// Whether the nonce of a signing attempt has been spent. Local to this
@@ -309,7 +309,7 @@ pub struct Bolt12NonceReservationPrefix(pub ReservationId);
 impl_db_record!(
     key = Bolt12NonceKey,
     value = bool,
-    db_prefix = DbKeyPrefix::Bolt12Nonce,
+    db_prefix = DbKeyPrefix::Nonce,
 );
 
 impl_db_lookup!(
@@ -324,7 +324,7 @@ pub struct Bolt12NonceCountKey(pub ReservationId);
 impl_db_record!(
     key = Bolt12NonceCountKey,
     value = u16,
-    db_prefix = DbKeyPrefix::Bolt12NonceCount,
+    db_prefix = DbKeyPrefix::NonceCount,
 );
 
 /// This guardian's decryption shares for a funded BOLT12 receive, one per
@@ -335,7 +335,7 @@ pub struct Bolt12DecryptionSharesKey(pub OutPoint);
 impl_db_record!(
     key = Bolt12DecryptionSharesKey,
     value = Vec<DecryptionKeyShare>,
-    db_prefix = DbKeyPrefix::Bolt12DecryptionShares,
+    db_prefix = DbKeyPrefix::DecryptionShares,
     notify_on_modify = true
 );
 
@@ -349,7 +349,7 @@ pub struct Bolt12PoolItemPrefix;
 impl_db_record!(
     key = Bolt12PoolItemKey,
     value = PoolItem,
-    db_prefix = DbKeyPrefix::Bolt12PoolItem,
+    db_prefix = DbKeyPrefix::PoolItem,
 );
 impl_db_lookup!(key = Bolt12PoolItemKey, query_prefix = Bolt12PoolItemPrefix);
 
@@ -360,7 +360,7 @@ pub struct Bolt12PoolNextKey;
 impl_db_record!(
     key = Bolt12PoolNextKey,
     value = u64,
-    db_prefix = DbKeyPrefix::Bolt12PoolNext,
+    db_prefix = DbKeyPrefix::PoolNext,
 );
 
 /// Unpaid, unexpired reservations backed by the pool.
@@ -370,7 +370,7 @@ pub struct Bolt12PoolPendingKey;
 impl_db_record!(
     key = Bolt12PoolPendingKey,
     value = Vec<Pending>,
-    db_prefix = DbKeyPrefix::Bolt12PoolPending,
+    db_prefix = DbKeyPrefix::PoolPending,
 );
 
 /// The generation run in progress, if any.
@@ -380,7 +380,7 @@ pub struct Bolt12PoolRunKey;
 impl_db_record!(
     key = Bolt12PoolRunKey,
     value = PoolRun,
-    db_prefix = DbKeyPrefix::Bolt12PoolRun,
+    db_prefix = DbKeyPrefix::PoolRun,
     notify_on_modify = true
 );
 
@@ -391,7 +391,7 @@ pub struct Bolt12PoolRunCountKey;
 impl_db_record!(
     key = Bolt12PoolRunCountKey,
     value = u64,
-    db_prefix = DbKeyPrefix::Bolt12PoolRunCount,
+    db_prefix = DbKeyPrefix::PoolRunCount,
 );
 
 /// A committee member's encrypted shares for the run in progress.
@@ -404,7 +404,7 @@ pub struct Bolt12PoolSubmissionRunPrefix(pub u64);
 impl_db_record!(
     key = Bolt12PoolSubmissionKey,
     value = Vec<PoolShare>,
-    db_prefix = DbKeyPrefix::Bolt12PoolSubmission,
+    db_prefix = DbKeyPrefix::PoolSubmission,
 );
 impl_db_lookup!(
     key = Bolt12PoolSubmissionKey,
@@ -450,7 +450,7 @@ pub struct Bolt12PoolLocalRunPrefix;
 impl_db_record!(
     key = Bolt12PoolLocalRunKey,
     value = LocalRun,
-    db_prefix = DbKeyPrefix::Bolt12PoolLocalRun,
+    db_prefix = DbKeyPrefix::PoolLocalRun,
 );
 impl_db_lookup!(
     key = Bolt12PoolLocalRunKey,
@@ -467,7 +467,7 @@ pub struct Bolt12PoolAbandonedPrefix;
 impl_db_record!(
     key = Bolt12PoolAbandonedKey,
     value = AbandonedRun,
-    db_prefix = DbKeyPrefix::Bolt12PoolAbandoned,
+    db_prefix = DbKeyPrefix::PoolAbandoned,
 );
 impl_db_lookup!(
     key = Bolt12PoolAbandonedKey,
@@ -484,7 +484,7 @@ pub struct Bolt12PoolVerdictRunPrefix(pub u64);
 impl_db_record!(
     key = Bolt12PoolVerdictKey,
     value = PoolVerdict,
-    db_prefix = DbKeyPrefix::Bolt12PoolVerdict,
+    db_prefix = DbKeyPrefix::PoolVerdict,
 );
 impl_db_lookup!(
     key = Bolt12PoolVerdictKey,
@@ -501,7 +501,7 @@ pub struct Bolt12BlamePrefix;
 impl_db_record!(
     key = Bolt12BlameKey,
     value = Blame,
-    db_prefix = DbKeyPrefix::Bolt12Blame,
+    db_prefix = DbKeyPrefix::Blame,
 );
 impl_db_lookup!(key = Bolt12BlameKey, query_prefix = Bolt12BlamePrefix);
 
@@ -515,7 +515,7 @@ pub struct Bolt12DisputePrefix;
 impl_db_record!(
     key = Bolt12DisputeKey,
     value = Blame,
-    db_prefix = DbKeyPrefix::Bolt12Dispute,
+    db_prefix = DbKeyPrefix::Dispute,
 );
 impl_db_lookup!(key = Bolt12DisputeKey, query_prefix = Bolt12DisputePrefix);
 
@@ -540,7 +540,7 @@ pub struct Bolt12PoolTranscriptPrefix;
 impl_db_record!(
     key = Bolt12PoolTranscriptKey,
     value = Vec<Option<SignedMessage>>,
-    db_prefix = DbKeyPrefix::Bolt12PoolTranscript,
+    db_prefix = DbKeyPrefix::PoolTranscript,
 );
 impl_db_lookup!(
     key = Bolt12PoolTranscriptKey,
@@ -558,7 +558,7 @@ pub struct Bolt12PoolLocalVerdictPrefix;
 impl_db_record!(
     key = Bolt12PoolLocalVerdictKey,
     value = PoolVerdict,
-    db_prefix = DbKeyPrefix::Bolt12PoolLocalVerdict,
+    db_prefix = DbKeyPrefix::PoolLocalVerdict,
 );
 impl_db_lookup!(
     key = Bolt12PoolLocalVerdictKey,
@@ -572,7 +572,7 @@ pub struct Bolt12GatewayApprovalCountKey(pub PeerId);
 impl_db_record!(
     key = Bolt12GatewayApprovalCountKey,
     value = u64,
-    db_prefix = DbKeyPrefix::Bolt12GatewayApprovalCount,
+    db_prefix = DbKeyPrefix::GatewayApprovalCount,
 );
 
 /// Proven-good committee reused across consecutive generation runs.
@@ -582,7 +582,7 @@ pub struct Bolt12PoolStickyCommitteeKey;
 impl_db_record!(
     key = Bolt12PoolStickyCommitteeKey,
     value = StickyCommittee,
-    db_prefix = DbKeyPrefix::Bolt12PoolStickyCommittee,
+    db_prefix = DbKeyPrefix::PoolStickyCommittee,
 );
 
 /// A committee member's report that its local execution of a run aborted.
@@ -595,7 +595,7 @@ pub struct Bolt12PoolAbortRunPrefix(pub u64);
 impl_db_record!(
     key = Bolt12PoolAbortKey,
     value = (),
-    db_prefix = DbKeyPrefix::Bolt12PoolAbort,
+    db_prefix = DbKeyPrefix::PoolAbort,
 );
 impl_db_lookup!(
     key = Bolt12PoolAbortKey,
@@ -718,7 +718,7 @@ pub struct Bolt12PoolRelayEvidencePrefix;
 impl_db_record!(
     key = Bolt12PoolRelayEvidenceKey,
     value = RelayEvidence,
-    db_prefix = DbKeyPrefix::Bolt12PoolRelayEvidence,
+    db_prefix = DbKeyPrefix::PoolRelayEvidence,
 );
 impl_db_lookup!(
     key = Bolt12PoolRelayEvidenceKey,

@@ -7,10 +7,11 @@
 //! Federated BOLT12 offline receives: common consensus, config, and gateway
 //! types.
 
-pub mod bolt12;
 pub mod config;
 pub mod endpoint_constants;
 pub mod gateway_api;
+pub mod invoice;
+pub mod protocol;
 
 use std::fmt;
 
@@ -34,7 +35,7 @@ extensible_associated_module_type!(Bolt12Input, Bolt12InputV0, UnknownBolt12Inpu
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize, Encodable, Decodable)]
 pub enum Bolt12InputV0 {
     /// Claim or refund a funded federated BOLT12 receive.
-    Receive(OutPoint, bolt12::Bolt12Unlock),
+    Receive(OutPoint, protocol::Bolt12Unlock),
 }
 
 impl fmt::Display for Bolt12InputV0 {
@@ -43,7 +44,7 @@ impl fmt::Display for Bolt12InputV0 {
     }
 }
 
-pub type Bolt12OutputV0 = bolt12::Bolt12Output;
+pub use crate::protocol::Bolt12OutputV0;
 
 impl fmt::Display for Bolt12OutputV0 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -115,7 +116,7 @@ pub enum Bolt12ConsensusItem {
     /// A committee member's encrypted shares from a finished run.
     PoolShares {
         run: u64,
-        shares: Vec<bolt12::PoolShare>,
+        shares: Vec<protocol::PoolShare>,
     },
     /// Give up on run `run`, which has outlived its timeout.
     PoolAbandon { run: u64 },
@@ -128,7 +129,7 @@ pub enum Bolt12ConsensusItem {
     /// A guardian's finding about abandoned run `run`.
     PoolVerdict {
         run: u64,
-        verdict: bolt12::PoolVerdict,
+        verdict: protocol::PoolVerdict,
     },
     #[encodable_default]
     Default { variant: u64, bytes: Vec<u8> },

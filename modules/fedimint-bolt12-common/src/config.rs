@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tpe::{AggregatePublicKey, PublicKeyShare, SecretKeyShare};
 
 use crate::Bolt12CommonInit;
-use crate::bolt12::{Bolt12Config, Bolt12Output, output_amount_and_fee};
+use crate::protocol::{Bolt12Config, Bolt12OutputV0, output_amount_and_fee};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bolt12ModuleConfig {
@@ -61,7 +61,7 @@ impl Bolt12ClientConfig {
     /// The fee the federation charges for `output`. `declared` is the amount
     /// the client attaches to it, which only a funded BOLT12 receive needs
     /// because its amount is fixed by the reservation, not the output.
-    pub fn output_fee(&self, output: &Bolt12Output, declared: Amount) -> Option<Amount> {
+    pub fn output_fee(&self, output: &Bolt12OutputV0, declared: Amount) -> Option<Amount> {
         output_amount_and_fee(&self.fee_consensus, &self.bolt12, output, declared)
             .map(|(_, fee)| fee)
     }

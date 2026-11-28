@@ -22,7 +22,7 @@ use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use fedimint_api_client::api::{DynModuleApi, FederationApiExt as _};
 use fedimint_bolt12_common::endpoint_constants::{
-    BOLT12_MPC_ENDPOINT, BOLT12_MPC_FETCH_ENDPOINT, BOLT12_MPC_RELAY_ENDPOINT,
+    MPC_ENDPOINT, MPC_FETCH_ENDPOINT, MPC_RELAY_ENDPOINT,
 };
 use fedimint_core::PeerId;
 use fedimint_core::bitcoin::hashes::{Hash as _, sha256};
@@ -37,8 +37,8 @@ use mpc::engine::Transport;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, Semaphore};
 
-use super::keys::transport_key;
 use crate::db::{BadPacket, RelayEvidence, SignedMessage, TransportFault};
+use crate::keys::transport_key;
 
 /// Bytes of the signature appended to each message.
 const SIGNATURE_LEN: usize = 64;
@@ -87,7 +87,7 @@ const RELAY_FETCH_ATTEMPTS: usize = 3;
 
 const RELAY_FETCH_BACKOFF: Duration = Duration::from_millis(250);
 
-/// Timeout for a recipient's `BOLT12_MPC_RELAY_ENDPOINT` RPC, covering the
+/// Timeout for a recipient's `MPC_RELAY_ENDPOINT` RPC, covering the
 /// relay's internal `RELAY_FETCH_ATTEMPTS * ATTEMPT_TIMEOUT` retry budget plus
 /// slack.
 const RELAY_PULL_TIMEOUT: Duration = Duration::from_secs(35);
@@ -1074,7 +1074,7 @@ impl Channels {
             let fetched = fedimint_core::runtime::timeout(
                 ATTEMPT_TIMEOUT,
                 api.request_single_peer::<PacketPage>(
-                    BOLT12_MPC_FETCH_ENDPOINT.to_owned(),
+                    MPC_FETCH_ENDPOINT.to_owned(),
                     ApiRequestErased::new(fetch_req.clone()),
                     request.sender,
                 ),
@@ -1698,7 +1698,7 @@ async fn deliver(api: &DynModuleApi, peer: PeerId, packet: &MpcPacket) {
         let attempt = fedimint_core::runtime::timeout(
             ATTEMPT_TIMEOUT,
             api.request_single_peer::<()>(
-                BOLT12_MPC_ENDPOINT.to_owned(),
+                MPC_ENDPOINT.to_owned(),
                 ApiRequestErased::new(&encoded),
                 peer,
             ),
@@ -1736,7 +1736,7 @@ async fn pull_from_relay(
         let response = fedimint_core::runtime::timeout(
             RELAY_PULL_TIMEOUT,
             api.request_single_peer::<PacketPage>(
-                BOLT12_MPC_RELAY_ENDPOINT.to_owned(),
+                MPC_RELAY_ENDPOINT.to_owned(),
                 ApiRequestErased::new(request),
                 relay,
             ),

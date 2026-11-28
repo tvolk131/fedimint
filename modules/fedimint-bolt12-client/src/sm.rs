@@ -1,4 +1,4 @@
-use fedimint_bolt12_common::bolt12::{Bolt12Unlock, StreamedReceive};
+use fedimint_bolt12_common::protocol::{Bolt12Unlock, StreamedReceive};
 use fedimint_bolt12_common::{Bolt12Input, Bolt12InputV0};
 use fedimint_client_module::DynGlobalClientContext;
 use fedimint_client_module::sm::{ClientSMDatabaseTransaction, State, StateTransition};
@@ -9,7 +9,7 @@ use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::Amounts;
 use fedimint_core::secp256k1::Keypair;
 use fedimint_core::util::FmtCompact;
-use fedimint_logging::LOG_CLIENT_MODULE_LNV2;
+use fedimint_logging::LOG_CLIENT_MODULE_BOLT12;
 use tracing::warn;
 
 use crate::Bolt12ClientContext;
@@ -99,7 +99,7 @@ impl Bolt12ReceiveStateMachine {
             // every restart.
             Err(err) => {
                 warn!(
-                    target: LOG_CLIENT_MODULE_LNV2,
+                    target: LOG_CLIENT_MODULE_BOLT12,
                     err = %err.fmt_compact(),
                     amount = %contract.amount,
                     "Not claiming BOLT12 receive, its amount does not cover the claim fee"

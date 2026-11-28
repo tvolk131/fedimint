@@ -8,9 +8,9 @@ use anyhow::{Context as _, Result, ensure};
 use bitcoin::hashes::{Hash as _, sha256};
 use fedimint_api_client::api::FederationApiExt as _;
 use fedimint_bolt12_client::api::Bolt12FederationApi as _;
-use fedimint_bolt12_client::bolt12::Bolt12OfferParams;
+use fedimint_bolt12_client::offers::Bolt12OfferParams;
 use fedimint_bolt12_client::{Bolt12ClientInit, Bolt12ClientModule};
-use fedimint_bolt12_common::endpoint_constants::BOLT12_SET_GATEWAY_VOTE_ENDPOINT;
+use fedimint_bolt12_common::endpoint_constants::SET_GATEWAY_VOTE_ENDPOINT;
 use fedimint_bolt12_common::gateway_api::PaymentFee;
 use fedimint_bolt12_server::Bolt12Init;
 use fedimint_client::ClientHandleArc;
@@ -52,14 +52,13 @@ impl EntropySource for Entropy {
 
 /// Test federations read this switch from the environment when they
 /// generate their configuration. Nothing in this binary unsets it.
-fn enable_bolt12() {
+fn configure_test_pool() {
     static ENABLE: Once = Once::new();
 
     ENABLE.call_once(|| {
         // SAFETY: runs once, before this test spawns any federation task that
         // reads the environment; other tests block on the `Once` until done.
         unsafe {
-            std::env::set_var("FM_ENABLE_FEDERATED_BOLT12", "1");
             std::env::set_var("FM_BOLT12_POOL_TARGET", "8");
             std::env::set_var("FM_BOLT12_POOL_BATCH", "4");
         }
@@ -67,7 +66,7 @@ fn enable_bolt12() {
 }
 
 fn fixtures() -> Fixtures {
-    enable_bolt12();
+    configure_test_pool();
 
     Fixtures::new_primary(DummyClientInit, DummyInit)
         .with_module(
@@ -102,7 +101,7 @@ async fn approve(
             .await?
             .with_module(module_id)
             .request_admin::<()>(
-                BOLT12_SET_GATEWAY_VOTE_ENDPOINT,
+                SET_GATEWAY_VOTE_ENDPOINT,
                 ApiRequestErased::new((gateway_key, true)),
                 ApiAuth::new("pass".to_string()),
             )
@@ -243,7 +242,7 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
     let (offer, _) = retry(
         "offer registration",
         backoff_util::aggressive_backoff(),
-        || bolt12.create_bolt12_offer(params.clone()),
+        || bolt12.create_offer(params.clone()),
     )
     .await?;
 
@@ -365,11 +364,11 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
     let module = gateway_client.get_first_module::<GatewayClientModuleBolt12>()?;
     let lnv2_module = gateway_client.get_first_module::<GatewayClientModuleV2>()?;
     let funded_res = module
-        .bolt12_reservation_for_hash(payment_hash)
+        .reservation_for_hash(payment_hash)
         .await
         .context("funded reservation present")?;
     module
-        .relay_bolt12_htlc(
+        .relay_htlc(
             funded_res,
             payment_hash,
             fedimint_gw_bolt12_client::IncomingCircuitKey {
@@ -388,7 +387,7 @@ async fn gateway_answers_invoice_requests_and_funds_held_payments() -> Result<()
     // stock item and issues an invoice from the next unused item.
     let registration_id = wallet
         .get_first_module::<Bolt12ClientModule>()?
-        .bolt12_offers()
+        .offers()
         .await
         .first()
         .context("offer record")?

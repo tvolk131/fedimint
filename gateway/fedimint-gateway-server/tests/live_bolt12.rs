@@ -23,9 +23,9 @@ use bitcoincore_rpc::{Client, RpcApi as _};
 use fedimint_api_client::api::FederationApiExt as _;
 use fedimint_bip39::{Bip39RootSecretStrategy, Mnemonic};
 use fedimint_bolt12_client::api::Bolt12FederationApi as _;
-use fedimint_bolt12_client::bolt12::Bolt12OfferParams;
+use fedimint_bolt12_client::offers::Bolt12OfferParams;
 use fedimint_bolt12_client::{Bolt12ClientInit, Bolt12ClientModule};
-use fedimint_bolt12_common::endpoint_constants::BOLT12_SET_GATEWAY_VOTE_ENDPOINT;
+use fedimint_bolt12_common::endpoint_constants::SET_GATEWAY_VOTE_ENDPOINT;
 use fedimint_bolt12_common::gateway_api::PaymentFee;
 use fedimint_bolt12_server::Bolt12Init;
 use fedimint_client::ClientHandleArc;
@@ -56,14 +56,13 @@ use rand::rngs::OsRng;
 const INVOICE_AMOUNT: Amount = Amount::from_sats(20_000);
 const CHANNEL_SATS: u64 = 1_000_000;
 
-fn enable_bolt12() {
+fn configure_test_pool() {
     static ENABLE: Once = Once::new();
 
     ENABLE.call_once(|| {
         // SAFETY: runs once, before this test spawns any federation task that
         // reads the environment.
         unsafe {
-            std::env::set_var("FM_ENABLE_FEDERATED_BOLT12", "1");
             std::env::set_var("FM_BOLT12_POOL_TARGET", "8");
             std::env::set_var("FM_BOLT12_POOL_BATCH", "4");
         }
@@ -216,7 +215,7 @@ fn payer_node(dir: &Path, bitcoind: &Bitcoind) -> Result<Arc<ldk_node::Node>> {
 }
 
 fn fixtures() -> Fixtures {
-    enable_bolt12();
+    configure_test_pool();
 
     Fixtures::new_primary(DummyClientInit, DummyInit)
         .with_module(Bolt12ClientInit::default(), Bolt12Init)
@@ -236,7 +235,7 @@ async fn approve(
             .await?
             .with_module(module_id)
             .request_admin::<()>(
-                BOLT12_SET_GATEWAY_VOTE_ENDPOINT,
+                SET_GATEWAY_VOTE_ENDPOINT,
                 ApiRequestErased::new((gateway_key, true)),
                 ApiAuth::new("pass".to_string()),
             )
@@ -538,7 +537,7 @@ async fn payer_pays_a_federated_offer_over_lightning() -> Result<()> {
     let (offer, _) = retry(
         "offer registration",
         backoff_util::aggressive_backoff(),
-        || bolt12.create_bolt12_offer(params.clone()),
+        || bolt12.create_offer(params.clone()),
     )
     .await?;
 

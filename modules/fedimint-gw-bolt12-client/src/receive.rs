@@ -6,21 +6,18 @@
 //! free, and funding happens only for a held payment whose hash and amount
 //! match an invoice this gateway issued.
 
-mod receive_sm;
-pub mod signing;
-
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result, ensure};
 use bitcoin::hashes::sha256;
-use fedimint_bolt12_common::bolt12::invoice::encode_payment_path;
-use fedimint_bolt12_common::bolt12::{
-    Bolt12Output, ReceivePolicy, RegistrationId, Reservation, ReservationId, Reserve, Source,
+use fedimint_bolt12_common::invoice::encode_payment_path;
+use fedimint_bolt12_common::protocol::{
+    Bolt12OutputV0, ReceivePolicy, RegistrationId, Reservation, ReservationId, Reserve, Source,
     reservation_is_economical, terms_hash,
 };
-use fedimint_bolt12_common::{Bolt12CommonInit, Bolt12Output as Bolt12ModuleOutput};
+use fedimint_bolt12_common::{Bolt12CommonInit, Bolt12Output};
 use fedimint_client_module::module::OutPointRange;
 use fedimint_client_module::transaction::{
     ClientOutput, ClientOutputBundle, ClientOutputSM, TransactionBuilder,
@@ -36,10 +33,10 @@ use lightning::blinded_path::payment::BlindedPaymentPath;
 use lightning::offers::invoice::Bolt12Invoice;
 use lightning::util::ser::Writeable;
 
-pub use self::receive_sm::{Bolt12ReceiveSMState, Bolt12ReceiveStateMachine};
-use self::signing::{SigningJob, sign_invoice};
 use crate::api::GatewayBolt12FederationApi;
 use crate::complete_sm::IncomingCircuitKey;
+pub use crate::receive_sm::{Bolt12ReceiveSMState, Bolt12ReceiveStateMachine};
+use crate::signing::{SigningJob, sign_invoice};
 use crate::{
     GatewayClientModuleBolt12, GatewayClientStateMachinesBolt12, GatewayOperationMetaBolt12,
     GatewayOperationRoleBolt12, IncomingRelayPlan, RelayIncomingHtlcError,
@@ -203,7 +200,7 @@ impl GatewayClientModuleBolt12 {
     /// Fails if the offer is unknown, expired, voided or out of stock, if the
     /// terms violate the recipient's policy, if this gateway is not approved
     /// or over its allowance, or if a quorum of guardians does not sign.
-    pub async fn issue_bolt12_invoice<F, Fut>(
+    pub async fn issue_invoice<F, Fut>(
         &self,
         request: Bolt12InvoiceRequest,
         payment_path: F,
@@ -462,7 +459,7 @@ impl GatewayClientModuleBolt12 {
                 let id = reserve.reservation_id();
 
                 if let Err(error) = self
-                    .submit_bolt12_output(Bolt12Output::Reserve(reserve))
+                    .submit_bolt12_output(Bolt12OutputV0::Reserve(reserve))
                     .await
                 {
                     last_error = Some(error);
@@ -494,13 +491,13 @@ impl GatewayClientModuleBolt12 {
     }
 
     /// Submit an output that moves no funds and wait for it to be accepted.
-    async fn submit_bolt12_output(&self, output: Bolt12Output) -> Result<()> {
+    async fn submit_bolt12_output(&self, output: Bolt12OutputV0) -> Result<()> {
         let operation_id = OperationId::new_random();
 
         let outputs = self
             .client_ctx
             .make_client_outputs(ClientOutputBundle::new_no_sm(vec![ClientOutput {
-                output: Bolt12ModuleOutput::V0(output),
+                output: Bolt12Output::V0(output),
                 amounts: Amounts::ZERO,
             }]));
 
@@ -524,10 +521,7 @@ impl GatewayClientModuleBolt12 {
 
     /// The reservation behind a payment hash, if this gateway issued a
     /// federated BOLT12 invoice for it.
-    pub async fn bolt12_reservation_for_hash(
-        &self,
-        payment_hash: sha256::Hash,
-    ) -> Option<Reservation> {
+    pub async fn reservation_for_hash(&self, payment_hash: sha256::Hash) -> Option<Reservation> {
         use bitcoin::hashes::Hash;
 
         self.client_ctx
@@ -585,8 +579,8 @@ impl GatewayClientModuleBolt12 {
         let contract = reservation.contract();
         let refund_keypair = self.keypair;
 
-        let client_output = ClientOutput::<Bolt12ModuleOutput> {
-            output: Bolt12ModuleOutput::V0(Bolt12Output::Receive(id)),
+        let client_output = ClientOutput::<Bolt12Output> {
+            output: Bolt12Output::V0(Bolt12OutputV0::Receive(id)),
             amounts: Amounts::new_bitcoin(contract.amount),
         };
         let client_output_sm = ClientOutputSM::<GatewayClientStateMachinesBolt12> {
@@ -616,7 +610,7 @@ impl GatewayClientModuleBolt12 {
         Ok(TransactionBuilder::new().with_outputs(outputs))
     }
 
-    pub async fn relay_bolt12_htlc(
+    pub async fn relay_htlc(
         &self,
         reservation: Reservation,
         payment_hash: sha256::Hash,

@@ -9,16 +9,16 @@ use std::time::Duration;
 
 use anyhow::{Context as _, ensure};
 use bitcoin::hashes::{Hash as _, sha256};
-use fedimint_bolt12_common::bolt12::INVOICE_LIFETIME;
-use fedimint_bolt12_common::bolt12::invoice::{is_routing_metadata, parse_routing_metadata};
 use fedimint_bolt12_common::gateway_api::{Bolt12Ingress, PaymentFee};
+use fedimint_bolt12_common::invoice::{is_routing_metadata, parse_routing_metadata};
+use fedimint_bolt12_common::protocol::INVOICE_LIFETIME;
 use fedimint_core::config::FederationId;
 use fedimint_core::task::{TaskGroup, timeout};
 use fedimint_core::time::duration_since_epoch;
 use fedimint_core::util::FmtCompact as _;
 use fedimint_core::{Amount, crit};
 use fedimint_gateway_server_db::{GatewayDbtxNcExt as _, PaymentHashOwner, PaymentHashProtocol};
-use fedimint_gw_bolt12_client::bolt12::{Bolt12InvoiceRequest, Bolt12PaymentPathError};
+use fedimint_gw_bolt12_client::receive::{Bolt12InvoiceRequest, Bolt12PaymentPathError};
 use fedimint_gw_bolt12_client::{GatewayClientModuleBolt12, IncomingCircuitKey};
 use fedimint_lightning::bolt12::{Bolt12Request, Bolt12RequestFilter};
 use fedimint_lightning::{
@@ -302,7 +302,7 @@ impl Gateway {
         };
 
         let invoice = match module
-            .issue_bolt12_invoice(
+            .issue_invoice(
                 Bolt12InvoiceRequest {
                     handle,
                     invoice_request: invoice_request.encode(),
@@ -334,7 +334,7 @@ impl Gateway {
                     .collect();
                 for hash in all_claimed {
                     // Only release if no reservation was persisted for this hash.
-                    if module.bolt12_reservation_for_hash(hash).await.is_none() {
+                    if module.reservation_for_hash(hash).await.is_none() {
                         self.release_bolt12_hash(federation_id, hash).await;
                     }
                 }
@@ -355,26 +355,6 @@ impl Gateway {
         federation_id: FederationId,
         payment_hash: sha256::Hash,
     ) -> anyhow::Result<()> {
-        // Also screen legacy BOLT12 reservations persisted before the unified
-        // `PaymentHashOwner` table existed.
-        let clients = self.federation_manager.read().await.clients();
-        for client in clients {
-            let Ok(module) = client
-                .value()
-                .get_first_module::<GatewayClientModuleBolt12>()
-            else {
-                continue;
-            };
-
-            ensure!(
-                module
-                    .bolt12_reservation_for_hash(payment_hash)
-                    .await
-                    .is_none(),
-                "An invoice was already issued for this payment hash"
-            );
-        }
-
         let expires_at_secs = duration_since_epoch()
             .as_secs()
             .saturating_add(INVOICE_LIFETIME)
@@ -445,10 +425,7 @@ impl Gateway {
             )));
         };
 
-        let Some(reservation) = module
-            .bolt12_reservation_for_hash(htlc_request.payment_hash)
-            .await
-        else {
+        let Some(reservation) = module.reservation_for_hash(htlc_request.payment_hash).await else {
             observe("unmatched");
             return Err(PublicGatewayError::Unexpected(anyhow::anyhow!(
                 "Not a federated BOLT12 payment"
@@ -467,7 +444,7 @@ impl Gateway {
             .map(|info| info.block_height);
 
         if let Err(relay_err) = module
-            .relay_bolt12_htlc(
+            .relay_htlc(
                 reservation,
                 htlc_request.payment_hash,
                 IncomingCircuitKey {

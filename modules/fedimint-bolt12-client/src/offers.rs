@@ -5,21 +5,17 @@
 //! offer's index, so a wallet restored from its seed can find and claim its
 //! receives and extend its stock without any local state.
 
-mod sm;
-#[cfg(test)]
-mod tests;
-
 use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
-use fedimint_bolt12_common::bolt12::invoice::{offer_hash, routing_metadata};
-use fedimint_bolt12_common::bolt12::{
-    AddStock, Bolt12Output, Bolt12Unlock, MAX_STOCK, MAX_STOCK_BATCH, ReceivePolicy, Register,
+use fedimint_bolt12_common::gateway_api::{Bolt12Ingress, PaymentFee};
+use fedimint_bolt12_common::invoice::{offer_hash, routing_metadata};
+use fedimint_bolt12_common::protocol::{
+    AddStock, Bolt12OutputV0, Bolt12Unlock, MAX_STOCK, MAX_STOCK_BATCH, ReceivePolicy, Register,
     Registration, RegistrationId, Source, StockItem, StreamedReceive,
 };
-use fedimint_bolt12_common::gateway_api::{Bolt12Ingress, PaymentFee};
-use fedimint_bolt12_common::{Bolt12CommonInit, Bolt12Output as Bolt12ModuleOutput};
+use fedimint_bolt12_common::{Bolt12CommonInit, Bolt12Output};
 use fedimint_client_module::OperationAlreadyExistsError;
 use fedimint_client_module::transaction::{ClientOutput, ClientOutputBundle, TransactionBuilder};
 use fedimint_core::bitcoin::hashes::sha256;
@@ -30,7 +26,7 @@ use fedimint_core::secp256k1::{Keypair, PublicKey, SECP256K1};
 use fedimint_core::util::{FmtCompact as _, SafeUrl};
 use fedimint_core::{Amount, runtime};
 use fedimint_derive_secret::{ChildId, DerivableSecret};
-use fedimint_logging::LOG_CLIENT_MODULE_LNV2;
+use fedimint_logging::LOG_CLIENT_MODULE_BOLT12;
 use futures::StreamExt;
 use lightning::blinded_path::message::BlindedMessagePath;
 use lightning::offers::offer::{Offer, OfferBuilder};
@@ -38,12 +34,12 @@ use serde::{Deserialize, Serialize};
 use tpe::{aggregate_dk_shares, derive_agg_dk};
 use tracing::warn;
 
-pub use self::sm::{Bolt12ReceiveSMState, Bolt12ReceiveStateMachine};
 use crate::api::Bolt12FederationApi;
 use crate::db::{
     Bolt12NextOfferIndexKey, Bolt12OfferKey, Bolt12OfferPrefix, Bolt12OfferRecord,
     Bolt12ReceiveStreamIndexKey, Bolt12ReceiveStreamRewindGenKey,
 };
+pub use crate::sm::{Bolt12ReceiveSMState, Bolt12ReceiveStateMachine};
 use crate::{Bolt12ClientModule, Bolt12ClientStateMachines, Bolt12OperationMeta};
 
 /// Offer indices past the last known one whose claim keys the wallet still
@@ -142,7 +138,7 @@ impl Bolt12ClientModule {
     /// Pass the returned message paths as [`Bolt12OfferParams::ingress`], and
     /// set [`Bolt12OfferParams::max_gateway_fee`] to at least the highest
     /// returned fee so that every listed gateway accepts the offer.
-    pub async fn bolt12_gateways(&self, gateways: &[SafeUrl]) -> Vec<Bolt12Ingress> {
+    pub async fn ingress_gateways(&self, gateways: &[SafeUrl]) -> Vec<Bolt12Ingress> {
         let mut usable = Vec::new();
 
         for gateway in gateways {
@@ -173,10 +169,7 @@ impl Bolt12ClientModule {
     /// Register a reusable BOLT12 offer and stock it with single-use
     /// preimages. The offer keeps receiving while this wallet is offline until
     /// it expires or its stock runs out.
-    pub async fn create_bolt12_offer(
-        &self,
-        params: Bolt12OfferParams,
-    ) -> Result<(Offer, Bolt12Offer)> {
+    pub async fn create_offer(&self, params: Bolt12OfferParams) -> Result<(Offer, Bolt12Offer)> {
         let bolt12 = &self.cfg.bolt12;
 
         ensure!(
@@ -248,7 +241,7 @@ impl Bolt12ClientModule {
 
         self.submit_bolt12_setup(
             registration,
-            Bolt12Output::Register(Register::new(policy, &secrets.claim_key)),
+            Bolt12OutputV0::Register(Register::new(policy, &secrets.claim_key)),
         )
         .await?;
 
@@ -273,7 +266,7 @@ impl Bolt12ClientModule {
             .await
             .map_err(|err| anyhow::anyhow!("failed to persist BOLT12 offer: {err}"))?;
 
-        self.add_bolt12_stock(index, params.stock).await?;
+        self.add_stock(index, params.stock).await?;
 
         Ok((
             offer,
@@ -287,7 +280,7 @@ impl Bolt12ClientModule {
 
     /// Upload `count` more single-use preimages for an offer. Returns the
     /// offer's registration as the federation then sees it.
-    pub async fn add_bolt12_stock(&self, offer_index: u64, count: u64) -> Result<Registration> {
+    pub async fn add_stock(&self, offer_index: u64, count: u64) -> Result<Registration> {
         let secrets = OfferSecrets::derive(&self.bolt12_secret, offer_index);
 
         let (registration, state) = self
@@ -330,7 +323,7 @@ impl Bolt12ClientModule {
 
             self.submit_bolt12_setup(
                 registration,
-                Bolt12Output::AddStock(AddStock::new(
+                Bolt12OutputV0::AddStock(AddStock::new(
                     registration,
                     start,
                     items,
@@ -349,14 +342,8 @@ impl Bolt12ClientModule {
             .context("The offer expired while stock was being added")
     }
 
-    /// The federation's Lightning configuration, including the fees and the
-    /// signing key of federated BOLT12 receives if they are enabled.
-    pub fn lightning_config(&self) -> &fedimint_bolt12_common::config::Bolt12ClientConfig {
-        &self.cfg
-    }
-
     /// The offers this wallet knows it registered.
-    pub async fn bolt12_offers(&self) -> Vec<Bolt12Offer> {
+    pub async fn offers(&self) -> Vec<Bolt12Offer> {
         self.client_ctx
             .module_db()
             .begin_transaction_nc()
@@ -374,7 +361,7 @@ impl Bolt12ClientModule {
 
     /// The federation's current view of one of our offers, including how much
     /// unused stock it has left.
-    pub async fn bolt12_offer_state(&self, offer_index: u64) -> Result<Option<Registration>> {
+    pub async fn offer_state(&self, offer_index: u64) -> Result<Option<Registration>> {
         let secrets = OfferSecrets::derive(&self.bolt12_secret, offer_index);
 
         Ok(self
@@ -410,14 +397,14 @@ impl Bolt12ClientModule {
     async fn submit_bolt12_setup(
         &self,
         registration: RegistrationId,
-        output: Bolt12Output,
+        output: Bolt12OutputV0,
     ) -> Result<()> {
         let operation_id = OperationId::new_random();
 
         let outputs = self
             .client_ctx
             .make_client_outputs(ClientOutputBundle::new_no_sm(vec![ClientOutput {
-                output: Bolt12ModuleOutput::V0(output),
+                output: Bolt12Output::V0(output),
                 amounts: Amounts::ZERO,
             }]));
 
@@ -611,7 +598,7 @@ impl Bolt12ClientModule {
 
         if let Err(err) = dbtx.commit_tx_result().await {
             warn!(
-                target: LOG_CLIENT_MODULE_LNV2,
+                target: LOG_CLIENT_MODULE_BOLT12,
                 err = %err.fmt_compact(),
                 "Could not store BOLT12 claims; retrying the batch"
             );
@@ -627,7 +614,7 @@ impl Bolt12ClientModule {
     ) -> Option<(OperationId, Bolt12OperationMeta, Bolt12ClientStateMachines)> {
         let Some(unlock) = self.bolt12_unlock(offer_index, &receive).await else {
             warn!(
-                target: LOG_CLIENT_MODULE_LNV2,
+                target: LOG_CLIENT_MODULE_BOLT12,
                 outpoint = %receive.outpoint,
                 "Ignoring BOLT12 receive whose preimage we cannot release"
             );
@@ -642,7 +629,7 @@ impl Bolt12ClientModule {
             .await
         {
             warn!(
-                target: LOG_CLIENT_MODULE_LNV2,
+                target: LOG_CLIENT_MODULE_BOLT12,
                 amount = %receive.contract.amount,
                 "Ignoring BOLT12 receive, its amount does not cover the claim fee"
             );
@@ -780,7 +767,7 @@ pub fn bolt12_payment_hash(receive: &StreamedReceive) -> sha256::Hash {
 /// monotonic `Bolt12ReceiveStreamRewindGenKey` increment, using bounded
 /// conflict retries via `Database::autocommit`. Returns `true` if a new
 /// `Bolt12OfferKey` row was inserted.
-async fn record_rescanned_bolt12_offer(
+pub(crate) async fn record_rescanned_bolt12_offer(
     db: &fedimint_core::db::Database,
     index: u64,
     active_offer: Option<(RegistrationId, PublicKey)>,
@@ -851,7 +838,7 @@ async fn record_rescanned_bolt12_offer(
 /// value-comparing optimistic DB backends (`MemDatabase`, `redb`) always raise
 /// a `WriteConflict` if a concurrent recovery/rescan commits a rewind (even
 /// `0 -> 0`) while this transaction is open.
-async fn advance_bolt12_stream_cursor(
+pub(crate) async fn advance_bolt12_stream_cursor(
     dbtx: &mut fedimint_core::db::DatabaseTransaction<'_>,
     stream_index: u64,
     seen_next: u64,

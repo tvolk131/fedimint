@@ -7,18 +7,20 @@
 //! User wallet client module for federated BOLT12 offline receives.
 
 pub mod api;
-pub mod bolt12;
 #[cfg(feature = "cli")]
 mod cli;
 pub mod db;
 pub mod events;
+pub mod offers;
+pub mod sm;
+#[cfg(test)]
+mod tests;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use api::Bolt12FederationApi;
-use bolt12::{Bolt12ReceiveOperationMeta, Bolt12ReceiveStateMachine, Bolt12SetupOperationMeta};
 use fedimint_api_client::api::DynModuleApi;
 use fedimint_bolt12_common::config::Bolt12ClientConfig;
 use fedimint_bolt12_common::gateway_api::{GatewayConnection, RealGatewayConnection};
@@ -42,7 +44,8 @@ use fedimint_core::util::{FmtCompact as _, SafeUrl};
 use fedimint_core::{PeerId, apply, async_trait_maybe_send};
 use fedimint_derive_secret::{ChildId, DerivableSecret};
 use fedimint_ln_common::client::GatewayApi;
-use fedimint_logging::LOG_CLIENT_MODULE_LNV2;
+use fedimint_logging::LOG_CLIENT_MODULE_BOLT12;
+use offers::{Bolt12ReceiveOperationMeta, Bolt12ReceiveStateMachine, Bolt12SetupOperationMeta};
 use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 use tracing::warn;
@@ -220,7 +223,7 @@ impl Bolt12ClientModule {
                 let mut backoff = Duration::from_secs(1);
                 while let Err(err) = module.recover_bolt12_offers().await {
                     warn!(
-                        target: LOG_CLIENT_MODULE_LNV2,
+                        target: LOG_CLIENT_MODULE_BOLT12,
                         err = %err.fmt_compact(),
                         "Could not look for previously registered BOLT12 offers; retrying"
                     );

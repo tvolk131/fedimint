@@ -1461,8 +1461,8 @@ impl Gateway {
             return "cancel";
         }
 
-        // Pre-upgrade legacy BOLT12 fallback: only attempted when no durable
-        // `PaymentHashOwner` record exists at all.
+        // Fallback for a held BOLT12 payment whose `PaymentHashOwner` row has
+        // already been pruned after retention.
         if self
             .try_handle_lightning_payment_bolt12(&payment_request, lightning_context, None)
             .await
@@ -3944,24 +3944,6 @@ impl Gateway {
                 )));
             }
         };
-
-        // Also reject any payment hash already claimed by a BOLT12
-        // reservation persisted before `PaymentHashOwner` existed.
-        let clients = self.federation_manager.read().await.clients();
-        for client in clients {
-            if let Ok(module) = client
-                .value()
-                .get_first_module::<fedimint_gw_bolt12_client::GatewayClientModuleBolt12>()
-                && module
-                    .bolt12_reservation_for_hash(payment_hash)
-                    .await
-                    .is_some()
-            {
-                return Err(PublicGatewayError::LNv2(LNv2Error::IncomingPayment(
-                    "PaymentHash is already registered".to_string(),
-                )));
-            }
-        }
 
         // Reserve the payment hash in the database before requesting the
         // invoice so a replayed payment hash is rejected without creating any

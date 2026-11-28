@@ -1,8 +1,8 @@
 use std::ffi;
 
 use clap::Parser;
-use fedimint_bolt12_common::bolt12::{MAX_POOL_TARGET, Registration, RegistrationId};
 use fedimint_bolt12_common::gateway_api::PaymentFee;
+use fedimint_bolt12_common::protocol::{MAX_POOL_TARGET, Registration, RegistrationId};
 use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::time::duration_since_epoch;
 use fedimint_core::util::SafeUrl;
@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::Bolt12ClientModule;
 use crate::api::Bolt12FederationApi;
-use crate::bolt12::Bolt12OfferParams;
+use crate::offers::Bolt12OfferParams;
 
 #[cfg(test)]
 mod tests;
@@ -182,7 +182,7 @@ pub(crate) async fn handle_cli_command(
         }
         Opts::ListOffers => handle_list_offers(bolt12).await,
         Opts::AddStock { offer_index, count } => {
-            let registration = bolt12.add_bolt12_stock(offer_index, count).await?;
+            let registration = bolt12.add_stock(offer_index, count).await?;
             Ok(serde_json::json!({
                 "index": offer_index,
                 "added": count,
@@ -378,7 +378,7 @@ async fn handle_create_offer(
     max_gateway_fee: Option<PaymentFee>,
 ) -> anyhow::Result<Value> {
     let urls = resolve_gateway_urls(bolt12, gateways).await?;
-    let approved_ingress = bolt12.bolt12_gateways(&urls).await;
+    let approved_ingress = bolt12.ingress_gateways(&urls).await;
 
     anyhow::ensure!(
         !approved_ingress.is_empty(),
@@ -401,7 +401,7 @@ async fn handle_create_offer(
 
     let gateways_used = paths.len();
     let (offer, created) = bolt12
-        .create_bolt12_offer(Bolt12OfferParams {
+        .create_offer(Bolt12OfferParams {
             ingress: paths,
             description,
             expires_at,
@@ -424,10 +424,10 @@ async fn handle_create_offer(
 }
 
 async fn handle_list_offers(bolt12: &Bolt12ClientModule) -> anyhow::Result<Value> {
-    let local = bolt12.bolt12_offers().await;
+    let local = bolt12.offers().await;
     let mut out = Vec::with_capacity(local.len());
     for entry in local {
-        let state = bolt12.bolt12_offer_state(entry.index).await?;
+        let state = bolt12.offer_state(entry.index).await?;
         out.push(Bolt12OfferSummary {
             index: entry.index,
             registration: entry.registration,

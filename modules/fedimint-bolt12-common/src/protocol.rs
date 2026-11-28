@@ -3,8 +3,6 @@
 //! See `docs/federated_bolt12.md`. Consensus pins opaque invoice terms by hash
 //! and never parses BOLT12 messages; guardians validate them when signing.
 
-pub mod invoice;
-
 use std::collections::BTreeMap;
 
 use bitcoin::hashes::{Hash, sha256};
@@ -838,7 +836,7 @@ impl Reserve {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
-pub enum Bolt12Output {
+pub enum Bolt12OutputV0 {
     Register(Register),
     AddStock(AddStock),
     Reserve(Reserve),
@@ -904,12 +902,12 @@ impl Bolt12Config {
 pub fn output_amount_and_fee(
     fees: &FeeConsensus,
     config: &Bolt12Config,
-    output: &Bolt12Output,
+    output: &Bolt12OutputV0,
     receive_amount: Amount,
 ) -> Option<(Amount, Amount)> {
     match output {
-        Bolt12Output::Register(..) => Some((Amount::ZERO, config.registration_fee)),
-        Bolt12Output::AddStock(add) => Some((
+        Bolt12OutputV0::Register(..) => Some((Amount::ZERO, config.registration_fee)),
+        Bolt12OutputV0::AddStock(add) => Some((
             Amount::ZERO,
             Amount::from_msats(
                 config
@@ -918,8 +916,8 @@ pub fn output_amount_and_fee(
                     .checked_mul(u64::try_from(add.items.len()).ok()?)?,
             ),
         )),
-        Bolt12Output::Reserve(..) => Some((Amount::ZERO, Amount::ZERO)),
-        Bolt12Output::Receive(..) => Some((
+        Bolt12OutputV0::Reserve(..) => Some((Amount::ZERO, Amount::ZERO)),
+        Bolt12OutputV0::Receive(..) => Some((
             receive_amount,
             fees.fee(receive_amount).checked_add(config.receive_fee)?,
         )),

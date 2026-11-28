@@ -12,7 +12,7 @@ use fedimint_api_client::api::{
     DynModuleApi, IModuleFederationApi, IRawFederationApi, ServerError, ServerResult,
 };
 use fedimint_bolt12_common::endpoint_constants::{
-    BOLT12_MPC_ENDPOINT, BOLT12_MPC_FETCH_ENDPOINT, BOLT12_MPC_RELAY_ENDPOINT,
+    MPC_ENDPOINT, MPC_FETCH_ENDPOINT, MPC_RELAY_ENDPOINT,
 };
 use fedimint_connectors::{DynGuaridianConnection, PeerStatus};
 use fedimint_core::bitcoin::hashes::{Hash as _, sha256};
@@ -27,7 +27,7 @@ use mpc::engine::Params;
 use mpc::replay::{Evidence, judge};
 use rand::rngs::OsRng;
 
-use crate::bolt12::transport::{
+use crate::transport::{
     ApiTransport, ChannelLimits, Channels, PacketPage, decode_fetch_request, decode_packet,
     decode_relay_request,
 };
@@ -88,7 +88,7 @@ impl IRawFederationApi for RelayMeshApi {
         let hex: String = serde_json::from_value(params.params.clone()).map_err(api_err)?;
 
         match method {
-            BOLT12_MPC_ENDPOINT => {
+            MPC_ENDPOINT => {
                 let packet = decode_packet(&hex).map_err(api_err)?;
                 if self.fault.block_direct == Some((packet.sender, peer_id)) {
                     return Err(api_err("direct link blocked"));
@@ -96,7 +96,7 @@ impl IRawFederationApi for RelayMeshApi {
                 target.receive(&packet).map_err(api_err)?;
                 Ok(serde_json::Value::Null)
             }
-            BOLT12_MPC_FETCH_ENDPOINT => {
+            MPC_FETCH_ENDPOINT => {
                 self.fetch_hits.fetch_add(1, Ordering::Relaxed);
                 let req = decode_fetch_request(&hex).map_err(api_err)?;
                 if self.fault.refuse_fetch == Some((peer_id, req.recipient)) {
@@ -112,7 +112,7 @@ impl IRawFederationApi for RelayMeshApi {
                 };
                 serde_json::to_value(encoded).map_err(api_err)
             }
-            BOLT12_MPC_RELAY_ENDPOINT => {
+            MPC_RELAY_ENDPOINT => {
                 self.relay_hits.fetch_add(1, Ordering::Relaxed);
                 let req = decode_relay_request(&hex).map_err(api_err)?;
                 let self_api: DynModuleApi = Self {
@@ -384,7 +384,7 @@ async fn api_transport_relay_witnesses_convict_silent_sender_end_to_end() -> Res
 async fn relay_fetch_rejects_premature_framing_and_clears_recovered_witness() -> Result<()> {
     use fedimint_core::secp256k1::Keypair;
 
-    use crate::bolt12::transport::RelayRequest;
+    use crate::transport::RelayRequest;
 
     let committee: Vec<PeerId> = (0..3u16).map(PeerId::from).collect();
     let secrets: Vec<SecretKey> = (0..3).map(|_| SecretKey::new(&mut OsRng)).collect();
@@ -545,7 +545,7 @@ impl IRawFederationApi for TarpitMeshApi {
         let hex: String = serde_json::from_value(params.params.clone()).map_err(api_err)?;
 
         match method {
-            BOLT12_MPC_ENDPOINT => {
+            MPC_ENDPOINT => {
                 let packet = decode_packet(&hex).map_err(api_err)?;
                 if packet.sender == PeerId::from(0) && peer_id == PeerId::from(1) {
                     return Err(api_err("direct 0 -> 1 blocked"));
@@ -553,7 +553,7 @@ impl IRawFederationApi for TarpitMeshApi {
                 target.receive(&packet).map_err(api_err)?;
                 Ok(serde_json::Value::Null)
             }
-            BOLT12_MPC_FETCH_ENDPOINT => {
+            MPC_FETCH_ENDPOINT => {
                 let req = decode_fetch_request(&hex).map_err(api_err)?;
                 let (total_chunks, packets) = target.serve_packets(&req).map_err(api_err)?;
                 let encoded = PacketPage {
@@ -565,7 +565,7 @@ impl IRawFederationApi for TarpitMeshApi {
                 };
                 serde_json::to_value(encoded).map_err(api_err)
             }
-            BOLT12_MPC_RELAY_ENDPOINT => {
+            MPC_RELAY_ENDPOINT => {
                 if peer_id == PeerId::from(2) {
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     let garbage = PacketPage {
@@ -748,7 +748,7 @@ impl IRawFederationApi for DeliverOnFinalAttemptApi {
         method: &str,
         _params: &ApiRequestErased,
     ) -> ServerResult<serde_json::Value> {
-        if method == BOLT12_MPC_FETCH_ENDPOINT
+        if method == MPC_FETCH_ENDPOINT
             && self.attempts.fetch_add(1, Ordering::Relaxed) == 2
             && let Ok(sent) = self
                 .ch0
@@ -816,14 +816,8 @@ async fn pre_publication_relay_fetch_failure_never_records_witness() -> Result<(
         &keys,
     )?;
     let signer1 = fedimint_core::secp256k1::Keypair::from_secret_key(SECP256K1, &secrets[1]);
-    let req0 = crate::bolt12::transport::RelayRequest::new(
-        0,
-        PeerId::from(0),
-        PeerId::from(1),
-        0,
-        0,
-        &signer1,
-    );
+    let req0 =
+        crate::transport::RelayRequest::new(0, PeerId::from(0), PeerId::from(1), 0, 0, &signer1);
 
     let api: DynModuleApi = DeliverOnFinalAttemptApi {
         peers: committee.iter().copied().collect(),

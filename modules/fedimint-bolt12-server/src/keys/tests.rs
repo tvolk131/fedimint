@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 use bls12_381::{G1Projective, G2Projective, Scalar};
-use fedimint_bolt12_common::bolt12::quorum;
+use fedimint_bolt12_common::protocol::quorum;
 use fedimint_core::{NumPeers, PeerId};
 use fedimint_server_core::config::PeerHandleOps;
 use frost_secp256k1_tr as frost;

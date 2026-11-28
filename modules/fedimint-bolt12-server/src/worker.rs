@@ -16,11 +16,11 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use fedimint_api_client::api::{DynModuleApi, FederationApiExt as _};
-use fedimint_bolt12_common::bolt12::{
+use fedimint_bolt12_common::config::Bolt12ModuleConfig;
+use fedimint_bolt12_common::endpoint_constants::MPC_EVIDENCE_ENDPOINT;
+use fedimint_bolt12_common::protocol::{
     AbandonedRun, POOL_RUN_TIMEOUT, PoolRun, PoolShare, PoolVerdict, pool_share_binding,
 };
-use fedimint_bolt12_common::config::Bolt12ModuleConfig;
-use fedimint_bolt12_common::endpoint_constants::BOLT12_MPC_EVIDENCE_ENDPOINT;
 use fedimint_core::bitcoin::hashes::{Hash as _, sha256};
 use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::encoding::{Decodable, Encodable};
@@ -30,7 +30,7 @@ use fedimint_core::secp256k1::schnorr::Signature;
 use fedimint_core::secp256k1::{Keypair, Message, PublicKey, SECP256K1};
 use fedimint_core::task::{TaskGroup, sleep};
 use fedimint_core::{NumPeersExt as _, PeerId, runtime};
-use fedimint_logging::LOG_MODULE_LNV2;
+use fedimint_logging::LOG_MODULE_BOLT12;
 use futures::StreamExt as _;
 use futures::future::join_all;
 use mpc::direct;
@@ -41,11 +41,6 @@ use rand::rngs::OsRng;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
-use super::transport::{
-    ApiTransport, CHUNK, ChannelLimits, Channels, FetchRequest, MAX_FAULT_CIPHERTEXT_LEN,
-    MAX_RELAY_WITNESSES, MpcPacket, RelayRequest, verify_message, verify_r0_ephemeral_fault,
-    verify_transport_fault_convicts,
-};
 use crate::db::{
     Bolt12PoolAbandonedKey, Bolt12PoolAbandonedPrefix, Bolt12PoolLocalRunKey,
     Bolt12PoolLocalRunPrefix, Bolt12PoolLocalVerdictKey, Bolt12PoolLocalVerdictPrefix,
@@ -54,6 +49,11 @@ use crate::db::{
     RelayEvidence, SignedMessage, UnixTimeVotePrefix,
 };
 use crate::metrics::BOLT12_POOL_RUN_DURATION_SECONDS;
+use crate::transport::{
+    ApiTransport, CHUNK, ChannelLimits, Channels, FetchRequest, MAX_FAULT_CIPHERTEXT_LEN,
+    MAX_RELAY_WITNESSES, MpcPacket, RelayRequest, verify_message, verify_r0_ephemeral_fault,
+    verify_transport_fault_convicts,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -295,7 +295,7 @@ impl Worker {
         task_group.spawn_cancellable("bolt12 preimage generation", async move {
             loop {
                 if let Err(err) = this.tick(&gen_cfg, me, &gen_db, &gen_api).await {
-                    warn!(target: LOG_MODULE_LNV2, err = %format!("{err:#}"), "Preimage generation failed");
+                    warn!(target: LOG_MODULE_BOLT12, err = %format!("{err:#}"), "Preimage generation failed");
                 }
 
                 sleep(POLL_INTERVAL).await;
@@ -307,7 +307,7 @@ impl Worker {
         task_group.spawn_cancellable("bolt12 abandoned run judge", async move {
             loop {
                 if let Err(err) = judge_abandoned(&cfg, me, &db, &api).await {
-                    warn!(target: LOG_MODULE_LNV2, err = %format!("{err:#}"), "Judging an abandoned run failed");
+                    warn!(target: LOG_MODULE_BOLT12, err = %format!("{err:#}"), "Judging an abandoned run failed");
                 }
 
                 sleep(POLL_INTERVAL).await;
@@ -400,7 +400,7 @@ impl Worker {
 
         dbtx.commit_tx_result().await?;
 
-        info!(target: LOG_MODULE_LNV2, run = active.run, "Starting a preimage generation run");
+        info!(target: LOG_MODULE_BOLT12, run = active.run, "Starting a preimage generation run");
 
         let bolt12 = &cfg.consensus.bolt12;
         let private = &cfg.private.bolt12;
@@ -456,7 +456,7 @@ impl Worker {
     ) -> Result<()> {
         match outcome {
             RunOutcome::Completed(submission, _transport) => {
-                info!(target: LOG_MODULE_LNV2, run, "Finished a preimage generation run");
+                info!(target: LOG_MODULE_BOLT12, run, "Finished a preimage generation run");
 
                 // Publish our shares immediately so consensus does not wait on
                 // slow final-round direct sends, while keeping channels and
@@ -491,7 +491,7 @@ impl Worker {
                 }
             }
             RunOutcome::Aborted(err) => {
-                warn!(target: LOG_MODULE_LNV2, run, err = %format!("{err:#}"), "Preimage generation run aborted");
+                warn!(target: LOG_MODULE_BOLT12, run, err = %format!("{err:#}"), "Preimage generation run aborted");
 
                 // Freeze receive/relay before persisting evidence so our
                 // commitment matches what we serve, while `outbox_channels`
@@ -501,7 +501,7 @@ impl Worker {
                 save_evidence(db, run, &seed, None, channels).await?;
             }
             RunOutcome::ConsensusEnded => {
-                warn!(target: LOG_MODULE_LNV2, run, "Consensus ended the run");
+                warn!(target: LOG_MODULE_BOLT12, run, "Consensus ended the run");
 
                 *self.channels.lock().expect("not poisoned") = None;
 
@@ -838,7 +838,7 @@ async fn fetch_evidence_page(
         let fetched = runtime::timeout(
             EVIDENCE_PAGE_TIMEOUT,
             api.request_single_peer::<String>(
-                BOLT12_MPC_EVIDENCE_ENDPOINT.to_owned(),
+                MPC_EVIDENCE_ENDPOINT.to_owned(),
                 ApiRequestErased::new(req.clone()),
                 member,
             ),
@@ -1045,7 +1045,7 @@ async fn judge_abandoned(
 
         let verdict = verdict(cfg, me, db, api, &abandoned).await?;
 
-        info!(target: LOG_MODULE_LNV2, run, ?verdict, "Judged an abandoned preimage generation run");
+        info!(target: LOG_MODULE_BOLT12, run, ?verdict, "Judged an abandoned preimage generation run");
 
         let mut dbtx = db.begin_transaction().await;
 
@@ -1219,7 +1219,7 @@ fn evaluate_verdict(
                 })
             }
             Some(_) => {
-                warn!(target: LOG_MODULE_LNV2, run = run.run, %member, "Evidence does not match its commitment");
+                warn!(target: LOG_MODULE_BOLT12, run = run.run, %member, "Evidence does not match its commitment");
                 None
             }
             None => None,
@@ -1271,7 +1271,7 @@ async fn verdict(
             match fetch_evidence(db, api, me, &signing_key, member, run, limits, max_rounds).await {
                 Ok(data) => (member, Some((digest, data))),
                 Err(err) => {
-                    warn!(target: LOG_MODULE_LNV2, run = run.run, %member, err = %format!("{err:#}"), "Could not fetch evidence");
+                    warn!(target: LOG_MODULE_BOLT12, run = run.run, %member, err = %format!("{err:#}"), "Could not fetch evidence");
                     (member, None)
                 }
             }

@@ -1,18 +1,17 @@
 //! Read-only views of BOLT12 consensus state, plus the admin endpoint through
 //! which a guardian sets its gateway vote.
 
-use fedimint_bolt12_common::bolt12::{
+use fedimint_bolt12_common::endpoint_constants::{
+    AWAIT_RECEIVES_ENDPOINT, CONTRACT_ENDPOINT, DECRYPTION_SHARES_ENDPOINT,
+    GATEWAY_APPROVED_ENDPOINT, MPC_ENDPOINT, MPC_EVIDENCE_ENDPOINT, MPC_FETCH_ENDPOINT,
+    MPC_RELAY_ENDPOINT, NEXT_POOL_ENDPOINT, NEXT_STOCK_ENDPOINT, NONCE_ENDPOINT,
+    POOL_ITEMS_ENDPOINT, RECIPIENT_USED_ENDPOINT, REGISTRATION_BY_HANDLE_ENDPOINT,
+    REGISTRATION_BY_RECIPIENT_ENDPOINT, RESERVATION_ENDPOINT, SET_GATEWAY_VOTE_ENDPOINT,
+    SIGN_ENDPOINT, STOCK_ITEMS_ENDPOINT,
+};
+use fedimint_bolt12_common::protocol::{
     NonceRequest, NonceResponse, ReceiveContract, Registration, RegistrationId, Reservation,
     ReservationId, SignRequest, StockItem, StreamedReceive,
-};
-use fedimint_bolt12_common::endpoint_constants::{
-    BOLT12_AWAIT_RECEIVES_ENDPOINT, BOLT12_CONTRACT_ENDPOINT, BOLT12_DECRYPTION_SHARES_ENDPOINT,
-    BOLT12_GATEWAY_APPROVED_ENDPOINT, BOLT12_MPC_ENDPOINT, BOLT12_MPC_EVIDENCE_ENDPOINT,
-    BOLT12_MPC_FETCH_ENDPOINT, BOLT12_MPC_RELAY_ENDPOINT, BOLT12_NEXT_POOL_ENDPOINT,
-    BOLT12_NEXT_STOCK_ENDPOINT, BOLT12_NONCE_ENDPOINT, BOLT12_POOL_ITEMS_ENDPOINT,
-    BOLT12_RECIPIENT_USED_ENDPOINT, BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
-    BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT, BOLT12_RESERVATION_ENDPOINT,
-    BOLT12_SET_GATEWAY_VOTE_ENDPOINT, BOLT12_SIGN_ENDPOINT, BOLT12_STOCK_ITEMS_ENDPOINT,
 };
 use fedimint_core::OutPoint;
 use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
@@ -24,7 +23,6 @@ use fedimint_core::secp256k1::PublicKey;
 use futures::StreamExt;
 use tpe::DecryptionKeyShare;
 
-use super::{signer, transport, worker};
 use crate::Bolt12;
 use crate::db::{
     Bolt12ContractKey, Bolt12DecryptionSharesKey, Bolt12GatewayDesiredVoteKey, Bolt12HandleKey,
@@ -32,6 +30,7 @@ use crate::db::{
     Bolt12ReservationKey, Bolt12StockKey, Bolt12StockRegistrationPrefix, Bolt12StreamIndexKey,
     Bolt12StreamKey,
 };
+use crate::{signer, transport, worker};
 
 /// Largest batch of receives returned by one stream request.
 const MAX_RECEIVES_BATCH: usize = 128;
@@ -82,7 +81,7 @@ impl Bolt12 {
     fn bolt12_registration_endpoints() -> Vec<ApiEndpoint<Self>> {
         vec![
             public_api_endpoint! {
-                BOLT12_REGISTRATION_BY_HANDLE_ENDPOINT,
+                REGISTRATION_BY_HANDLE_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Bolt12, context, handle: [u8; 32]| -> Option<(RegistrationId, Registration)> {
                     let db = context.db();
@@ -92,7 +91,7 @@ impl Bolt12 {
                 }
             },
             public_api_endpoint! {
-                BOLT12_REGISTRATION_BY_RECIPIENT_ENDPOINT,
+                REGISTRATION_BY_RECIPIENT_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Bolt12, context, claim_pk: PublicKey| -> Option<(RegistrationId, Registration)> {
                     let db = context.db();
@@ -102,7 +101,7 @@ impl Bolt12 {
                 }
             },
             public_api_endpoint! {
-                BOLT12_RECIPIENT_USED_ENDPOINT,
+                RECIPIENT_USED_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Bolt12, context, claim_pk: PublicKey| -> bool {
                     Ok(context
@@ -115,7 +114,7 @@ impl Bolt12 {
                 }
             },
             public_api_endpoint! {
-                BOLT12_NEXT_STOCK_ENDPOINT,
+                NEXT_STOCK_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Bolt12, context, id: RegistrationId| -> Option<(u64, StockItem)> {
                     let db = context.db();
@@ -132,7 +131,7 @@ impl Bolt12 {
                 }
             },
             public_api_endpoint! {
-                BOLT12_STOCK_ITEMS_ENDPOINT,
+                STOCK_ITEMS_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Bolt12, context, params: (RegistrationId, u64)| -> Vec<(u64, StockItem)> {
                     let (id, min_index) = params;
@@ -156,7 +155,7 @@ impl Bolt12 {
     fn bolt12_receive_and_gateway_endpoints() -> Vec<ApiEndpoint<Self>> {
         vec![
             public_api_endpoint! {
-                BOLT12_RESERVATION_ENDPOINT,
+                RESERVATION_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Bolt12, context, id: ReservationId| -> Option<Reservation> {
                     let db = context.db();
@@ -165,7 +164,7 @@ impl Bolt12 {
                 }
             },
             public_api_endpoint! {
-                BOLT12_CONTRACT_ENDPOINT,
+                CONTRACT_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Bolt12, context, outpoint: OutPoint| -> Option<ReceiveContract> {
                     let db = context.db();
@@ -174,7 +173,7 @@ impl Bolt12 {
                 }
             },
             public_api_endpoint! {
-                BOLT12_AWAIT_RECEIVES_ENDPOINT,
+                AWAIT_RECEIVES_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Bolt12, context, params: (u64, usize)| -> (Vec<StreamedReceive>, u64) {
                     if params.1 == 0 || params.1 > MAX_RECEIVES_BATCH {
@@ -187,17 +186,17 @@ impl Bolt12 {
                 }
             },
             public_api_endpoint! {
-                BOLT12_GATEWAY_APPROVED_ENDPOINT,
+                GATEWAY_APPROVED_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |module: &Bolt12, context, gateway: PublicKey| -> bool {
                     let db = context.db();
                     let mut dbtx = db.begin_transaction_nc().await;
 
-                    Ok(super::gateway_is_approved(&mut dbtx, &module.cfg, gateway).await)
+                    Ok(crate::consensus::gateway_is_approved(&mut dbtx, &module.cfg, gateway).await)
                 }
             },
             admin_api_endpoint! {
-                BOLT12_SET_GATEWAY_VOTE_ENDPOINT,
+                SET_GATEWAY_VOTE_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Bolt12, context, params: (PublicKey, bool)| -> () {
                     let db = context.db();
@@ -217,7 +216,7 @@ impl Bolt12 {
     pub(crate) fn bolt12_pool_endpoints() -> Vec<ApiEndpoint<Self>> {
         vec![
             public_api_endpoint! {
-                BOLT12_NEXT_POOL_ENDPOINT,
+                NEXT_POOL_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Bolt12, context, _params: ()| -> Option<(u64, [u8; 32])> {
                     let db = context.db();
@@ -230,7 +229,7 @@ impl Bolt12 {
                 }
             },
             public_api_endpoint! {
-                BOLT12_POOL_ITEMS_ENDPOINT,
+                POOL_ITEMS_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Bolt12, context, min_index: u64| -> Vec<(u64, [u8; 32])> {
                     let db = context.db();
@@ -248,7 +247,7 @@ impl Bolt12 {
                 }
             },
             public_api_endpoint! {
-                BOLT12_DECRYPTION_SHARES_ENDPOINT,
+                DECRYPTION_SHARES_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |_module: &Bolt12, context, outpoint: OutPoint| -> Vec<DecryptionKeyShare> {
                     // Long-polls like the LNv2 share endpoint: the shares are
@@ -263,7 +262,7 @@ impl Bolt12 {
     fn bolt12_mpc_endpoints() -> Vec<ApiEndpoint<Self>> {
         vec![
             public_api_endpoint! {
-                BOLT12_MPC_ENDPOINT,
+                MPC_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |module: &Bolt12, _context, packet: String| -> () {
                     let worker = module
@@ -277,7 +276,7 @@ impl Bolt12 {
                 }
             },
             public_api_endpoint! {
-                BOLT12_MPC_FETCH_ENDPOINT,
+                MPC_FETCH_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |module: &Bolt12, _context, request: String| -> transport::PacketPage {
                     let worker = module
@@ -301,7 +300,7 @@ impl Bolt12 {
                 }
             },
             public_api_endpoint! {
-                BOLT12_MPC_RELAY_ENDPOINT,
+                MPC_RELAY_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |module: &Bolt12, _context, request: String| -> transport::PacketPage {
                     let worker = module
@@ -326,7 +325,7 @@ impl Bolt12 {
                 }
             },
             public_api_endpoint! {
-                BOLT12_MPC_EVIDENCE_ENDPOINT,
+                MPC_EVIDENCE_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |module: &Bolt12, context, request: String| -> String {
                     let bolt12 = &module.cfg.consensus.bolt12;
@@ -364,7 +363,7 @@ impl Bolt12 {
         let mut endpoints = Self::bolt12_mpc_endpoints();
         endpoints.extend([
             public_api_endpoint! {
-                BOLT12_NONCE_ENDPOINT,
+                NONCE_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |module: &Bolt12, context, request: NonceRequest| -> NonceResponse {
                     let db = context.db();
@@ -385,7 +384,7 @@ impl Bolt12 {
                 }
             },
             public_api_endpoint! {
-                BOLT12_SIGN_ENDPOINT,
+                SIGN_ENDPOINT,
                 ApiVersion::new(0, 0),
                 async |module: &Bolt12, context, request: SignRequest| -> Vec<u8> {
                     let db = context.db();

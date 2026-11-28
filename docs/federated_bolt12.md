@@ -282,14 +282,14 @@ time.
   Malicious members can make a run abort but cannot change its output or learn
   `r`.
 - **Transport and relay fallback.** Members exchange messages through
-  `bolt12_mpc`. Each message is Schnorr-signed by its sender, split into
+  `mpc`. Each message is Schnorr-signed by its sender, split into
   chunks, encrypted with ChaCha20-Poly1305 under an ephemeral ECDH key derived
   deterministically from the sender's run seed (providing forward secrecy while
   live and deterministic verification after abandonment), and outer-signed with
   an `envelope_sig`. If direct delivery stalls past `RELAY_TRIGGER` (10 s), the
   recipient sends a signed `RelayRequest` to other committee members
-  (`bolt12_mpc_relay`), which pull the opaque encrypted chunks from the sender
-  via a signed `FetchRequest` (`bolt12_mpc_fetch`), verify `envelope_sig`, and
+  (`mpc_relay`), which pull the opaque encrypted chunks from the sender
+  via a signed `FetchRequest` (`mpc_fetch`), verify `envelope_sig`, and
   forward them—or record a relay witness if the sender refuses.
 - **Durability.** Before sending anything, a member records the run and the
   seed all its randomness comes from. A restarted member does not rejoin; the
@@ -329,7 +329,7 @@ can never be used, the run can be replayed.
    messages it received together with its relay witnesses and any
    envelope-signed packets that failed AEAD decryption. If consensus abandons
    the run, the member proposes `Bolt12PoolEvidence { run, digest }` within
-   `EVIDENCE_WINDOW` (90 s) and serves them through `bolt12_mpc_evidence`,
+   `EVIDENCE_WINDOW` (90 s) and serves them through `mpc_evidence`,
    which refuses to reveal anything about a run that has not been abandoned.
    Once every committee member has committed evidence, the window closes early.
 2. **Judging.** Once the evidence window closes, every guardian fetches the
@@ -373,7 +373,7 @@ consensus only releases decryption shares once a receive is funded.
 - `POST /bolt12_ingress` with a federation id returns the gateway's blinded
   onion-message path, its reservation key and its receive fee, or `null` when
   it does not serve federated BOLT12 offers for that federation. Wallets use
-  `LightningClientModule::bolt12_gateways` to collect these from several
+  `Bolt12ClientModule::ingress_gateways` to collect these from several
   gateways and drop the ones the federation has not approved.
 - The Lightning node hands invoice requests whose offer metadata carries the
   routing prefix to the gateway instead of answering them itself. The gateway
